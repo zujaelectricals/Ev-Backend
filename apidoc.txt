@@ -1,0 +1,1429 @@
+================================================================================
+                    EV DISTRIBUTION PLATFORM - API DOCUMENTATION
+================================================================================
+
+Base URL: http://localhost:8000/api
+Authentication: JWT Bearer Token (except where noted)
+
+================================================================================
+                            AUTHENTICATION APIs
+================================================================================
+Super User: EVAdmin && EVAdmin@123
+1. SEND OTP
+   Method: POST
+   URL: /api/auth/send-otp/
+   Authentication: Not Required
+   Description: Send OTP to user's email or mobile number
+   
+   Request Body:
+   {
+     "identifier": "user@example.com",  // Email or mobile number
+     "otp_type": "email"                 // "email" or "mobile"
+   }
+   
+   Response (200 OK):
+   {
+     "message": "OTP sent to user@example.com"
+   }
+   
+   Error Response (400):
+   {
+     "identifier": ["Invalid email format"],
+     "otp_type": ["Invalid choice"]
+   }
+   
+   Rate Limit: 5 requests per minute per IP
+
+
+2. VERIFY OTP & LOGIN
+   Method: POST
+   URL: /api/auth/verify-otp/
+   Authentication: Not Required
+   Description: Verify OTP and login user. Returns JWT tokens.
+   
+   Request Body:
+   {
+     "identifier": "user@example.com",
+     "otp_code": "123456",
+     "otp_type": "email",
+     "referral_code": "REF12345"  // Optional
+   }
+   
+   Response (200 OK):
+   {
+     "user": {
+       "id": 1,
+       "username": "user@example.com",
+       "email": "user@example.com",
+       "mobile": null,
+       "is_active_buyer": false,
+       "is_distributor": false
+     },
+     "tokens": {
+       "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+       "access": "eyJ0eXAiOiJKV1QiLCJhbGc..."
+     }
+   }
+   
+   Error Response (400):
+   {
+     "non_field_errors": ["Invalid or expired OTP"]
+   }
+   
+   Rate Limit: 5 requests per minute per IP
+
+
+3. REFRESH TOKEN
+   Method: POST
+   URL: /api/auth/refresh/
+   Authentication: Not Required (but needs refresh token)
+   Description: Get new access token using refresh token
+   
+   Request Body:
+   {
+     "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc..."
+   }
+   
+   Response (200 OK):
+   {
+     "access": "eyJ0eXAiOiJKV1QiLCJhbGc..."
+   }
+
+
+4. LOGOUT
+   Method: POST
+   URL: /api/auth/logout/
+   Authentication: Required
+   Description: Logout user and blacklist refresh token
+   
+   Request Body:
+   {
+     "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc..."
+   }
+   
+   Response (200 OK):
+   {
+     "message": "Successfully logged out"
+   }
+
+
+5. USER SIGNUP
+   Method: POST
+   URL: /api/auth/signup/
+   Authentication: Not Required
+   Description: Submit signup form with user details. Sends OTP to both email and mobile.
+   
+   Request Body:
+   {
+     "first_name": "John",
+     "last_name": "Doe",
+     "email": "john@example.com",
+     "mobile": "9876543210",
+     "gender": "male",                    // "male", "female", "other"
+     "date_of_birth": "1990-01-01",
+     "address_line1": "123 Main Street",
+     "address_line2": "Apt 4B",          // Optional
+     "city": "Mumbai",
+     "state": "Maharashtra",
+     "pincode": "400001",
+     "country": "India",                 // Optional, defaults to "India"
+     "referral_code": "REF12345"         // Optional
+   }
+   
+   Response (200 OK):
+   {
+     "message": "OTP sent to email and mobile",
+     "signup_token": "ABC123XYZ789..."
+   }
+   
+   Error Response (400):
+   {
+     "email": ["Email already registered"],
+     "mobile": ["Mobile number already registered"],
+     "mobile": ["Invalid mobile number format"]
+   }
+   
+   Rate Limit: 5 requests per minute per IP
+
+
+6. VERIFY SIGNUP OTP
+   Method: POST
+   URL: /api/auth/verify-signup-otp/
+   Authentication: Not Required
+   Description: Verify OTP for both email and mobile, then create user account
+   
+   Request Body:
+   {
+     "signup_token": "ABC123XYZ789...",
+     "email_otp": "123456",
+     "mobile_otp": "654321"
+   }
+   
+   Response (201 Created):
+   {
+     "user": {
+       "id": 1,
+       "username": "john@example.com",
+       "email": "john@example.com",
+       "mobile": "9876543210",
+       "first_name": "John",
+       "last_name": "Doe",
+       "is_active_buyer": false,
+       "is_distributor": false
+     },
+     "tokens": {
+       "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+       "access": "eyJ0eXAiOiJKV1QiLCJhbGc..."
+     }
+   }
+   
+   Error Response (400):
+   {
+     "signup_token": ["Invalid or expired signup token"],
+     "email_otp": ["Invalid or expired email OTP"],
+     "mobile_otp": ["Invalid or expired mobile OTP"]
+   }
+   
+   Rate Limit: 5 requests per minute per IP
+
+
+7. CREATE ADMIN (Superuser Only)
+   Method: POST
+   URL: /api/auth/create-admin/
+   Authentication: Required (Superuser)
+   Description: Create admin user. Only superusers can create admins.
+   
+   Request Body:
+   {
+     "first_name": "Admin",
+     "last_name": "User",
+     "email": "admin@example.com",
+     "mobile": "9876543211",
+     "gender": "male",
+     "date_of_birth": "1985-01-01",
+     "address_line1": "456 Admin Street",
+     "address_line2": "",                // Optional
+     "city": "Delhi",
+     "state": "Delhi",
+     "pincode": "110001",
+     "country": "India"                  // Optional
+   }
+   
+   Response (201 Created):
+   {
+     "user": {
+       "id": 2,
+       "username": "admin@example.com",
+       "email": "admin@example.com",
+       "mobile": "9876543211",
+       "first_name": "Admin",
+       "last_name": "User",
+       "role": "admin"
+     },
+     "message": "Admin created successfully. OTP sent to email and mobile for initial login."
+   }
+   
+   Error Response (400):
+   {
+     "email": ["Email already registered"],
+     "mobile": ["Mobile number already registered"]
+   }
+   
+   Error Response (403):
+   {
+     "detail": "You do not have permission to perform this action."
+   }
+
+
+8. CREATE STAFF (Admin or Superuser)
+   Method: POST
+   URL: /api/auth/create-staff/
+   Authentication: Required (Admin or Superuser)
+   Description: Create staff user. Both admins and superusers can create staff.
+   
+   Request Body:
+   {
+     "first_name": "Staff",
+     "last_name": "User",
+     "email": "staff@example.com",
+     "mobile": "9876543212",
+     "gender": "female",
+     "date_of_birth": "1990-05-15",
+     "address_line1": "789 Staff Avenue",
+     "address_line2": "",                // Optional
+     "city": "Bangalore",
+     "state": "Karnataka",
+     "pincode": "560001",
+     "country": "India"                  // Optional
+   }
+   
+   Response (201 Created):
+   {
+     "user": {
+       "id": 3,
+       "username": "staff@example.com",
+       "email": "staff@example.com",
+       "mobile": "9876543212",
+       "first_name": "Staff",
+       "last_name": "User",
+       "role": "staff"
+     },
+     "message": "Staff created successfully. OTP sent to email and mobile for initial login."
+   }
+   
+   Error Response (400):
+   {
+     "email": ["Email already registered"],
+     "mobile": ["Mobile number already registered"]
+   }
+   
+   Error Response (403):
+   {
+     "detail": "You do not have permission to perform this action."
+   }
+
+
+================================================================================
+                              USER APIs
+================================================================================
+
+9. GET USER PROFILE
+   Method: GET
+   URL: /api/users/profile/
+   Authentication: Required
+   Description: Get current user's profile information
+   
+   Response (200 OK):
+   {
+     "id": 1,
+     "username": "user@example.com",
+     "email": "user@example.com",
+     "mobile": "+919876543210",
+     "first_name": "John",
+     "last_name": "Doe",
+     "gender": "male",
+     "date_of_birth": "1990-01-01",
+     "address_line1": "123 Main Street",
+     "address_line2": "Apt 4B",
+     "city": "Mumbai",
+     "state": "Maharashtra",
+     "pincode": "400001",
+     "country": "India",
+     "role": "user",
+     "is_distributor": false,
+     "is_active_buyer": true,
+     "referral_code": "REF00001",
+     "referred_by": null,
+     "kyc_status": "approved",
+     "nominee_exists": true,
+     "date_joined": "2026-01-06T12:00:00Z"
+   }
+
+
+10. UPDATE USER PROFILE
+    Method: PUT / PATCH
+    URL: /api/users/update_profile/
+    Authentication: Required
+    Description: Update current user's profile
+    
+    Request Body (PATCH - partial update):
+    {
+      "first_name": "John",
+      "last_name": "Doe",
+      "mobile": "+919876543210",
+      "gender": "male",
+      "date_of_birth": "1990-01-01",
+      "address_line1": "123 Main Street",
+      "city": "Mumbai",
+      "state": "Maharashtra",
+      "pincode": "400001"
+    }
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "username": "user@example.com",
+      "email": "user@example.com",
+      "first_name": "John",
+      "last_name": "Doe",
+      "gender": "male",
+      "date_of_birth": "1990-01-01",
+      ...
+    }
+
+
+11. LIST USERS
+   Method: GET
+   URL: /api/users/
+   Authentication: Required (Admin only for all users)
+   Description: List all users (admin) or current user only
+   
+   Query Parameters:
+   - page: Page number (default: 1)
+   - page_size: Items per page (default: 20)
+   
+   Response (200 OK):
+   {
+     "count": 100,
+     "next": "http://localhost:8000/api/users/?page=2",
+     "previous": null,
+     "results": [
+       {
+         "id": 1,
+         "username": "user@example.com",
+         "email": "user@example.com",
+         "role": "user",
+         "is_active_buyer": true,
+         ...
+       }
+     ]
+   }
+
+
+12. GET USER BY ID
+    Method: GET
+    URL: /api/users/{id}/
+    Authentication: Required (Admin or own user)
+    Description: Get specific user details
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "username": "user@example.com",
+      "email": "user@example.com",
+      "mobile": "+919876543210",
+      "first_name": "John",
+      "last_name": "Doe",
+      "gender": "male",
+      "date_of_birth": "1990-01-01",
+      "address_line1": "123 Main Street",
+      "city": "Mumbai",
+      "state": "Maharashtra",
+      "pincode": "400001",
+      "country": "India",
+      ...
+    }
+
+
+================================================================================
+                              KYC APIs
+================================================================================
+
+13. CREATE KYC
+   Method: POST
+   URL: /api/users/kyc/
+   Authentication: Required
+   Description: Submit KYC documents
+   
+   Request Body (multipart/form-data):
+   {
+     "pan_number": "ABCDE1234F",
+     "aadhaar_number": "123456789012",
+     "address_line1": "123 Main Street",
+     "address_line2": "Apt 4B",
+     "city": "Mumbai",
+     "state": "Maharashtra",
+     "pincode": "400001",
+     "country": "India",
+     "pan_document": <file>,
+     "aadhaar_front": <file>,
+     "aadhaar_back": <file>,
+     "bank_name": "State Bank of India",
+     "account_number": "1234567890",
+     "ifsc_code": "SBIN0001234",
+     "account_holder_name": "John Doe"
+   }
+   
+   Response (201 Created):
+   {
+     "id": 1,
+     "user": 1,
+     "status": "pending",
+     "pan_number": "ABCDE1234F",
+     ...
+   }
+
+
+14. GET KYC STATUS
+    Method: GET
+    URL: /api/users/kyc/
+    Authentication: Required
+    Description: Get user's KYC status
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "user": 1,
+      "status": "approved",  // "pending", "approved", "rejected"
+      "pan_number": "ABCDE1234F",
+      "submitted_at": "2026-01-06T12:00:00Z",
+      "reviewed_at": "2026-01-06T13:00:00Z",
+      ...
+    }
+
+
+15. APPROVE KYC (Admin Only)
+    Method: POST
+    URL: /api/users/kyc/{id}/approve/
+    Authentication: Required (Admin)
+    Description: Approve KYC submission
+    
+    Response (200 OK):
+    {
+      "status": "approved"
+    }
+
+
+16. REJECT KYC (Admin Only)
+    Method: POST
+    URL: /api/users/kyc/{id}/reject/
+    Authentication: Required (Admin)
+    Description: Reject KYC submission
+    
+    Request Body:
+    {
+      "reason": "PAN document is not clear"
+    }
+    
+    Response (200 OK):
+    {
+      "status": "rejected"
+    }
+
+
+================================================================================
+                            NOMINEE APIs
+================================================================================
+
+17. CREATE/UPDATE NOMINEE
+    Method: POST / PUT / PATCH
+    URL: /api/users/nominee/
+    Authentication: Required
+    Description: Create or update nominee information
+    
+    Request Body:
+    {
+      "full_name": "Jane Doe",
+      "relationship": "spouse",  // "spouse", "son", "daughter", "father", "mother", "brother", "sister", "other"
+      "date_of_birth": "1990-01-01",
+      "mobile": "+919876543211",
+      "email": "jane@example.com",
+      "address_line1": "123 Main Street",
+      "city": "Mumbai",
+      "state": "Maharashtra",
+      "pincode": "400001",
+      "id_proof_type": "Aadhaar",
+      "id_proof_number": "987654321098",
+      "id_proof_document": <file>
+    }
+    
+    Response (201 Created / 200 OK):
+    {
+      "id": 1,
+      "user": 1,
+      "full_name": "Jane Doe",
+      "relationship": "spouse",
+      ...
+    }
+
+
+18. GET NOMINEE
+    Method: GET
+    URL: /api/users/nominee/
+    Authentication: Required
+    Description: Get user's nominee information
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "user": 1,
+      "full_name": "Jane Doe",
+      "relationship": "spouse",
+      ...
+    }
+
+
+================================================================================
+                            BOOKING APIs
+================================================================================
+
+19. CREATE BOOKING
+    Method: POST
+    URL: /api/booking/bookings/
+    Authentication: Required
+    Description: Create a new EV booking (minimum ₹500)
+    
+    Request Body:
+    {
+      "vehicle_model": "EV Model X",
+      "vehicle_variant": "Premium",
+      "booking_amount": 500,      // Minimum ₹500
+      "total_amount": 50000,
+      "emi_amount": 5000,          // Optional
+      "emi_duration_months": 10,   // Optional
+      "emi_start_date": "2026-02-01"  // Optional
+    }
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "user": 1,
+      "booking_number": "EVABC1234",
+      "vehicle_model": "EV Model X",
+      "booking_amount": "500.00",
+      "total_amount": "50000.00",
+      "total_paid": "0.00",
+      "remaining_amount": "50000.00",
+      "status": "pre_booked",  // "pre_booked", "confirmed", "completed", "cancelled"
+      "created_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "booking_amount": ["Minimum booking amount is ₹500"]
+    }
+    
+    Rate Limit: 10 requests per minute per IP
+
+
+20. LIST BOOKINGS
+    Method: GET
+    URL: /api/booking/bookings/
+    Authentication: Required
+    Description: List user's bookings (admin sees all)
+    
+    Query Parameters:
+    - page: Page number
+    - status: Filter by status (pre_booked, confirmed, completed, cancelled)
+    
+    Response (200 OK):
+    {
+      "count": 10,
+      "results": [
+        {
+          "id": 1,
+          "booking_number": "EVABC1234",
+          "vehicle_model": "EV Model X",
+          "total_amount": "50000.00",
+          "status": "pre_booked",
+          ...
+        }
+      ]
+    }
+
+
+21. GET BOOKING DETAILS
+    Method: GET
+    URL: /api/booking/bookings/{id}/
+    Authentication: Required
+    Description: Get specific booking details
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "booking_number": "EVABC1234",
+      "user": 1,
+      "vehicle_model": "EV Model X",
+      "total_amount": "50000.00",
+      "total_paid": "5000.00",
+      "remaining_amount": "45000.00",
+      "status": "confirmed",
+      "emi_amount": "5000.00",
+      "emi_paid_count": 1,
+      "emi_total_count": 10,
+      ...
+    }
+
+
+22. MAKE PAYMENT FOR BOOKING
+    Method: POST
+    URL: /api/booking/bookings/{id}/make_payment/
+    Authentication: Required
+    Description: Make a payment for booking
+    
+    Request Body:
+    {
+      "amount": 5000,
+      "payment_method": "online"  // "online", "bank_transfer", "cash", "wallet"
+    }
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "booking": 1,
+      "user": 1,
+      "amount": "5000.00",
+      "payment_method": "online",
+      "status": "completed",
+      "transaction_id": "TXN123456",
+      "payment_date": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Amount exceeds remaining amount"
+    }
+    
+    Note: Payment automatically updates booking status and Active Buyer status if total paid ≥ ₹5000
+
+
+23. LIST PAYMENTS
+    Method: GET
+    URL: /api/booking/payments/
+    Authentication: Required
+    Description: List payment history
+    
+    Response (200 OK):
+    {
+      "count": 5,
+      "results": [
+        {
+          "id": 1,
+          "booking_number": "EVABC1234",
+          "amount": "5000.00",
+          "payment_method": "online",
+          "status": "completed",
+          "payment_date": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+
+
+================================================================================
+                            WALLET APIs
+================================================================================
+
+24. GET MY WALLET
+    Method: GET
+    URL: /api/wallet/my_wallet/
+    Authentication: Required
+    Description: Get current user's wallet balance and details
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "user": 1,
+      "balance": "15000.00",
+      "total_earned": "20000.00",
+      "total_withdrawn": "5000.00",
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T15:00:00Z"
+    }
+
+
+25. LIST WALLET TRANSACTIONS
+    Method: GET
+    URL: /api/wallet/transactions/
+    Authentication: Required
+    Description: Get wallet transaction history
+    
+    Query Parameters:
+    - page: Page number
+    - transaction_type: Filter by type (REFERRAL_BONUS, BINARY_PAIR, EMI_DEDUCTION, PAYOUT, etc.)
+    - start_date: Filter from date (YYYY-MM-DD)
+    - end_date: Filter to date (YYYY-MM-DD)
+    
+    Response (200 OK):
+    {
+      "count": 50,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "transaction_type": "BINARY_PAIR",
+          "amount": "500.00",
+          "balance_before": "10000.00",
+          "balance_after": "10500.00",
+          "description": "Binary pair earning (Pair #1)",
+          "reference_id": 1,
+          "reference_type": "binary_pair",
+          "created_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+    
+    Transaction Types:
+    - REFERRAL_BONUS: Referral earnings
+    - BINARY_PAIR: Binary pair matching earnings
+    - EMI_DEDUCTION: Automatic EMI deductions
+    - RESERVE_DEDUCTION: Reserve fund deductions
+    - PAYOUT: Withdrawal transactions
+    - DEPOSIT: Manual deposits
+    - REFUND: Refund transactions
+
+
+================================================================================
+                            BINARY APIs
+================================================================================
+
+26. GET MY BINARY TREE
+    Method: GET
+    URL: /api/binary/nodes/my_tree/
+    Authentication: Required
+    Description: Get current user's binary tree information
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "user": 1,
+      "parent": null,
+      "side": null,
+      "level": 0,
+      "left_count": 5,
+      "right_count": 3,
+      "created_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (404):
+    {
+      "message": "No binary node found"
+    }
+
+
+27. LIST BINARY NODES
+    Method: GET
+    URL: /api/binary/nodes/
+    Authentication: Required
+    Description: List binary nodes (admin sees all)
+    
+    Response (200 OK):
+    {
+      "count": 100,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "parent": null,
+          "side": null,
+          "left_count": 5,
+          "right_count": 3,
+          ...
+        }
+      ]
+    }
+
+
+28. CHECK FOR BINARY PAIRS
+    Method: POST
+    URL: /api/binary/pairs/check_pairs/
+    Authentication: Required
+    Description: Manually trigger pair checking
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "user": 1,
+      "left_user": 2,
+      "right_user": 3,
+      "pair_amount": "1000.00",
+      "earning_amount": "500.00",
+      "status": "matched",
+      "pair_month": 1,
+      "pair_year": 2026,
+      "created_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Response (200 OK) - No pairs:
+    {
+      "message": "No pairs available"
+    }
+    
+    Note: Maximum 10 pairs per month per user
+
+
+29. LIST BINARY PAIRS
+    Method: GET
+    URL: /api/binary/pairs/
+    Authentication: Required
+    Description: List binary pairs for user
+    
+    Query Parameters:
+    - pair_month: Filter by month (1-12)
+    - pair_year: Filter by year
+    
+    Response (200 OK):
+    {
+      "count": 5,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "left_user": 2,
+          "right_user": 3,
+          "pair_amount": "1000.00",
+          "earning_amount": "500.00",
+          "status": "processed",
+          "pair_month": 1,
+          "pair_year": 2026,
+          "matched_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+
+
+30. LIST BINARY EARNINGS
+    Method: GET
+    URL: /api/binary/earnings/
+    Authentication: Required
+    Description: List binary earnings history
+    
+    Response (200 OK):
+    {
+      "count": 10,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "binary_pair": 1,
+          "amount": "500.00",
+          "pair_number": 1,
+          "emi_deducted": "0.00",
+          "net_amount": "500.00",
+          "created_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+    
+    Business Rules:
+    - First 5 pairs: Full credit (even without Active Buyer)
+    - From 6th pair: 20% EMI deduction if not Active Buyer
+    - Active Buyers: Full earnings from all pairs
+
+
+================================================================================
+                            PAYOUT APIs
+================================================================================
+
+31. CREATE PAYOUT REQUEST
+    Method: POST
+    URL: /api/payout/
+    Authentication: Required
+    Description: Request payout from wallet
+    
+    Request Body:
+    {
+      "requested_amount": 10000,
+      "bank_name": "State Bank of India",
+      "account_number": "1234567890",
+      "ifsc_code": "SBIN0001234",
+      "account_holder_name": "John Doe",
+      "emi_auto_filled": true  // Optional: Auto-fill EMI from payout
+    }
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "user": 1,
+      "requested_amount": "10000.00",
+      "tds_amount": "500.00",  // 5% TDS (max ₹10,000)
+      "net_amount": "9500.00",
+      "bank_name": "State Bank of India",
+      "status": "pending",
+      "emi_auto_filled": true,
+      "emi_amount": "2000.00",  // If EMI auto-fill was used
+      "created_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "requested_amount": ["Insufficient wallet balance"]
+    }
+    
+    TDS Calculation:
+    - 5% of requested amount
+    - Maximum ₹10,000 ceiling
+
+
+32. LIST PAYOUTS
+    Method: GET
+    URL: /api/payout/
+    Authentication: Required
+    Description: List payout requests (user sees own, admin sees all)
+    
+    Query Parameters:
+    - status: Filter by status (pending, processing, completed, rejected, cancelled)
+    
+    Response (200 OK):
+    {
+      "count": 5,
+      "results": [
+        {
+          "id": 1,
+          "requested_amount": "10000.00",
+          "tds_amount": "500.00",
+          "net_amount": "9500.00",
+          "status": "pending",
+          "created_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+
+
+33. PROCESS PAYOUT (Admin Only)
+    Method: POST
+    URL: /api/payout/{id}/process/
+    Authentication: Required (Admin)
+    Description: Process payout request (deducts from wallet)
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "status": "processing",
+      "requested_amount": "10000.00",
+      "net_amount": "9500.00",
+      ...
+    }
+    
+    Error Response (400):
+    {
+      "error": "Payout already processed"
+    }
+
+
+34. COMPLETE PAYOUT (Admin Only)
+    Method: POST
+    URL: /api/payout/{id}/complete/
+    Authentication: Required (Admin)
+    Description: Mark payout as completed after bank transfer
+    
+    Request Body:
+    {
+      "transaction_id": "BANK123456789"
+    }
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "status": "completed",
+      "transaction_id": "BANK123456789",
+      "completed_at": "2026-01-06T13:00:00Z",
+      ...
+    }
+
+
+35. LIST PAYOUT TRANSACTIONS
+    Method: GET
+    URL: /api/payout/transactions/
+    Authentication: Required
+    Description: List payout transaction records
+    
+    Response (200 OK):
+    {
+      "count": 10,
+      "results": [
+        {
+          "id": 1,
+          "payout_id": 1,
+          "user": 1,
+          "amount": "10000.00",
+          "transaction_type": "payout",
+          "description": "Payout request #1",
+          "created_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+
+
+================================================================================
+                         NOTIFICATION APIs
+================================================================================
+
+36. LIST NOTIFICATIONS
+    Method: GET
+    URL: /api/notifications/
+    Authentication: Required
+    Description: List user's notifications
+    
+    Query Parameters:
+    - is_read: Filter by read status (true/false)
+    - notification_type: Filter by type (booking, payment, wallet, binary, payout, kyc, system)
+    
+    Response (200 OK):
+    {
+      "count": 20,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "notification_type": "booking",
+          "title": "Booking Confirmed",
+          "message": "Your booking EVABC1234 has been confirmed",
+          "is_read": false,
+          "reference_id": 1,
+          "reference_type": "booking",
+          "created_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+
+
+37. MARK NOTIFICATION AS READ
+    Method: POST
+    URL: /api/notifications/{id}/mark_read/
+    Authentication: Required
+    Description: Mark a specific notification as read
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "is_read": true,
+      "read_at": "2026-01-06T13:00:00Z",
+      ...
+    }
+
+
+38. MARK ALL NOTIFICATIONS AS READ
+    Method: POST
+    URL: /api/notifications/mark_all_read/
+    Authentication: Required
+    Description: Mark all user's notifications as read
+    
+    Response (200 OK):
+    {
+      "message": "All notifications marked as read"
+    }
+
+
+39. GET UNREAD COUNT
+    Method: GET
+    URL: /api/notifications/unread_count/
+    Authentication: Required
+    Description: Get count of unread notifications
+    
+    Response (200 OK):
+    {
+      "unread_count": 5
+    }
+
+
+================================================================================
+                         COMPLIANCE APIs
+================================================================================
+
+40. UPLOAD COMPLIANCE DOCUMENT
+    Method: POST
+    URL: /api/compliance/documents/
+    Authentication: Required
+    Description: Upload compliance document
+    
+    Request Body (multipart/form-data):
+    {
+      "document_type": "tds_certificate",  // "tds_certificate", "pan_card", "aadhaar", "bank_statement", "other"
+      "title": "TDS Certificate 2025-26",
+      "description": "Annual TDS certificate",
+      "file": <file>
+    }
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "user": 1,
+      "document_type": "tds_certificate",
+      "title": "TDS Certificate 2025-26",
+      "is_verified": false,
+      "uploaded_at": "2026-01-06T12:00:00Z"
+    }
+
+
+41. LIST COMPLIANCE DOCUMENTS
+    Method: GET
+    URL: /api/compliance/documents/
+    Authentication: Required
+    Description: List user's compliance documents
+    
+    Response (200 OK):
+    {
+      "count": 5,
+      "results": [
+        {
+          "id": 1,
+          "document_type": "tds_certificate",
+          "title": "TDS Certificate 2025-26",
+          "is_verified": true,
+          "uploaded_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+
+
+42. LIST TDS RECORDS
+    Method: GET
+    URL: /api/compliance/tds/
+    Authentication: Required
+    Description: List TDS records for user
+    
+    Response (200 OK):
+    {
+      "count": 2,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "financial_year": "2025-26",
+          "total_payout": "100000.00",
+          "tds_deducted": "5000.00",
+          "certificate_number": "TDS202526001",
+          "created_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+
+
+================================================================================
+                            REPORTS APIs
+================================================================================
+
+43. DASHBOARD STATISTICS
+    Method: GET
+    URL: /api/reports/dashboard/
+    Authentication: Required
+    Description: Get dashboard statistics (different for admin vs user)
+    
+    Response for User (200 OK):
+    {
+      "wallet_balance": "15000.00",
+      "total_earnings": "20000.00",
+      "total_withdrawn": "5000.00",
+      "active_bookings": 2,
+      "total_bookings": 5,
+      "binary_pairs": 10,
+      "pending_payouts": 1
+    }
+    
+    Response for Admin (200 OK):
+    {
+      "total_users": 1000,
+      "active_buyers": 500,
+      "total_bookings": 2000,
+      "total_revenue": "100000000.00",
+      "total_wallet_balance": "5000000.00",
+      "pending_payouts": 50
+    }
+
+
+44. SALES REPORT (Admin Only)
+    Method: GET
+    URL: /api/reports/sales/
+    Authentication: Required (Admin)
+    Description: Get sales report
+    
+    Query Parameters:
+    - start_date: Start date (YYYY-MM-DD)
+    - end_date: End date (YYYY-MM-DD)
+    
+    Response (200 OK):
+    {
+      "total_sales": "5000000.00",
+      "total_transactions": 500,
+      "bookings": 200
+    }
+
+
+45. USER REPORT
+    Method: GET
+    URL: /api/reports/user/
+    Authentication: Required
+    Description: Get user activity report
+    
+    Query Parameters (Admin only):
+    - user_id: User ID to get report for
+    
+    Response (200 OK):
+    {
+      "user": {
+        "id": 1,
+        "username": "user@example.com",
+        "email": "user@example.com",
+        "is_active_buyer": true
+      },
+      "bookings": 5,
+      "total_paid": "50000.00",
+      "wallet_balance": "15000.00",
+      "binary_pairs": 10,
+      "payouts": 3
+    }
+
+
+46. WALLET REPORT
+    Method: GET
+    URL: /api/reports/wallet/
+    Authentication: Required
+    Description: Get wallet transaction report
+    
+    Query Parameters:
+    - user_id: User ID (admin only)
+    - start_date: Start date (YYYY-MM-DD)
+    - end_date: End date (YYYY-MM-DD)
+    
+    Response (200 OK):
+    {
+      "total_transactions": 50,
+      "total_credit": "25000.00",
+      "total_debit": "10000.00",
+      "by_type": [
+        {
+          "transaction_type": "BINARY_PAIR",
+          "count": 10,
+          "total": "5000.00"
+        },
+        {
+          "transaction_type": "REFERRAL_BONUS",
+          "count": 5,
+          "total": "2500.00"
+        }
+      ]
+    }
+
+
+================================================================================
+                         AUTHENTICATION HEADERS
+================================================================================
+
+All authenticated endpoints require JWT Bearer token in Authorization header:
+
+Authorization: Bearer <access_token>
+
+Example:
+curl -H "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGc..." \
+     http://localhost:8000/api/users/profile/
+
+
+================================================================================
+                         ERROR RESPONSES
+================================================================================
+
+Standard Error Format:
+
+400 Bad Request:
+{
+  "field_name": ["Error message"],
+  "non_field_errors": ["General error message"]
+}
+
+401 Unauthorized:
+{
+  "detail": "Authentication credentials were not provided."
+}
+
+403 Forbidden:
+{
+  "detail": "You do not have permission to perform this action."
+}
+
+404 Not Found:
+{
+  "detail": "Not found."
+}
+
+429 Too Many Requests:
+{
+  "detail": "Request was throttled. Expected available in X seconds."
+}
+
+500 Internal Server Error:
+{
+  "detail": "A server error occurred."
+}
+
+
+================================================================================
+                         RATE LIMITING
+================================================================================
+
+- OTP Endpoints (/api/auth/send-otp/, /api/auth/verify-otp/): 
+  5 requests per minute per IP
+
+- Booking Endpoints (/api/booking/): 
+  10 requests per minute per IP
+
+- All Other APIs: 
+  100 requests per minute per IP
+
+
+================================================================================
+                         BUSINESS RULES
+================================================================================
+
+1. Pre-booking Minimum: ₹500
+2. Active Buyer Threshold: ₹5000 total paid
+3. First 5 Binary Pairs: Full credit (even without Active Buyer)
+4. From 6th Binary Pair: 20% EMI deduction if not Active Buyer
+5. Binary Pairs Limit: Maximum 10 pairs per month per user
+6. TDS Percentage: 5% with ₹10,000 ceiling
+7. EMI Auto-fill: Optional feature in payout requests
+
+
+================================================================================
+                         STATUS CODES
+================================================================================
+
+200 OK: Successful GET, PUT, PATCH requests
+201 Created: Successful POST requests (resource created)
+204 No Content: Successful DELETE requests
+400 Bad Request: Invalid request data
+401 Unauthorized: Missing or invalid authentication
+403 Forbidden: Insufficient permissions
+404 Not Found: Resource not found
+429 Too Many Requests: Rate limit exceeded
+500 Internal Server Error: Server error
+
+
+================================================================================
+                         PAGINATION
+================================================================================
+
+All list endpoints support pagination:
+
+Query Parameters:
+- page: Page number (default: 1)
+- page_size: Items per page (default: 20, max: 100)
+
+Response Format:
+{
+  "count": 100,           // Total number of items
+  "next": "http://...",   // URL for next page (null if last page)
+  "previous": "http://...", // URL for previous page (null if first page)
+  "results": [...]        // Array of items for current page
+}
+
+
+================================================================================
+                         DATE/TIME FORMAT
+================================================================================
+
+All dates and times are in ISO 8601 format:
+- Date: YYYY-MM-DD (e.g., "2026-01-06")
+- DateTime: YYYY-MM-DDTHH:MM:SSZ (e.g., "2026-01-06T12:00:00Z")
+- Timezone: UTC (converted from server timezone)
+
+
+================================================================================
+                         FILE UPLOADS
+================================================================================
+
+File upload endpoints accept multipart/form-data:
+- Maximum file size: 20MB
+- Supported formats: Images (JPG, PNG), PDFs
+- Files are stored in /media/ directory
+
+
+================================================================================
+                         NOTES
+================================================================================
+
+1. All monetary values are in Indian Rupees (₹) and returned as strings with 2 decimal places
+2. JWT access tokens expire in 60 minutes (configurable)
+3. JWT refresh tokens expire in 24 hours (configurable)
+4. OTP expires in 10 minutes
+5. Admin endpoints require is_superuser=True or role='admin'
+6. All timestamps are in UTC
+7. Database uses SQLite in development, MySQL in production (switch via DB_ENGINE in .env)
+
+
+================================================================================
+                         END OF DOCUMENTATION
+================================================================================
+
+Last Updated: 2026-01-06
+Version: 1.0.0
+
