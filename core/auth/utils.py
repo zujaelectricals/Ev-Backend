@@ -14,9 +14,10 @@ def generate_otp(length=6):
     return ''.join(random.choices(string.digits, k=length))
 
 
-def send_email_otp(email):
-    """Send OTP via email"""
-    otp_code = generate_otp(settings.OTP_LENGTH)
+def send_email_otp(email, otp_code=None):
+    """Send OTP via email. If otp_code is provided, use it; otherwise generate new one."""
+    if otp_code is None:
+        otp_code = generate_otp(settings.OTP_LENGTH)
     
     # Store OTP in Redis with expiry
     cache_key = f"otp:email:{email}"
@@ -49,9 +50,10 @@ def send_email_otp(email):
         return False
 
 
-def send_mobile_otp(mobile):
-    """Send OTP via SMS"""
-    otp_code = generate_otp(settings.OTP_LENGTH)
+def send_mobile_otp(mobile, otp_code=None):
+    """Send OTP via SMS. If otp_code is provided, use it; otherwise generate new one."""
+    if otp_code is None:
+        otp_code = generate_otp(settings.OTP_LENGTH)
     
     # Store OTP in Redis with expiry
     cache_key = f"otp:mobile:{mobile}"

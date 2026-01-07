@@ -68,20 +68,8 @@ class NomineeSerializer(serializers.ModelSerializer):
         # If user submitted an id_proof_document or id_proof_number, mark nominee KYC as pending
         id_doc = validated_data.get('id_proof_document')
         id_number = validated_data.get('id_proof_number')
-        # Ensure kyc_status is always present to avoid NOT NULL DB errors
-        validated_data.setdefault('kyc_status', Nominee.KYC_PENDING)
         if id_doc or id_number:
+            validated_data['kyc_status'] = Nominee.KYC_PENDING
             validated_data['kyc_submitted_at'] = timezone.now()
         return super().create(validated_data)
-
-    def update(self, instance, validated_data):
-        # If user updates/ uploads id proof, set status back to pending unless already verified
-        id_doc = validated_data.get('id_proof_document', None)
-        id_number = validated_data.get('id_proof_number', None)
-        instance = super().update(instance, validated_data)
-        if (id_doc or id_number) and instance.kyc_status != Nominee.KYC_VERIFIED:
-            instance.kyc_status = Nominee.KYC_PENDING
-            instance.kyc_submitted_at = timezone.now()
-            instance.save(update_fields=['kyc_status', 'kyc_submitted_at'])
-        return instance
 

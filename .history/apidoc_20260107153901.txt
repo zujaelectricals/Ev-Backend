@@ -834,9 +834,6 @@ Super User: EVAdmin && EVAdmin@123
       "relationship": "spouse",
       "kyc_status": "pending",
       "kyc_submitted_at": "2026-01-07T12:00:00Z",
-      "kyc_verified_at": null,
-      "kyc_verified_by": null,
-      "kyc_rejection_reason": "",
       ...
     }
 
@@ -846,7 +843,7 @@ Super User: EVAdmin && EVAdmin@123
 
     APPROVE NOMINEE KYC
     Method: POST
-    URL: /api/users/nominee/{id}/approve/
+    URL: /api/users/nominees/{id}/approve/
     Authentication: Required (Admin)
     Description: Mark nominee's KYC as `verified`. Sets `kyc_verified_by` and `kyc_verified_at`.
 
@@ -857,7 +854,7 @@ Super User: EVAdmin && EVAdmin@123
 
     REJECT NOMINEE KYC
     Method: POST
-    URL: /api/users/nominee/{id}/reject/
+    URL: /api/users/nominees/{id}/reject/
     Authentication: Required (Admin)
     Description: Mark nominee's KYC as `rejected`. Admin can supply an optional `reason`.
 
