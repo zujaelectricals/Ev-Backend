@@ -1,5 +1,5 @@
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser, BasePermission
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -11,6 +11,7 @@ from .serializers import (
     SignupSerializer, VerifySignupOTPSerializer,
     CreateAdminSerializer, CreateStaffSerializer
 )
+from .throttles import OTPRateThrottle, OTPIdentifierThrottle
 
 User = get_user_model()
 
@@ -77,9 +78,11 @@ class CustomTokenRefreshView(TokenRefreshView):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([OTPRateThrottle, OTPIdentifierThrottle])
 def send_otp(request):
     """
     Send OTP to email or mobile
+    Rate limited to 5 requests per minute per IP and per identifier
     """
     serializer = SendOTPSerializer(data=request.data)
     if serializer.is_valid():
@@ -90,9 +93,11 @@ def send_otp(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([OTPRateThrottle, OTPIdentifierThrottle])
 def verify_otp_login(request):
     """
     Verify OTP and login user (returns JWT tokens)
+    Rate limited to 5 requests per minute per IP and per identifier
     """
     serializer = VerifyOTPSerializer(data=request.data)
     if serializer.is_valid():
@@ -130,9 +135,11 @@ def logout(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([OTPRateThrottle, OTPIdentifierThrottle])
 def signup(request):
     """
     User signup - Submit details and receive OTP
+    Rate limited to 5 requests per minute per IP and per identifier
     """
     serializer = SignupSerializer(data=request.data)
     if serializer.is_valid():
@@ -143,9 +150,11 @@ def signup(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([OTPRateThrottle, OTPIdentifierThrottle])
 def verify_signup_otp(request):
     """
     Verify signup OTP and create user account
+    Rate limited to 5 requests per minute per IP and per identifier
     """
     serializer = VerifySignupOTPSerializer(data=request.data)
     if serializer.is_valid():

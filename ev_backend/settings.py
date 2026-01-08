@@ -152,7 +152,9 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/hour',
-        'user': '1000/hour'
+        'user': '1000/hour',
+        'otp': '5/minute',  # 5 OTP requests per minute per IP
+        'otp_identifier': '5/minute',  # 5 OTP requests per minute per email/mobile
     }
 }
 
