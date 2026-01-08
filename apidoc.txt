@@ -888,12 +888,21 @@ Super User: EVAdmin && EVAdmin@123
     
     Request Body:
     {
-      "vehicle_model": "EV Model X",
-      "vehicle_variant": "Premium",
-      "booking_amount": 500,      // Minimum ₹500
-      "total_amount": 50000,
-      "emi_amount": 5000,          // Optional
-      "emi_duration_months": 10,   // Optional
+      "vehicle_model": 1,           // Vehicle ID (integer) - Required
+      "vehicle_color": "Red",       // Required - must be one of the colors in vehicle's available colors array
+      "battery_variant": "40kWh",   // Required
+      "booking_amount": 500,        // Minimum ₹500
+      "total_amount": 50000,        // Required - must match vehicle_model.price
+      "payment_option": "full_payment",  // "full_payment" or "emi_options"
+      "delivery_city": "Mumbai",    // Required
+      "delivery_state": "Maharashtra",  // Required
+      "delivery_pin": "400001",     // Required
+      "terms_accepted": true,       // Required
+      "referred_by": 5,             // Optional - User ID of referrer
+      "join_distributor_program": false,  // Optional
+      "payment_gateway_ref": "TXN123",   // Optional
+      "emi_amount": 5000,           // Optional
+      "emi_duration_months": 10,    // Optional
       "emi_start_date": "2026-02-01"  // Optional
     }
     
@@ -902,18 +911,35 @@ Super User: EVAdmin && EVAdmin@123
       "id": 1,
       "user": 1,
       "booking_number": "EVABC1234",
-      "vehicle_model": "EV Model X",
+      "vehicle_model": 1,
+      "vehicle_details": {
+        "id": 1,
+        "name": "EV Model X",
+        "model_code": "EV-A9F3X2",
+        "vehicle_color": ["white", "red", "blue"],
+        "battery_variant": "40kWh",
+        "price": "50000.00"
+      },
+      "vehicle_color": "Red",
+      "battery_variant": "40kWh",
       "booking_amount": "500.00",
       "total_amount": "50000.00",
       "total_paid": "0.00",
       "remaining_amount": "50000.00",
-      "status": "pre_booked",  // "pre_booked", "confirmed", "completed", "cancelled"
+      "status": "pending",  // "pending", "active", "completed", "cancelled", "expired"
+      "delivery_city": "Mumbai",
+      "delivery_state": "Maharashtra",
+      "delivery_pin": "400001",
+      "terms_accepted": true,
+      "expires_at": "2026-02-05T12:00:00Z",
       "created_at": "2026-01-06T12:00:00Z"
     }
     
     Error Response (400):
     {
-      "booking_amount": ["Minimum booking amount is ₹500"]
+      "booking_amount": ["Minimum booking amount is ₹500"],
+      "total_amount": ["Total amount must match vehicle price (₹50000.00)"],
+      "delivery_city": ["Delivery city is required"]
     }
     
     Rate Limit: 10 requests per minute per IP
@@ -927,7 +953,7 @@ Super User: EVAdmin && EVAdmin@123
     
     Query Parameters:
     - page: Page number
-    - status: Filter by status (pre_booked, confirmed, completed, cancelled)
+    - status: Filter by status (pending, active, completed, cancelled, expired)
     
     Response (200 OK):
     {
@@ -936,9 +962,17 @@ Super User: EVAdmin && EVAdmin@123
         {
           "id": 1,
           "booking_number": "EVABC1234",
-          "vehicle_model": "EV Model X",
+          "vehicle_model": 1,
+          "vehicle_details": {
+            "id": 1,
+            "name": "EV Model X",
+            "model_code": "EVX-2026",
+            "vehicle_color": ["white", "red", "blue"],
+            "battery_variant": "40kWh",
+            "price": "50000.00"
+          },
           "total_amount": "50000.00",
-          "status": "pre_booked",
+          "status": "pending",
           ...
         }
       ]
@@ -956,11 +990,28 @@ Super User: EVAdmin && EVAdmin@123
       "id": 1,
       "booking_number": "EVABC1234",
       "user": 1,
-      "vehicle_model": "EV Model X",
+      "vehicle_model": 1,
+      "vehicle_details": {
+        "id": 1,
+        "name": "EV Model X",
+        "model_code": "EV-A9F3X2",
+        "vehicle_color": ["white", "red", "blue"],
+        "battery_variant": "40kWh",
+        "price": "50000.00"
+      },
+      "vehicle_color": "Red",
+      "battery_variant": "40kWh",
       "total_amount": "50000.00",
       "total_paid": "5000.00",
       "remaining_amount": "45000.00",
-      "status": "confirmed",
+      "status": "active",
+      "delivery_city": "Mumbai",
+      "delivery_state": "Maharashtra",
+      "delivery_pin": "400001",
+      "terms_accepted": true,
+      "referred_by": 5,
+      "join_distributor_program": false,
+      "expires_at": "2026-02-05T12:00:00Z",
       "emi_amount": "5000.00",
       "emi_paid_count": 1,
       "emi_total_count": 10,
@@ -997,7 +1048,11 @@ Super User: EVAdmin && EVAdmin@123
       "error": "Amount exceeds remaining amount"
     }
     
-    Note: Payment automatically updates booking status and Active Buyer status if total paid ≥ ₹5000
+    Note: 
+    - Payment automatically updates booking status:
+      * If total_paid ≥ ₹5000: status changes to 'active' (Active Buyer)
+      * If remaining_amount ≤ 0: status changes to 'completed'
+    - Active Buyer status is updated when total paid reaches ₹5000
 
 
 28. LIST PAYMENTS
@@ -1023,10 +1078,482 @@ Super User: EVAdmin && EVAdmin@123
 
 
 ================================================================================
+                        VEHICLE INVENTORY APIs
+================================================================================
+
+29. UPLOAD IMAGES
+    Method: POST
+    URL: /api/inventory/images/upload/
+    Authentication: Required (Admin/Superuser only)
+    Description: Upload images independently (without vehicle association). Returns image IDs and URLs that can be used in vehicle creation.
+    
+    Content-Type: multipart/form-data
+    
+    Request Body (form-data):
+    - images[]: @image1.jpg (required, at least one file)
+    - images[]: @image2.jpg (optional, multiple files)
+    
+    Alternative formats also supported:
+    - images_data[]: @image1.jpg
+    - images[0]: @image1.jpg, images[1]: @image2.jpg
+    
+    Response (201 Created):
+    [
+      {
+        "id": 1,
+        "image_url": "http://localhost:8000/media/vehicles/images/image1.jpg",
+        "created_at": "2026-01-08T12:00:00Z"
+      },
+      {
+        "id": 2,
+        "image_url": "http://localhost:8000/media/vehicles/images/image2.jpg",
+        "created_at": "2026-01-08T12:00:01Z"
+      }
+    ]
+    
+    Error Response (400):
+    {
+      "error": "No images provided. Please upload at least one image file."
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can upload images."
+    }
+    
+    Usage Flow:
+    1. Upload images using this endpoint
+    2. Get image IDs from response (e.g., [1, 2])
+    3. Use these IDs in vehicle creation: {"image_ids": [1, 2], ...}
+
+
+30. LIST VEHICLES
+    Method: GET
+    URL: /api/inventory/vehicles/
+    Authentication: Required (All authenticated users)
+    Description: List all available vehicles with primary image
+    
+    Query Parameters:
+    - page: Page number
+    - status: Filter by status (available, out_of_stock, discontinued)
+    - search: Search in name, model_code, or description
+    
+    Response (200 OK):
+    {
+      "count": 10,
+      "results": [
+        {
+          "id": 1,
+          "name": "EV Model X",
+          "model_code": "EV-A9F3X2",
+          "vehicle_color": ["white", "red", "blue"],  // Array of available colors, default: ["white"]
+          "battery_variant": "40kWh",
+          "price": "50000.00",
+          "status": "available",
+          "features": ["USB Charging Port", "Parking Mode", "Reverse Gear"],  // Optional, can be empty array []
+          "specifications": {  // Optional, can be empty object {}
+            "Battery": "60V × 50AH",
+            "Motor Power": "48V/60V/72V 1000W",
+            "Max Speed": "25 km/h"
+          },
+          "primary_image_url": "http://localhost:8000/media/vehicles/images/evx-red.jpg",
+          "image_count": 3,
+          "created_at": "2026-01-06T12:00:00Z"
+        }
+      ]
+    }
+    
+    Notes:
+    - vehicle_color: Array of available colors, default is ["white"] if not provided
+    - features: Optional field, can be omitted or empty array []
+    - specifications: Optional field, can be omitted or empty object {}
+    - No limit on number of features or specification key-value pairs
+    - You can add any custom specification keys and values
+    
+    Error Response (401):
+    {
+      "detail": "Authentication credentials were not provided."
+    }
+
+
+31. GET VEHICLE DETAILS
+    Method: GET
+    URL: /api/inventory/vehicles/{id}/
+    Authentication: Required (All authenticated users)
+    Description: Get detailed information about a specific vehicle including all images, features, and specifications
+    
+    Notes:
+    - vehicle_color: Array of available colors, default is ["white"] if not set
+    - features: Optional field, returns empty array [] if not set
+    - specifications: Optional field, returns empty object {} if not set
+    - No limit on number of features or specifications
+    - You can add any custom specification keys and values
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "name": "EV Model X",
+      "model_code": "EV-A9F3X2",
+      "vehicle_color": ["white", "red", "blue"],  // Array of available colors, default: ["white"]
+      "battery_variant": "40kWh",
+      "price": "50000.00",
+      "status": "available",
+      "description": "Premium electric vehicle with advanced features",
+      "features": [
+        "USB Charging Port",
+        "Parking Mode",
+        "Reverse Gear"
+      ],
+      "specifications": {
+        "Battery": "60V × 50AH",
+        "Motor Power": "48V/60V/72V 1000W",
+        "Charging Duration": "4-5h",
+        "Max Speed": "25 km/h",
+        "Mileage": "125+ km",
+        "Battery Type": "Lithium-ion Battery",
+        "Motor Type": "Brushless DC",
+        "Frame Type": "Steel",
+        "Tyre Type": "Tubeless",
+        "Dimension": "1850×710×1120 MM",
+        "Net Weight": "80KG",
+        "Head Light": "LED Projector Light",
+        "Riding Mode": "Eco-Power-Sport",
+        "Brake": "Front Disc - Rear Drum",
+        "Tyre Size": "90/100-10 53J",
+        "Wheel Base": "1630mm",
+        "Meter Type": "Digital"
+      },
+      "images": [
+        {
+          "id": 1,
+          "image": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+          "image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+          "is_primary": true,
+          "alt_text": "EV Model X - Front View",
+          "order": 0,
+          "created_at": "2026-01-06T12:00:00Z"
+        },
+        {
+          "id": 2,
+          "image": "http://localhost:8000/media/vehicles/images/evx-red-2.jpg",
+          "image_url": "http://localhost:8000/media/vehicles/images/evx-red-2.jpg",
+          "is_primary": false,
+          "alt_text": "EV Model X - Side View",
+          "order": 1,
+          "created_at": "2026-01-06T12:01:00Z"
+        }
+      ],
+      "primary_image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T15:00:00Z"
+    }
+    
+    Error Response (404):
+    {
+      "detail": "Not found."
+    }
+
+
+32. CREATE VEHICLE
+    Method: POST
+    URL: /api/inventory/vehicles/
+    Authentication: Required (Admin/Superuser only)
+    Description: Create a new vehicle. Images must be uploaded first using /api/inventory/images/upload/ and linked via image_ids.
+    
+    Content-Type: application/json
+    
+    Request Body (JSON):
+    {
+      "name": "EV Model X",
+      "vehicle_color": ["white", "red", "blue"],  // Array of available colors, default: ["white"]
+      "battery_variant": "40kWh",
+      "price": 50000,
+      "status": "available",
+      "description": "Premium electric vehicle",
+      "features": ["USB Charging Port", "Parking Mode", "Reverse Gear"],
+      "specifications": {
+        "Battery": "60V × 50AH",
+        "Motor Power": "48V/60V/72V 1000W",
+        "Max Speed": "25 km/h"
+      },
+      "image_ids": [1, 2, 3]
+    }
+    
+    Field Descriptions:
+    - name: (required) Vehicle name
+    - model_code: (auto-generated, read-only) Automatically generated model code in format EV-XXXXXX (e.g., EV-A9F3X2) where XXXXXX is 6 random alphanumeric characters. Do not include in request.
+    - vehicle_color: (optional, default: ["white"]) Array of available vehicle colors (e.g., ["white", "red", "blue"]). Default is ["white"] if not provided.
+    - battery_variant: (required) Battery variant
+    - price: (required) Vehicle price
+    - status: (optional, default: "available") Status: "available", "out_of_stock", "discontinued"
+    - description: (optional) Vehicle description
+    - features: (optional) Array of feature strings - unlimited items
+    - specifications: (optional) Object with key-value pairs - unlimited custom fields
+    - image_ids: (optional) Array of image IDs from /api/inventory/images/upload/ endpoint
+    
+    Notes:
+    - model_code is automatically generated by the backend in format EV-XXXXXX (e.g., EV-A9F3X2) and cannot be provided in the request
+    - vehicle_color: Array of available colors (e.g., ["white", "red", "blue"]). Default is ["white"] if not provided.
+    - Features and specifications are completely optional - can be omitted or left empty
+    - No limit on number of features or specifications
+    - image_ids must reference images uploaded via /api/inventory/images/upload/
+    - Images must be unlinked (not already associated with another vehicle)
+    - First image in image_ids array will be set as primary if no primary exists
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "name": "EV Model X",
+      "model_code": "EV-A9F3X2",
+      "vehicle_color": ["white", "red", "blue"],  // Array of available colors
+      "battery_variant": "40kWh",
+      "price": "50000.00",
+      "status": "available",
+      "description": "Premium electric vehicle",
+      "features": [
+        "USB Charging Port",
+        "Parking Mode",
+        "Reverse Gear"
+      ],
+      "specifications": {
+        "Battery": "60V × 50AH",
+        "Motor Power": "48V/60V/72V 1000W",
+        "Charging Duration": "4-5h",
+        "Max Speed": "25 km/h",
+        "Mileage": "125+ km",
+        "Battery Type": "Lithium-ion Battery",
+        "Motor Type": "Brushless DC"
+      },
+      "images": [
+        {
+          "id": 1,
+          "image": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+          "image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+          "is_primary": true,
+          "alt_text": "",
+          "order": 0
+        },
+        {
+          "id": 2,
+          "image": "http://localhost:8000/media/vehicles/images/evx-red-2.jpg",
+          "image_url": "http://localhost:8000/media/vehicles/images/evx-red-2.jpg",
+          "is_primary": false,
+          "alt_text": "",
+          "order": 1
+        }
+      ],
+      "primary_image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+      "created_at": "2026-01-08T12:00:00Z",
+      "updated_at": "2026-01-08T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "name": ["This field is required."],
+      "image_ids": ["Image IDs [5, 6] do not exist or are already linked to a vehicle. Please upload images first using /api/inventory/images/upload/"]
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+    
+    Example Workflow:
+    1. Upload images: POST /api/inventory/images/upload/ → Get [1, 2, 3]
+    2. Create vehicle: POST /api/inventory/vehicles/ with {"image_ids": [1, 2, 3], ...}
+
+
+33. UPDATE VEHICLE
+    Method: PATCH / PUT
+    URL: /api/inventory/vehicles/{id}/
+    Authentication: Required (Admin/Superuser only)
+    Description: Update vehicle information. To add images, upload them first and include image_ids.
+    
+    Content-Type: application/json
+    
+    Request Body (JSON example):
+    {
+      "name": "EV Model X Updated",
+      "price": 55000,
+      "status": "out_of_stock",
+      "description": "Updated description",
+      "features": ["USB Charging Port", "Parking Mode", "Reverse Gear", "LED Lights"],
+      "specifications": {
+        "Battery": "60V × 50AH",
+        "Max Speed": "30 km/h"
+      },
+      "image_ids": [4, 5]
+    }
+    
+    Notes:
+    - All fields are optional (partial update)
+    - model_code is read-only and cannot be updated (it is auto-generated when the vehicle is created)
+    - vehicle_color: Array of available colors (e.g., ["white", "red", "blue"]). Can be updated to change available colors.
+    - Features and specifications are optional - can be omitted, updated, or left empty
+    - No limit on number of features or specifications
+    - image_ids: Array of image IDs from /api/inventory/images/upload/ to link to vehicle
+    - Only unlinked images can be added (images already linked to other vehicles will be rejected)
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "name": "EV Model X Updated",
+      "model_code": "EV-A9F3X2",
+      "vehicle_color": ["white", "red", "blue"],  // Array of available colors
+      "battery_variant": "40kWh",
+      "price": "55000.00",
+      "status": "out_of_stock",
+      "description": "Updated description",
+      "features": [
+        "USB Charging Port",
+        "Parking Mode",
+        "Reverse Gear",
+        "LED Lights"
+      ],
+      "specifications": {
+        "Battery": "60V × 50AH",
+        "Motor Power": "48V/60V/72V 1000W",
+        "Max Speed": "30 km/h"
+      },
+      "images": [...],
+      "primary_image_url": "...",
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T16:00:00Z"
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+    
+    Error Response (404):
+    {
+      "detail": "Not found."
+    }
+
+
+34. DELETE VEHICLE
+    Method: DELETE
+    URL: /api/inventory/vehicles/{id}/
+    Authentication: Required (Admin/Superuser only)
+    Description: Delete a vehicle and all associated images
+    
+    Response (204 No Content):
+    (Empty response body)
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+    
+    Error Response (404):
+    {
+      "detail": "Not found."
+    }
+
+
+35. ADD IMAGES TO VEHICLE
+    Method: POST
+    URL: /api/inventory/vehicles/{id}/add-images/
+    Authentication: Required (Admin/Superuser only)
+    Description: Add additional images to an existing vehicle
+    
+    Content-Type: multipart/form-data
+    
+    Request Body (form-data):
+    - images_data[]: @image1.jpg (required, at least one file)
+    - images_data[]: @image2.jpg (optional)
+    
+    Response (201 Created):
+    [
+      {
+        "id": 4,
+        "image": "http://localhost:8000/media/vehicles/images/evx-red-4.jpg",
+        "image_url": "http://localhost:8000/media/vehicles/images/evx-red-4.jpg",
+        "is_primary": false,
+        "alt_text": "",
+        "order": 3,
+        "created_at": "2026-01-06T17:00:00Z"
+      },
+      {
+        "id": 5,
+        "image": "http://localhost:8000/media/vehicles/images/evx-red-5.jpg",
+        "image_url": "http://localhost:8000/media/vehicles/images/evx-red-5.jpg",
+        "is_primary": false,
+        "alt_text": "",
+        "order": 4,
+        "created_at": "2026-01-06T17:00:01Z"
+      }
+    ]
+    
+    Error Response (400):
+    {
+      "error": "No images provided"
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+
+
+36. REMOVE IMAGE FROM VEHICLE
+    Method: DELETE
+    URL: /api/inventory/vehicles/{id}/remove-image/{image_id}/
+    Authentication: Required (Admin/Superuser only)
+    Description: Remove a specific image from a vehicle
+    
+    Response (204 No Content):
+    {
+      "message": "Image deleted successfully"
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+    
+    Error Response (404):
+    {
+      "error": "Image not found"
+    }
+
+
+37. SET PRIMARY IMAGE
+    Method: PATCH
+    URL: /api/inventory/vehicles/{id}/set-primary-image/{image_id}/
+    Authentication: Required (Admin/Superuser only)
+    Description: Set a specific image as the primary/featured image for a vehicle
+    
+    Response (200 OK):
+    {
+      "id": 3,
+      "image": "http://localhost:8000/media/vehicles/images/evx-red-3.jpg",
+      "image_url": "http://localhost:8000/media/vehicles/images/evx-red-3.jpg",
+      "is_primary": true,
+      "alt_text": "EV Model X - Interior",
+      "order": 2,
+      "created_at": "2026-01-06T12:02:00Z"
+    }
+    
+    Note: Setting a new primary image automatically unchecks the previous primary image
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+    
+    Error Response (404):
+    {
+      "error": "Image not found"
+    }
+
+
+================================================================================
                             WALLET APIs
 ================================================================================
 
-29. GET MY WALLET
+37. GET MY WALLET
     Method: GET
     URL: /api/wallet/my_wallet/
     Authentication: Required
@@ -1044,7 +1571,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-30. LIST WALLET TRANSACTIONS
+38. LIST WALLET TRANSACTIONS
     Method: GET
     URL: /api/wallet/transactions/
     Authentication: Required
@@ -1089,7 +1616,7 @@ Super User: EVAdmin && EVAdmin@123
                             BINARY APIs
 ================================================================================
 
-31. GET MY BINARY TREE
+39. GET MY BINARY TREE
     Method: GET
     URL: /api/binary/nodes/my_tree/
     Authentication: Required
@@ -1113,7 +1640,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-32. LIST BINARY NODES
+40. LIST BINARY NODES
     Method: GET
     URL: /api/binary/nodes/
     Authentication: Required
@@ -1136,7 +1663,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-33. CHECK FOR BINARY PAIRS
+41. CHECK FOR BINARY PAIRS
     Method: POST
     URL: /api/binary/pairs/check_pairs/
     Authentication: Required
@@ -1164,7 +1691,7 @@ Super User: EVAdmin && EVAdmin@123
     Note: Maximum 10 pairs per month per user
 
 
-34. LIST BINARY PAIRS
+42. LIST BINARY PAIRS
     Method: GET
     URL: /api/binary/pairs/
     Authentication: Required
@@ -1194,7 +1721,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-35. LIST BINARY EARNINGS
+43. LIST BINARY EARNINGS
     Method: GET
     URL: /api/binary/earnings/
     Authentication: Required
@@ -1227,7 +1754,7 @@ Super User: EVAdmin && EVAdmin@123
                             PAYOUT APIs
 ================================================================================
 
-36. CREATE PAYOUT REQUEST
+44. CREATE PAYOUT REQUEST
     Method: POST
     URL: /api/payout/
     Authentication: Required
@@ -1267,7 +1794,7 @@ Super User: EVAdmin && EVAdmin@123
     - Maximum ₹10,000 ceiling
 
 
-37. LIST PAYOUTS
+45. LIST PAYOUTS
     Method: GET
     URL: /api/payout/
     Authentication: Required
@@ -1292,7 +1819,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-38. PROCESS PAYOUT (Admin Only)
+46. PROCESS PAYOUT (Admin Only)
     Method: POST
     URL: /api/payout/{id}/process/
     Authentication: Required (Admin)
@@ -1313,7 +1840,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-39. COMPLETE PAYOUT (Admin Only)
+47. COMPLETE PAYOUT (Admin Only)
     Method: POST
     URL: /api/payout/{id}/complete/
     Authentication: Required (Admin)
@@ -1361,7 +1888,7 @@ Super User: EVAdmin && EVAdmin@123
                          NOTIFICATION APIs
 ================================================================================
 
-41. LIST NOTIFICATIONS
+48. LIST NOTIFICATIONS
     Method: GET
     URL: /api/notifications/
     Authentication: Required
@@ -1390,7 +1917,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-42. MARK NOTIFICATION AS READ
+49. MARK NOTIFICATION AS READ
     Method: POST
     URL: /api/notifications/{id}/mark_read/
     Authentication: Required
@@ -1405,7 +1932,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-43. MARK ALL NOTIFICATIONS AS READ
+50. MARK ALL NOTIFICATIONS AS READ
     Method: POST
     URL: /api/notifications/mark_all_read/
     Authentication: Required
@@ -1417,7 +1944,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-44. GET UNREAD COUNT
+51. GET UNREAD COUNT
     Method: GET
     URL: /api/notifications/unread_count/
     Authentication: Required
@@ -1433,7 +1960,7 @@ Super User: EVAdmin && EVAdmin@123
                          COMPLIANCE APIs
 ================================================================================
 
-45. UPLOAD COMPLIANCE DOCUMENT
+52. UPLOAD COMPLIANCE DOCUMENT
     Method: POST
     URL: /api/compliance/documents/
     Authentication: Required
@@ -1458,7 +1985,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-46. LIST COMPLIANCE DOCUMENTS
+53. LIST COMPLIANCE DOCUMENTS
     Method: GET
     URL: /api/compliance/documents/
     Authentication: Required
@@ -1479,7 +2006,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-47. LIST TDS RECORDS
+54. LIST TDS RECORDS
     Method: GET
     URL: /api/compliance/tds/
     Authentication: Required

@@ -22,10 +22,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         return Booking.objects.filter(user=user)
     
     def perform_create(self, serializer):
-        booking = serializer.save(user=self.request.user)
-        # Update remaining amount
-        booking.remaining_amount = booking.total_amount - booking.total_paid
-        booking.save()
+        # Capture IP address
+        ip_address = self.request.META.get('REMOTE_ADDR')
+        if not ip_address:
+            # Try to get from forwarded headers (for reverse proxy setups)
+            ip_address = self.request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
+        
+        booking = serializer.save(user=self.request.user, ip_address=ip_address)
     
     @action(detail=True, methods=['post'])
     def make_payment(self, request, pk=None):

@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser, BasePermission
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
 from django.contrib.auth import get_user_model
 from .serializers import (
     SendOTPSerializer, VerifyOTPSerializer, RefreshTokenSerializer,
@@ -20,6 +21,58 @@ class IsSuperuser(BasePermission):
     """
     def has_permission(self, request, view):
         return request.user and request.user.is_authenticated and request.user.is_superuser
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """
+    Custom token refresh view that blacklists the old refresh token
+    before generating new tokens, ensuring old tokens cannot be reused.
+    """
+    def post(self, request, *args, **kwargs):
+        # Get the old refresh token from the request
+        old_refresh_token = request.data.get('refresh')
+        
+        if not old_refresh_token:
+            return Response(
+                {'detail': 'Refresh token is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate and extract user from old token before blacklisting
+        try:
+            old_token = RefreshToken(old_refresh_token)
+            user_id = old_token.get('user_id')
+            
+            # Get the user
+            try:
+                user = User.objects.get(pk=user_id)
+            except User.DoesNotExist:
+                return Response(
+                    {'detail': 'User not found.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Blacklist the old refresh token
+            old_token.blacklist()
+            
+        except TokenError as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'detail': f'Invalid token: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Generate new tokens for the user
+        new_refresh = RefreshToken.for_user(user)
+        
+        return Response({
+            'refresh': str(new_refresh),
+            'access': str(new_refresh.access_token),
+        }, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])

@@ -158,7 +158,7 @@ class UserViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
         
-        serializer = self.get_serializer(normal_users, many=True)
+        serializer = self.get_serializer(normal_hUserV, many=True)
         return Response(serializer.data)
 
 

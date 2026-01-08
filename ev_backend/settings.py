@@ -29,11 +29,13 @@ INSTALLED_APPS = [
     # Third party
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     
     # Local apps
     'core.auth',
     'core.users',
+    'core.inventory',
     'core.booking',
     'core.wallet',
     'core.binary',
@@ -164,6 +166,8 @@ SIMPLE_JWT = {
     'ALGORITHM': config('JWT_ALGORITHM', default='HS256'),
     'SIGNING_KEY': config('JWT_SECRET_KEY', default=SECRET_KEY),
     'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
 }
 
 # Redis Configuration

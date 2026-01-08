@@ -73,7 +73,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         from core.booking.models import Booking
         total_paid = Booking.objects.filter(
             user=self,
-            status__in=['confirmed', 'completed']
+            status__in=['active', 'completed']
         ).aggregate(total=models.Sum('total_paid'))['total'] or 0
         
         was_active = self.is_active_buyer
