@@ -1,6 +1,7 @@
 from django.db import models
 import random
 import string
+import re
 
 
 def default_vehicle_color():
@@ -28,7 +29,14 @@ class Vehicle(models.Model):
         null=False,  # Don't allow NULL, use default list as default
         help_text='List of available vehicle colors (default: ["white"])'
     )
-    battery_variant = models.CharField(max_length=50)
+    # Battery variants - Array of available battery configurations (e.g., ["40kWh", "60kWh"])
+    # Default is empty list
+    battery_variant = models.JSONField(
+        default=list,
+        blank=True,
+        null=False,  # Don't allow NULL, use empty list as default
+        help_text='List of battery variants (e.g., ["40kWh", "60kWh"])'
+    )
     price = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='available')
     
@@ -66,13 +74,74 @@ class Vehicle(models.Model):
         verbose_name_plural = 'Vehicles'
         ordering = ['-created_at']
     
-    def generate_model_code(self):
-        """Generate unique model code in format EV-XXXXXX"""
+    @staticmethod
+    def _get_color_code(color):
+        """Convert color name to 3-letter uppercase code"""
+        color = color.lower().strip()
+        # Common color mappings
+        color_map = {
+            'white': 'WHT',
+            'red': 'RED',
+            'blue': 'BLU',
+            'black': 'BLK',
+            'gray': 'GRY',
+            'grey': 'GRY',
+            'green': 'GRN',
+            'yellow': 'YLW',
+            'orange': 'ORG',
+            'purple': 'PUR',
+            'pink': 'PNK',
+            'silver': 'SLV',
+            'gold': 'GLD',
+            'brown': 'BRN',
+        }
+        # Return mapped code or first 3 uppercase letters
+        if color in color_map:
+            return color_map[color]
+        # Fallback: use first 3 letters, uppercase, pad if needed
+        code = color[:3].upper()
+        if len(code) < 3:
+            code = code.ljust(3, 'X')
+        return code
+    
+    @staticmethod
+    def _get_battery_code(battery):
+        """Convert battery variant to code (e.g., '40kWh' -> '40K')"""
+        battery = str(battery).strip()
+        # Extract numbers from battery string
+        numbers = re.findall(r'\d+', battery)
+        if numbers:
+            # Take first number and add 'K'
+            return f"{numbers[0]}K"
+        # Fallback: use first 3 characters, uppercase
+        code = battery[:3].upper()
+        if len(code) < 3:
+            code = code.ljust(3, 'X')
+        return code
+    
+    def generate_model_code(self, color=None, battery_variant=None):
+        """Generate unique model code in format EV-{COLOR}-{BATTERY}-{RANDOM}"""
+        # Get color and battery from instance if not provided
+        if color is None:
+            if isinstance(self.vehicle_color, list) and len(self.vehicle_color) > 0:
+                color = self.vehicle_color[0]
+            else:
+                color = "white"
+        
+        if battery_variant is None:
+            if isinstance(self.battery_variant, list) and len(self.battery_variant) > 0:
+                battery_variant = self.battery_variant[0]
+            else:
+                battery_variant = "40kWh"  # Default fallback
+        
+        color_code = self._get_color_code(color)
+        battery_code = self._get_battery_code(battery_variant)
+        
         max_attempts = 100
         for _ in range(max_attempts):
             # Generate 6 random alphanumeric characters (uppercase letters and digits)
             random_chars = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-            code = f"EV-{random_chars}"
+            code = f"EV-{color_code}-{battery_code}-{random_chars}"
             
             # Check if code already exists (excluding current instance if updating)
             query = Vehicle.objects.filter(model_code=code)
@@ -89,16 +158,30 @@ class Vehicle(models.Model):
         """Override save to auto-generate model_code for new vehicles"""
         # Only generate model_code if it's not set and this is a new instance
         if not self.model_code and not self.pk:
-            self.model_code = self.generate_model_code()
+            # Get first color and battery for model code generation
+            color = None
+            battery = None
+            if isinstance(self.vehicle_color, list) and len(self.vehicle_color) > 0:
+                color = self.vehicle_color[0]
+            if isinstance(self.battery_variant, list) and len(self.battery_variant) > 0:
+                battery = self.battery_variant[0]
+            self.model_code = self.generate_model_code(color=color, battery_variant=battery)
         super().save(*args, **kwargs)
     
     def __str__(self):
-        # Handle vehicle_color as array - join colors or show first color
+        # Handle vehicle_color as array - show first color
         if isinstance(self.vehicle_color, list) and len(self.vehicle_color) > 0:
-            colors_display = ", ".join(self.vehicle_color) if len(self.vehicle_color) > 1 else self.vehicle_color[0]
+            colors_display = self.vehicle_color[0]
         else:
             colors_display = "white"  # Fallback to default
-        return f"{self.name} - {self.model_code} ({colors_display})"
+        
+        # Handle battery_variant as array - show first battery
+        if isinstance(self.battery_variant, list) and len(self.battery_variant) > 0:
+            battery_display = self.battery_variant[0]
+        else:
+            battery_display = "N/A"
+        
+        return f"{self.name} - {self.model_code} ({colors_display}, {battery_display})"
 
 
 class VehicleImage(models.Model):

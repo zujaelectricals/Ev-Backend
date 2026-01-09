@@ -164,4 +164,20 @@ class Payment(models.Model):
     
     def __str__(self):
         return f"Payment {self.transaction_id} - ₹{self.amount}"
+    
+    def save(self, *args, **kwargs):
+        """Override save to handle status changes"""
+        # Set completed_at when status changes to 'completed'
+        if self.pk:
+            try:
+                old_instance = Payment.objects.get(pk=self.pk)
+                if old_instance.status != 'completed' and self.status == 'completed':
+                    if not self.completed_at:
+                        self.completed_at = timezone.now()
+            except Payment.DoesNotExist:
+                pass
+        elif self.status == 'completed' and not self.completed_at:
+            self.completed_at = timezone.now()
+        
+        super().save(*args, **kwargs)
 

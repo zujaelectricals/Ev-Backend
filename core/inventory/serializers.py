@@ -1,7 +1,11 @@
 from rest_framework import serializers
 import json
+import logging
+import traceback
 from django.db import models as django_models
 from .models import Vehicle, VehicleImage
+
+logger = logging.getLogger(__name__)
 
 
 class VehicleImageSerializer(serializers.ModelSerializer):
@@ -67,15 +71,26 @@ class VehicleSerializer(serializers.ModelSerializer):
         required=False,
         write_only=True,
         allow_empty=True,
-        help_text='List of image IDs to link to this vehicle (images must be uploaded first)'
+        help_text='List of image IDs to link to this vehicle (images must be uploaded first). Fallback if color_images not provided.'
     )
+    color_images = serializers.DictField(
+        child=serializers.ListField(child=serializers.IntegerField()),
+        required=False,
+        write_only=True,
+        allow_empty=True,
+        help_text='Dictionary mapping color names to image IDs (e.g., {"white": [1, 2, 3], "red": [4, 5]}). Images will be linked to vehicles matching the color.'
+    )
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._created_vehicles = []  # Store all created vehicles
     
     class Meta:
         model = Vehicle
         fields = (
             'id', 'name', 'model_code', 'vehicle_color', 'battery_variant',
             'price', 'status', 'description', 'features', 'specifications',
-            'images', 'image_ids', 'primary_image_url', 'created_at', 'updated_at'
+            'images', 'image_ids', 'color_images', 'primary_image_url', 'created_at', 'updated_at'
         )
         read_only_fields = ('created_at', 'updated_at', 'model_code')
         extra_kwargs = {
@@ -173,6 +188,31 @@ class VehicleSerializer(serializers.ModelSerializer):
         
         return value
     
+    def validate_battery_variant(self, value):
+        """Validate that battery_variant is a list of strings"""
+        # If value is None or not provided, return empty list
+        if value is None:
+            return []
+        
+        # Handle JSON string from form-data
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                raise serializers.ValidationError('Battery variant must be a valid JSON array string.')
+        
+        if not isinstance(value, list):
+            raise serializers.ValidationError('Battery variant must be a list of battery configurations.')
+        
+        # Validate all items are strings
+        for battery in value:
+            if not isinstance(battery, str):
+                raise serializers.ValidationError('All battery variants must be strings.')
+            if not battery.strip():
+                raise serializers.ValidationError('Battery variants cannot be empty strings.')
+        
+        return value
+    
     def validate_image_ids(self, value):
         """Validate that image_ids reference existing images that can be linked"""
         if value is not None and len(value) > 0:
@@ -219,6 +259,74 @@ class VehicleSerializer(serializers.ModelSerializer):
                     )
         return value
     
+    def validate_color_images(self, value):
+        """Validate that color_images maps colors to valid image IDs"""
+        if value is None:
+            return {}
+        
+        # Handle JSON string from form-data
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                raise serializers.ValidationError('Color images must be a valid JSON object string.')
+        
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('Color images must be a dictionary mapping color names to image ID arrays.')
+        
+        # Validate each color's image IDs
+        all_image_ids = set()
+        for color, image_ids in value.items():
+            if not isinstance(color, str):
+                raise serializers.ValidationError('Color names in color_images must be strings.')
+            if not isinstance(image_ids, list):
+                raise serializers.ValidationError(f'Image IDs for color "{color}" must be an array.')
+            for img_id in image_ids:
+                if not isinstance(img_id, int):
+                    raise serializers.ValidationError(f'Image IDs must be integers. Found: {type(img_id).__name__}')
+                all_image_ids.add(img_id)
+        
+        # Validate that all referenced images exist and are unlinked
+        if all_image_ids:
+            instance = getattr(self, 'instance', None)
+            if instance:
+                # For updates: allow images that are unlinked OR already linked to this vehicle
+                valid_images = VehicleImage.objects.filter(
+                    id__in=all_image_ids
+                ).filter(
+                    django_models.Q(vehicle__isnull=True) | django_models.Q(vehicle=instance)
+                ).values_list('id', flat=True)
+            else:
+                # For creates: only allow unlinked images
+                valid_images = VehicleImage.objects.filter(
+                    id__in=all_image_ids,
+                    vehicle__isnull=True
+                ).values_list('id', flat=True)
+            
+            valid_ids = set(valid_images)
+            invalid_ids = all_image_ids - valid_ids
+            
+            if invalid_ids:
+                existing_but_linked = VehicleImage.objects.filter(
+                    id__in=invalid_ids
+                ).exclude(vehicle__isnull=True)
+                
+                if instance:
+                    existing_but_linked = existing_but_linked.exclude(vehicle=instance)
+                
+                if existing_but_linked.exists():
+                    raise serializers.ValidationError(
+                        f'Image IDs {list(invalid_ids)} in color_images are already linked to another vehicle. '
+                        'Please upload new images using /api/inventory/images/upload/'
+                    )
+                else:
+                    raise serializers.ValidationError(
+                        f'Image IDs {list(invalid_ids)} in color_images do not exist. '
+                        'Please upload images first using /api/inventory/images/upload/'
+                    )
+        
+        return value
+    
     def validate(self, data):
         """Validate vehicle data"""
         # Ensure features and specifications have default values if not provided
@@ -229,12 +337,29 @@ class VehicleSerializer(serializers.ModelSerializer):
         # Ensure vehicle_color has default value if not provided
         if 'vehicle_color' not in data or data.get('vehicle_color') is None:
             data['vehicle_color'] = ["white"]
+        # Ensure battery_variant has default value if not provided
+        if 'battery_variant' not in data or data.get('battery_variant') is None:
+            data['battery_variant'] = []
+        
+        # For create operations, ensure at least one color and one battery variant
+        if self.instance is None:  # Creating new vehicle
+            if not data.get('vehicle_color') or len(data.get('vehicle_color', [])) == 0:
+                raise serializers.ValidationError({
+                    'vehicle_color': 'At least one vehicle color is required.'
+                })
+            if not data.get('battery_variant') or len(data.get('battery_variant', [])) == 0:
+                raise serializers.ValidationError({
+                    'battery_variant': 'At least one battery variant is required.'
+                })
         
         return data
     
     def create(self, validated_data):
-        """Create vehicle and link existing images by IDs"""
+        """Create multiple vehicles - one for each battery variant. If color_images provided, create per color-battery combination."""
+        from django.db import transaction
+        
         image_ids = validated_data.pop('image_ids', [])
+        color_images = validated_data.pop('color_images', {})
         
         # Ensure features and specifications have default values if None
         if 'features' not in validated_data or validated_data.get('features') is None:
@@ -244,28 +369,133 @@ class VehicleSerializer(serializers.ModelSerializer):
         # Ensure vehicle_color has default value if None
         if 'vehicle_color' not in validated_data or validated_data.get('vehicle_color') is None:
             validated_data['vehicle_color'] = ["white"]
+        # Ensure battery_variant has default value if None
+        if 'battery_variant' not in validated_data or validated_data.get('battery_variant') is None:
+            validated_data['battery_variant'] = []
         
-        # Create vehicle
-        vehicle = Vehicle.objects.create(**validated_data)
+        # Get colors and battery variants
+        colors = validated_data.pop('vehicle_color', ["white"])
+        batteries = validated_data.pop('battery_variant', [])
         
-        # Link images to vehicle if image_ids provided
-        if image_ids:
-            # Get existing unlinked images
-            images = VehicleImage.objects.filter(
+        # Validate we have at least one color and one battery
+        if not colors or len(colors) == 0:
+            colors = ["white"]
+        if not batteries or len(batteries) == 0:
+            raise serializers.ValidationError({
+                'battery_variant': 'At least one battery variant is required.'
+            })
+        
+        # If color_images provided, validate all colors in color_images are in vehicle_color
+        if color_images:
+            color_images_colors = set(color_images.keys())
+            vehicle_colors = set(colors)
+            invalid_colors = color_images_colors - vehicle_colors
+            if invalid_colors:
+                raise serializers.ValidationError({
+                    'color_images': f'Colors {list(invalid_colors)} in color_images are not in vehicle_color array.'
+                })
+        
+        # Get images to link (fallback for backward compatibility)
+        images_to_link = []
+        if image_ids and not color_images:
+            images_to_link = list(VehicleImage.objects.filter(
                 id__in=image_ids,
                 vehicle__isnull=True
-            ).order_by('id')  # Preserve order based on IDs
-            
-            # Link images to vehicle and set order
-            for index, image in enumerate(images):
-                image.vehicle = vehicle
-                image.order = index
-                # Set first image as primary if no primary exists
-                if index == 0 and not vehicle.images.filter(is_primary=True).exists():
-                    image.is_primary = True
-                image.save()
+            ).order_by('id'))
         
-        return vehicle
+        # Create vehicles
+        created_vehicles = []
+        
+        with transaction.atomic():
+            # If color_images provided, create one vehicle per color-battery combination
+            # Otherwise, create one vehicle per battery with all colors
+            if color_images:
+                # First, collect all unlinked images by color
+                # Multiple vehicles can share the same images - each gets its own VehicleImage record
+                # No conflicts will occur as VehicleImage has no unique constraints on the image field
+                color_images_map = {}
+                for color, image_ids in color_images.items():
+                    if color in colors and image_ids:
+                        # Get the original unlinked images for this color
+                        # These images will be duplicated for each vehicle of this color
+                        original_images_query = VehicleImage.objects.filter(
+                            id__in=image_ids,
+                            vehicle__isnull=True
+                        ).order_by('id')
+                        # Store as list of tuples: (original_vehicle_image_object, alt_text)
+                        # We'll create new VehicleImage instances for each vehicle, all referencing the same image file
+                        image_data = []
+                        for img in original_images_query:
+                            if img.image:  # Ensure image exists
+                                # Store the original VehicleImage object - we'll use its image file for duplicates
+                                # Multiple VehicleImage instances can safely reference the same image file
+                                image_data.append((img, img.alt_text or ''))
+                        color_images_map[color] = image_data
+                
+                # Create per color-battery combination
+                for color in colors:
+                    for battery in batteries:
+                        vehicle_data = validated_data.copy()
+                        vehicle_data['vehicle_color'] = [color]  # Single color per vehicle
+                        vehicle_data['battery_variant'] = [battery]  # Single battery per vehicle
+                        
+                        vehicle = Vehicle.objects.create(**vehicle_data)
+                        created_vehicles.append(vehicle)
+                        
+                        # Link images for this color if specified in color_images
+                        # Duplicate image records for each vehicle of the same color
+                        if color in color_images_map and color_images_map[color]:
+                            image_data_list = color_images_map[color]
+                            
+                            for index, (original_image_obj, alt_text) in enumerate(image_data_list):
+                                # Create a duplicate VehicleImage instance for this vehicle
+                                # Multiple vehicles can share the same image file - no conflicts will occur
+                                # Each VehicleImage instance is separate, but they can reference the same underlying file
+                                try:
+                                    # Access the image file from the original VehicleImage object
+                                    # Django ImageField allows multiple instances to reference the same file path
+                                    # This is safe and efficient - no file copying occurs, just database records
+                                    new_image = VehicleImage.objects.create(
+                                        vehicle=vehicle,
+                                        image=original_image_obj.image,  # Same image file, different VehicleImage record
+                                        is_primary=(index == 0),  # First image is primary for this vehicle
+                                        alt_text=alt_text,
+                                        order=index
+                                    )
+                                    # Note: Multiple vehicles can have the same image file without conflicts
+                                    # Each VehicleImage is a separate database record linked to a different vehicle
+                                except Exception as e:
+                                    # Log error but continue - images might fail but vehicles should still be created
+                                    logger.error(f"Error creating image for vehicle {vehicle.id}, color {color}, battery {battery}: {str(e)}")
+                                    logger.error(traceback.format_exc())
+                                    continue
+            else:
+                # Create per battery only (backward compatibility - all colors in each vehicle)
+                for battery in batteries:
+                    vehicle_data = validated_data.copy()
+                    vehicle_data['vehicle_color'] = colors  # Keep all colors
+                    vehicle_data['battery_variant'] = [battery]  # Single battery per vehicle
+                    
+                    vehicle = Vehicle.objects.create(**vehicle_data)
+                    created_vehicles.append(vehicle)
+                
+                # Link images to first vehicle only (fallback)
+                if images_to_link and created_vehicles:
+                    first_vehicle = created_vehicles[0]
+                    for index, image in enumerate(images_to_link):
+                        image.vehicle = first_vehicle
+                        image.order = index
+                        # Set first image as primary if no primary exists
+                        if index == 0 and not first_vehicle.images.filter(is_primary=True).exists():
+                            image.is_primary = True
+                        image.save()
+        
+        # Store all created vehicles for access in view
+        self._created_vehicles = created_vehicles
+        
+        # Return first vehicle (ModelSerializer expects single instance)
+        # View will handle returning all vehicles
+        return created_vehicles[0] if created_vehicles else None
     
     def update(self, instance, validated_data):
         """Update vehicle and handle image linking"""
@@ -363,4 +593,83 @@ class VehicleListSerializer(serializers.ModelSerializer):
     def get_image_count(self, obj):
         """Return total number of images"""
         return obj.images.count()
+
+
+class VehicleVariantSerializer(serializers.ModelSerializer):
+    """Serializer for individual vehicle variant in grouped response"""
+    primary_image_url = serializers.SerializerMethodField()
+    image_count = serializers.SerializerMethodField()
+    images = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Vehicle
+        fields = (
+            'id', 'model_code', 'vehicle_color', 'battery_variant',
+            'price', 'status', 'primary_image_url', 'image_count', 'images', 'created_at'
+        )
+        read_only_fields = ('model_code',)
+    
+    def get_primary_image_url(self, obj):
+        """Return URL of primary image if exists"""
+        primary_image = obj.images.filter(is_primary=True).first()
+        if primary_image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(primary_image.image.url)
+            return primary_image.image.url
+        first_image = obj.images.first()
+        if first_image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(first_image.image.url)
+            return first_image.image.url
+        return None
+    
+    def get_image_count(self, obj):
+        """Return total number of images"""
+        return obj.images.count()
+    
+    def get_images(self, obj):
+        """Return all images for this variant"""
+        # Access images through the relationship
+        # Use prefetched images if available, otherwise query
+        try:
+            if hasattr(obj, '_prefetched_objects_cache') and 'images' in obj._prefetched_objects_cache:
+                images = obj._prefetched_objects_cache['images']
+            else:
+                # Query images directly
+                images = list(obj.images.all().order_by('order', '-is_primary', 'created_at'))
+        except Exception:
+            # Fallback if relationship access fails
+            images = []
+        
+        request = self.context.get('request')
+        result = []
+        for img in images:
+            if img and hasattr(img, 'image') and img.image:  # Only include images that have a file
+                try:
+                    image_url = img.image.url
+                    if request:
+                        image_url = request.build_absolute_uri(image_url)
+                    result.append({
+                        'id': img.id,
+                        'image_url': image_url,
+                        'is_primary': img.is_primary,
+                        'alt_text': img.alt_text or '',
+                        'order': img.order
+                    })
+                except Exception:
+                    # Skip images that can't be serialized
+                    continue
+        return result
+
+
+class VehicleGroupedSerializer(serializers.Serializer):
+    """Serializer for grouped vehicles by name"""
+    name = serializers.CharField()
+    variants = serializers.SerializerMethodField()
+    
+    def get_variants(self, obj):
+        """Serialize vehicle variants"""
+        return VehicleVariantSerializer(obj['variants'], many=True, context=self.context).data
 

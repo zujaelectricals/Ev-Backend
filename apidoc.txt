@@ -888,22 +888,22 @@ Super User: EVAdmin && EVAdmin@123
     
     Request Body:
     {
-      "vehicle_model": 1,           // Vehicle ID (integer) - Required
-      "vehicle_color": "Red",       // Required - must be one of the colors in vehicle's available colors array
-      "battery_variant": "40kWh",   // Required
-      "booking_amount": 500,        // Minimum ₹500
-      "total_amount": 50000,        // Required - must match vehicle_model.price
-      "payment_option": "full_payment",  // "full_payment" or "emi_options"
-      "delivery_city": "Mumbai",    // Required
-      "delivery_state": "Maharashtra",  // Required
-      "delivery_pin": "400001",     // Required
-      "terms_accepted": true,       // Required
-      "referred_by": 5,             // Optional - User ID of referrer
+      "vehicle_model_code": "EV-RED-40K-A9F3X2",  // Vehicle model code (string) - Required - Format: EV-{COLOR}-{BATTERY}-{RANDOM}
+      "vehicle_color": "Red",            // Required - must match the color in the vehicle's model_code
+      "battery_variant": "40kWh",         // Required - must match the battery variant in the vehicle's model_code
+      "booking_amount": 500,              // Minimum ₹500
+      "total_amount": 50000,              // Required - must match vehicle price
+      "payment_option": "full_payment",   // "full_payment" or "emi_options"
+      "delivery_city": "Mumbai",          // Required
+      "delivery_state": "Maharashtra",    // Required
+      "delivery_pin": "400001",           // Required
+      "terms_accepted": true,             // Required
+      "referral_code": "ABC12345",        // Optional - Referral code of referring user
       "join_distributor_program": false,  // Optional
-      "payment_gateway_ref": "TXN123",   // Optional
-      "emi_amount": 5000,           // Optional
-      "emi_duration_months": 10,    // Optional
-      "emi_start_date": "2026-02-01"  // Optional
+      "payment_gateway_ref": "TXN123",    // Optional
+      "emi_amount": 5000,                 // Optional
+      "emi_duration_months": 10,          // Optional
+      "emi_start_date": "2026-02-01"      // Optional
     }
     
     Response (201 Created):
@@ -912,12 +912,13 @@ Super User: EVAdmin && EVAdmin@123
       "user": 1,
       "booking_number": "EVABC1234",
       "vehicle_model": 1,
+      "model_code": "EV-RED-40K-A9F3X2",          // Vehicle model code (read-only) - Format: EV-{COLOR}-{BATTERY}-{RANDOM}
       "vehicle_details": {
         "id": 1,
         "name": "EV Model X",
-        "model_code": "EV-A9F3X2",
-        "vehicle_color": ["white", "red", "blue"],
-        "battery_variant": "40kWh",
+        "model_code": "EV-RED-40K-A9F3X2",
+        "vehicle_color": ["red"],  // Single color per vehicle
+        "battery_variant": ["40kWh"],  // Single battery variant per vehicle
         "price": "50000.00"
       },
       "vehicle_color": "Red",
@@ -927,6 +928,7 @@ Super User: EVAdmin && EVAdmin@123
       "total_paid": "0.00",
       "remaining_amount": "50000.00",
       "status": "pending",  // "pending", "active", "completed", "cancelled", "expired"
+      "referred_by": 5,     // User ID of referrer (if referral_code was used)
       "delivery_city": "Mumbai",
       "delivery_state": "Maharashtra",
       "delivery_pin": "400001",
@@ -935,8 +937,17 @@ Super User: EVAdmin && EVAdmin@123
       "created_at": "2026-01-06T12:00:00Z"
     }
     
+    Note on Referral Code:
+    - If referral_code is provided, the system validates it and sets referred_by automatically
+    - User cannot use their own referral code (self-referral prevention)
+    - If user.referred_by is not set, it will be set from the referral_code
+    - Commission is granted to the referrer after successful payment capture
+      * Commission = payment_amount × REFERRAL_COMMISSION_PERCENTAGE / 100
+      * Commission is granted on every successful payment for the booking
+    
     Error Response (400):
     {
+      "vehicle_model_code": ["Vehicle with model_code 'EV-INVALID' not found"],
       "booking_amount": ["Minimum booking amount is ₹500"],
       "total_amount": ["Total amount must match vehicle price (₹50000.00)"],
       "delivery_city": ["Delivery city is required"]
@@ -966,9 +977,9 @@ Super User: EVAdmin && EVAdmin@123
           "vehicle_details": {
             "id": 1,
             "name": "EV Model X",
-            "model_code": "EVX-2026",
-            "vehicle_color": ["white", "red", "blue"],
-            "battery_variant": "40kWh",
+            "model_code": "EV-RED-40K-A9F3X2",
+            "vehicle_color": ["red"],
+            "battery_variant": ["40kWh"],
             "price": "50000.00"
           },
           "total_amount": "50000.00",
@@ -990,13 +1001,13 @@ Super User: EVAdmin && EVAdmin@123
       "id": 1,
       "booking_number": "EVABC1234",
       "user": 1,
-      "vehicle_model": 1,
-      "vehicle_details": {
-        "id": 1,
-        "name": "EV Model X",
-        "model_code": "EV-A9F3X2",
-        "vehicle_color": ["white", "red", "blue"],
-        "battery_variant": "40kWh",
+          "vehicle_model": 1,
+          "vehicle_details": {
+            "id": 1,
+            "name": "EV Model X",
+            "model_code": "EV-RED-40K-A9F3X2",
+            "vehicle_color": ["red"],
+            "battery_variant": ["40kWh"],
         "price": "50000.00"
       },
       "vehicle_color": "Red",
@@ -1053,13 +1064,61 @@ Super User: EVAdmin && EVAdmin@123
       * If total_paid ≥ ₹5000: status changes to 'active' (Active Buyer)
       * If remaining_amount ≤ 0: status changes to 'completed'
     - Active Buyer status is updated when total paid reaches ₹5000
+    - If booking was created with a referral_code, commission is automatically granted to the referrer
+      * Commission = payment_amount × REFERRAL_COMMISSION_PERCENTAGE / 100
+      * Commission is granted on every successful payment for the booking
 
 
-28. LIST PAYMENTS
+28. ACCEPT PAYMENT (Admin/Staff Only)
+    Method: POST
+    URL: /api/booking/bookings/{id}/accept_payment/
+    Authentication: Required (Admin or Staff)
+    Description: Accept payment on behalf of a user (for manual payment processing)
+    
+    Request Body:
+    {
+      "amount": 5000,
+      "payment_method": "cash",  // "online", "bank_transfer", "cash", "wallet"
+      "transaction_id": "TXN123456",  // Optional - transaction reference
+      "notes": "Payment received at counter"  // Optional - additional notes
+    }
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "booking": 1,
+      "booking_number": "EVABC1234",
+      "user": 1,
+      "amount": "5000.00",
+      "payment_method": "cash",
+      "status": "completed",
+      "transaction_id": "TXN123456",
+      "notes": "Payment received at counter",
+      "payment_date": "2026-01-06T12:00:00Z",
+      "completed_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Amount exceeds remaining amount"
+    }
+    
+    Error Response (403):
+    {
+      "error": "Permission denied. Only admin or staff can accept payments."
+    }
+    
+    Note:
+    - Only admin or staff can use this endpoint
+    - Payment is automatically marked as 'completed'
+    - Booking status and referral commission are processed automatically
+
+
+29. LIST PAYMENTS
     Method: GET
     URL: /api/booking/payments/
     Authentication: Required
-    Description: List payment history
+    Description: List payment history (users see their own, admin/staff see all)
     
     Response (200 OK):
     {
@@ -1077,11 +1136,99 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
+30. CREATE PAYMENT (Admin/Staff Only)
+    Method: POST
+    URL: /api/booking/payments/
+    Authentication: Required (Admin or Staff)
+    Description: Create a payment record (admin/staff only)
+    
+    Request Body:
+    {
+      "booking": 1,  // Booking ID - Required
+      "amount": 5000,
+      "payment_method": "cash",  // "online", "bank_transfer", "cash", "wallet"
+      "status": "completed",  // "pending", "completed", "failed", "refunded"
+      "transaction_id": "TXN123456",  // Optional
+      "notes": "Payment received"  // Optional
+    }
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "booking": 1,
+      "booking_number": "EVABC1234",
+      "user": 1,
+      "amount": "5000.00",
+      "payment_method": "cash",
+      "status": "completed",
+      "transaction_id": "TXN123456",
+      "notes": "Payment received",
+      "payment_date": "2026-01-06T12:00:00Z",
+      "completed_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin or staff can create payments"
+    }
+    
+    Note:
+    - User is automatically set from booking.user
+    - If status is 'completed', booking payment is processed automatically
+
+
+31. UPDATE PAYMENT STATUS (Admin/Staff Only)
+    Method: PATCH
+    URL: /api/booking/payments/{id}/update_status/
+    Authentication: Required (Admin or Staff)
+    Description: Update payment status (admin/staff only)
+    
+    Request Body:
+    {
+      "status": "completed",  // "pending", "completed", "failed", "refunded"
+      "transaction_id": "TXN123456",  // Optional - update transaction ID
+      "notes": "Payment verified"  // Optional - update notes
+    }
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "booking": 1,
+      "booking_number": "EVABC1234",
+      "user": 1,
+      "amount": "5000.00",
+      "payment_method": "cash",
+      "status": "completed",
+      "transaction_id": "TXN123456",
+      "notes": "Payment verified",
+      "payment_date": "2026-01-06T12:00:00Z",
+      "completed_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Invalid status. Valid choices: ['pending', 'completed', 'failed', 'refunded']"
+    }
+    
+    Error Response (403):
+    {
+      "error": "Permission denied. Only admin or staff can update payment status."
+    }
+    
+    Note:
+    - Valid status transitions:
+      * pending -> completed, failed
+      * completed -> refunded, failed
+      * failed -> pending, completed
+      * refunded -> (no transitions allowed)
+    - If status changes to 'completed', booking payment is processed automatically
+
+
 ================================================================================
                         VEHICLE INVENTORY APIs
 ================================================================================
 
-29. UPLOAD IMAGES
+32. UPLOAD IMAGES
     Method: POST
     URL: /api/inventory/images/upload/
     Authentication: Required (Admin/Superuser only)
@@ -1131,44 +1278,134 @@ Super User: EVAdmin && EVAdmin@123
     Method: GET
     URL: /api/inventory/vehicles/
     Authentication: Required (All authenticated users)
-    Description: List all available vehicles with primary image
+    Description: List all available vehicles grouped by name. Each vehicle name contains all its variants (color-battery combinations). Supports pagination, filtering, and search.
     
     Query Parameters:
-    - page: Page number
-    - status: Filter by status (available, out_of_stock, discontinued)
-    - search: Search in name, model_code, or description
+    - page: (optional) Page number (default: 1)
+    - page_size: (optional) Number of vehicle groups per page (default: 10, max: 100)
+    - name: (optional) Filter by vehicle name (case-insensitive, partial match)
+    - model_code: (optional) Filter by model code (case-insensitive, partial match)
+    - status: (optional) Filter by status (available, out_of_stock, discontinued)
+    - color: (optional) Filter by vehicle color (e.g., "white", "red", "blue")
+    - battery: (optional) Filter by battery variant (e.g., "40kWh", "60kWh")
+    - min_price: (optional) Filter by minimum price (numeric)
+    - max_price: (optional) Filter by maximum price (numeric)
+    - search: (optional) Search across name, model_code, description, and features (case-insensitive)
+    
+    Examples:
+    - /api/inventory/vehicles/?page=1&page_size=20
+    - /api/inventory/vehicles/?name=EV Model X
+    - /api/inventory/vehicles/?model_code=EV-WHT
+    - /api/inventory/vehicles/?status=available
+    - /api/inventory/vehicles/?color=white&battery=40kWh
+    - /api/inventory/vehicles/?min_price=40000&max_price=60000
+    - /api/inventory/vehicles/?search=premium
+    - /api/inventory/vehicles/?page=2&page_size=10&status=available&search=EV
     
     Response (200 OK):
     {
-      "count": 10,
+      "count": 1,  // Number of unique vehicle names (groups) matching filters
+      "next": "http://127.0.0.1:8000/api/inventory/vehicles/?page=2",  // URL for next page (null if last page)
+      "previous": null,  // URL for previous page (null if first page)
+      "page_size": 10,  // Number of vehicle groups per page
+      "current_page": 1,  // Current page number
+      "total_pages": 1,  // Total number of pages
       "results": [
         {
-          "id": 1,
-          "name": "EV Model X",
-          "model_code": "EV-A9F3X2",
-          "vehicle_color": ["white", "red", "blue"],  // Array of available colors, default: ["white"]
-          "battery_variant": "40kWh",
-          "price": "50000.00",
-          "status": "available",
-          "features": ["USB Charging Port", "Parking Mode", "Reverse Gear"],  // Optional, can be empty array []
-          "specifications": {  // Optional, can be empty object {}
-            "Battery": "60V × 50AH",
-            "Motor Power": "48V/60V/72V 1000W",
-            "Max Speed": "25 km/h"
-          },
-          "primary_image_url": "http://localhost:8000/media/vehicles/images/evx-red.jpg",
-          "image_count": 3,
-          "created_at": "2026-01-06T12:00:00Z"
+          "name": "EV Model X2",
+          "variants": [
+            {
+              "id": 19,
+              "model_code": "EV-BLU-60K-TMMR0A",
+              "vehicle_color": ["blue"],
+              "battery_variant": ["60kWh"],
+              "price": "50000.00",
+              "status": "available",
+              "primary_image_url": null,
+              "image_count": 0,
+              "created_at": "2026-01-09T09:49:41.403303+05:30"
+            },
+            {
+              "id": 18,
+              "model_code": "EV-BLU-40K-SCDA4J",
+              "vehicle_color": ["blue"],
+              "battery_variant": ["40kWh"],
+              "price": "50000.00",
+              "status": "available",
+              "primary_image_url": null,
+              "image_count": 0,
+              "created_at": "2026-01-09T09:49:41.402882+05:30"
+            },
+            {
+              "id": 17,
+              "model_code": "EV-RED-60K-KE16X4",
+              "vehicle_color": ["red"],
+              "battery_variant": ["60kWh"],
+              "price": "50000.00",
+              "status": "available",
+              "primary_image_url": null,
+              "image_count": 0,
+              "created_at": "2026-01-09T09:49:41.402442+05:30"
+            },
+            {
+              "id": 16,
+              "model_code": "EV-RED-40K-RZ2O33",
+              "vehicle_color": ["red"],
+              "battery_variant": ["40kWh"],
+              "price": "50000.00",
+              "status": "available",
+              "primary_image_url": null,
+              "image_count": 0,
+              "created_at": "2026-01-09T09:49:41.402047+05:30"
+            },
+            {
+              "id": 15,
+              "model_code": "EV-WHT-60K-2EZP7T",
+              "vehicle_color": ["white"],
+              "battery_variant": ["60kWh"],
+              "price": "50000.00",
+              "status": "available",
+              "primary_image_url": null,
+              "image_count": 0,
+              "created_at": "2026-01-09T09:49:41.401623+05:30"
+            },
+            {
+              "id": 14,
+              "model_code": "EV-WHT-40K-QKUK9J",
+              "vehicle_color": ["white"],
+              "battery_variant": ["40kWh"],
+              "price": "50000.00",
+              "status": "available",
+              "primary_image_url": "http://127.0.0.1:8000/media/vehicles/images/Screenshot_2025-12-29_095141_yNKhXBN.png",
+              "image_count": 2,
+              "created_at": "2026-01-09T09:49:41.396665+05:30"
+            }
+          ]
         }
       ]
     }
     
     Notes:
-    - vehicle_color: Array of available colors, default is ["white"] if not provided
-    - features: Optional field, can be omitted or empty array []
-    - specifications: Optional field, can be omitted or empty object {}
-    - No limit on number of features or specification key-value pairs
-    - You can add any custom specification keys and values
+    - Vehicles are grouped by name, with all color-battery variants under each name
+    - Pagination is based on vehicle groups (names), not individual vehicles
+    - count refers to the number of unique vehicle names matching the filters
+    - All filters can be combined (e.g., ?name=EV&status=available&color=white&min_price=40000)
+    - Search parameter searches across multiple fields: name, model_code, description, and features
+    - Color and battery filters use array containment (vehicle must have that color/battery in its array)
+    - Price filters accept numeric values (decimals supported)
+    - Results are ordered by creation date (newest first)
+    - Default page size is 10, maximum is 100
+    - Use page parameter for pagination (e.g., ?page=2)
+    - Use page_size parameter to change items per page (e.g., ?page_size=20)
+    - Each group contains all variants (color-battery combinations) for that vehicle name
+    - count represents the number of unique vehicle names, not individual vehicles
+    - Each variant includes: id, model_code, vehicle_color, battery_variant, price, status, primary_image_url, image_count, created_at
+    - model_code format: EV-{COLOR_CODE}-{BATTERY_CODE}-{RANDOM} (e.g., EV-WHT-40K-A9F3X2)
+      - COLOR_CODE uses the first color from vehicle_color array
+      - BATTERY_CODE extracted from battery variant (40kWh → 40K)
+    - vehicle_color: Array of available colors (e.g., ["white", "red", "blue"])
+    - battery_variant: Array with single battery variant (e.g., ["40kWh"])
+    - Filtering by status or search works on individual variants, but results are still grouped by name
     
     Error Response (401):
     {
@@ -1183,7 +1420,12 @@ Super User: EVAdmin && EVAdmin@123
     Description: Get detailed information about a specific vehicle including all images, features, and specifications
     
     Notes:
-    - vehicle_color: Array of available colors, default is ["white"] if not set
+    - Each vehicle has multiple colors and a single battery variant
+    - model_code format: EV-{COLOR_CODE}-{BATTERY_CODE}-{RANDOM} (e.g., EV-WHT-40K-A9F3X2)
+      - COLOR_CODE uses the first color from vehicle_color array
+      - BATTERY_CODE extracted from battery variant (40kWh → 40K)
+    - vehicle_color: Array of available colors (e.g., ["white", "red", "blue"])
+    - battery_variant: Array with single battery variant (e.g., ["40kWh"])
     - features: Optional field, returns empty array [] if not set
     - specifications: Optional field, returns empty object {} if not set
     - No limit on number of features or specifications
@@ -1193,9 +1435,9 @@ Super User: EVAdmin && EVAdmin@123
     {
       "id": 1,
       "name": "EV Model X",
-      "model_code": "EV-A9F3X2",
-      "vehicle_color": ["white", "red", "blue"],  // Array of available colors, default: ["white"]
-      "battery_variant": "40kWh",
+      "model_code": "EV-WHT-40K-A9F3X2",  // Format: EV-{COLOR}-{BATTERY}-{RANDOM}
+      "vehicle_color": ["white", "red", "blue"],  // Array of available colors
+      "battery_variant": ["40kWh"],  // Single battery variant per vehicle (array with one element)
       "price": "50000.00",
       "status": "available",
       "description": "Premium electric vehicle with advanced features",
@@ -1258,15 +1500,15 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/inventory/vehicles/
     Authentication: Required (Admin/Superuser only)
-    Description: Create a new vehicle. Images must be uploaded first using /api/inventory/images/upload/ and linked via image_ids.
+    Description: Create vehicles. If color_images provided, creates one vehicle per color-battery combination. Otherwise, creates one vehicle per battery variant. Images must be uploaded first using /api/inventory/images/upload/ and linked via color_images or image_ids.
     
     Content-Type: application/json
     
     Request Body (JSON):
     {
       "name": "EV Model X",
-      "vehicle_color": ["white", "red", "blue"],  // Array of available colors, default: ["white"]
-      "battery_variant": "40kWh",
+      "vehicle_color": ["white", "red", "blue"],  // Array of colors
+      "battery_variant": ["40kWh", "60kWh"],  // Array of battery variants
       "price": 50000,
       "status": "available",
       "description": "Premium electric vehicle",
@@ -1276,76 +1518,162 @@ Super User: EVAdmin && EVAdmin@123
         "Motor Power": "48V/60V/72V 1000W",
         "Max Speed": "25 km/h"
       },
-      "image_ids": [1, 2, 3]
+      "color_images": {  // Optional: Map colors to image IDs for per-color images
+        "white": [1, 2, 3],
+        "red": [4, 5],
+        "blue": [6, 7, 8]
+      },
+      "image_ids": [1, 2, 3]  // Optional: Fallback - links to first vehicle if color_images not provided
     }
     
     Field Descriptions:
     - name: (required) Vehicle name
-    - model_code: (auto-generated, read-only) Automatically generated model code in format EV-XXXXXX (e.g., EV-A9F3X2) where XXXXXX is 6 random alphanumeric characters. Do not include in request.
-    - vehicle_color: (optional, default: ["white"]) Array of available vehicle colors (e.g., ["white", "red", "blue"]). Default is ["white"] if not provided.
-    - battery_variant: (required) Battery variant
-    - price: (required) Vehicle price
+    - model_code: (auto-generated, read-only) Automatically generated model code in format EV-{COLOR}-{BATTERY}-{RANDOM} (e.g., EV-WHT-40K-A9F3X2). Do not include in request.
+    - vehicle_color: (required) Array of vehicle colors (e.g., ["white", "red", "blue"])
+    - battery_variant: (required) Array of battery variants (e.g., ["40kWh", "60kWh"])
+    - price: (required) Vehicle price (applies to all created vehicles)
     - status: (optional, default: "available") Status: "available", "out_of_stock", "discontinued"
-    - description: (optional) Vehicle description
-    - features: (optional) Array of feature strings - unlimited items
-    - specifications: (optional) Object with key-value pairs - unlimited custom fields
+    - description: (optional) Vehicle description (applies to all created vehicles)
+    - features: (optional) Array of feature strings - unlimited items (applies to all created vehicles)
+    - specifications: (optional) Object with key-value pairs - unlimited custom fields (applies to all created vehicles)
+    - color_images: (optional) Dictionary mapping color names to arrays of image IDs (e.g., {"white": [1,2,3], "red": [4,5]})
+      - If provided, creates one vehicle per color-battery combination with images linked per color
+      - Keys must match colors in vehicle_color array
+      - All image IDs must reference unlinked images from /api/inventory/images/upload/
     - image_ids: (optional) Array of image IDs from /api/inventory/images/upload/ endpoint
+      - Only used if color_images is not provided (backward compatibility)
+      - Images are linked to the first created vehicle
     
     Notes:
-    - model_code is automatically generated by the backend in format EV-XXXXXX (e.g., EV-A9F3X2) and cannot be provided in the request
-    - vehicle_color: Array of available colors (e.g., ["white", "red", "blue"]). Default is ["white"] if not provided.
+    - If color_images provided: Creates one vehicle per color-battery combination (e.g., 3 colors × 2 batteries = 6 vehicles)
+      - Each vehicle has a single color and single battery variant
+      - Images are linked to vehicles based on color mapping in color_images
+      - Example: color_images={"white": [1,2], "red": [3,4]} links images 1,2 to white vehicles and 3,4 to red vehicles
+    - If color_images NOT provided: Creates one vehicle per battery variant (backward compatibility)
+      - Each vehicle contains all colors in vehicle_color array
+      - Example: 3 colors + 2 batteries = 2 vehicles created (each with all 3 colors)
+      - Images from image_ids are linked to the first created vehicle only
+    - model_code format: EV-{COLOR_CODE}-{BATTERY_CODE}-{RANDOM}
+      - COLOR_CODE: 3-letter code from color (WHT, RED, BLU, BLK, GRY, etc.)
+      - BATTERY_CODE: Extracted from battery variant (40kWh → 40K, 60kWh → 60K)
+      - RANDOM: 6 random alphanumeric characters
+      Example: EV-WHT-40K-A9F3X2 (Color: white, Battery: 40kWh)
+    - color_images: Optional dictionary mapping color names to arrays of image IDs
+      - Keys must match colors in vehicle_color array
+      - All image IDs must reference images uploaded via /api/inventory/images/upload/
+      - Images must be unlinked (not already associated with another vehicle)
+    - image_ids: Optional array of image IDs (fallback if color_images not provided)
+      - Only used if color_images is not provided
+      - Images are linked to the first created vehicle only
     - Features and specifications are completely optional - can be omitted or left empty
     - No limit on number of features or specifications
-    - image_ids must reference images uploaded via /api/inventory/images/upload/
-    - Images must be unlinked (not already associated with another vehicle)
-    - First image in image_ids array will be set as primary if no primary exists
+    - First image for each vehicle will be set as primary if no primary exists
     
-    Response (201 Created):
-    {
-      "id": 1,
-      "name": "EV Model X",
-      "model_code": "EV-A9F3X2",
-      "vehicle_color": ["white", "red", "blue"],  // Array of available colors
-      "battery_variant": "40kWh",
-      "price": "50000.00",
-      "status": "available",
-      "description": "Premium electric vehicle",
-      "features": [
-        "USB Charging Port",
-        "Parking Mode",
-        "Reverse Gear"
-      ],
-      "specifications": {
-        "Battery": "60V × 50AH",
-        "Motor Power": "48V/60V/72V 1000W",
-        "Charging Duration": "4-5h",
-        "Max Speed": "25 km/h",
-        "Mileage": "125+ km",
-        "Battery Type": "Lithium-ion Battery",
-        "Motor Type": "Brushless DC"
-      },
-      "images": [
-        {
-          "id": 1,
-          "image": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
-          "image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
-          "is_primary": true,
-          "alt_text": "",
-          "order": 0
+    Response (201 Created) - Array of created vehicles:
+    [
+      {
+        "id": 1,
+        "name": "EV Model X",
+        "model_code": "EV-WHT-40K-A9F3X2",  // Color: white, Battery: 40kWh (when color_images provided)
+        "vehicle_color": ["white"],  // Single color per vehicle when color_images provided
+        "battery_variant": ["40kWh"],  // Single battery per vehicle
+        "price": "50000.00",
+        "status": "available",
+        "description": "Premium electric vehicle",
+        "features": [
+          "USB Charging Port",
+          "Parking Mode",
+          "Reverse Gear"
+        ],
+        "specifications": {
+          "Battery": "60V × 50AH",
+          "Motor Power": "48V/60V/72V 1000W",
+          "Charging Duration": "4-5h",
+          "Max Speed": "25 km/h",
+          "Mileage": "125+ km",
+          "Battery Type": "Lithium-ion Battery",
+          "Motor Type": "Brushless DC"
         },
-        {
-          "id": 2,
-          "image": "http://localhost:8000/media/vehicles/images/evx-red-2.jpg",
-          "image_url": "http://localhost:8000/media/vehicles/images/evx-red-2.jpg",
-          "is_primary": false,
-          "alt_text": "",
-          "order": 1
-        }
-      ],
-      "primary_image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
-      "created_at": "2026-01-08T12:00:00Z",
-      "updated_at": "2026-01-08T12:00:00Z"
-    }
+        "images": [
+          {
+            "id": 1,
+            "image": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+            "image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+            "is_primary": true,
+            "alt_text": "",
+            "order": 0
+          },
+          {
+            "id": 2,
+            "image": "http://localhost:8000/media/vehicles/images/evx-red-2.jpg",
+            "image_url": "http://localhost:8000/media/vehicles/images/evx-red-2.jpg",
+            "is_primary": false,
+            "alt_text": "",
+            "order": 1
+          }
+        ],
+        "primary_image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+        "created_at": "2026-01-08T12:00:00Z",
+        "updated_at": "2026-01-08T12:00:00Z"
+      },
+      {
+        "id": 2,
+        "name": "EV Model X",
+        "model_code": "EV-WHT-60K-B7C4Y1",  // Color: white, Battery: 60kWh (when color_images provided)
+        "vehicle_color": ["white"],  // Single color per vehicle when color_images provided
+        "battery_variant": ["60kWh"],  // Single battery per vehicle
+        "price": "50000.00",
+        "status": "available",
+        "description": "Premium electric vehicle",
+        "features": [
+          "USB Charging Port",
+          "Parking Mode",
+          "Reverse Gear"
+        ],
+        "specifications": {
+          "Battery": "60V × 50AH",
+          "Motor Power": "48V/60V/72V 1000W",
+          "Charging Duration": "4-5h",
+          "Max Speed": "25 km/h",
+          "Mileage": "125+ km",
+          "Battery Type": "Lithium-ion Battery",
+          "Motor Type": "Brushless DC"
+        },
+        "images": [],
+        "primary_image_url": null,
+        "created_at": "2026-01-08T12:00:00Z",
+        "updated_at": "2026-01-08T12:00:00Z"
+      },
+      {
+        "id": 3,
+        "name": "EV Model X",
+        "model_code": "EV-RED-40K-C8D5Z2",  // Red, 40kWh
+        "vehicle_color": ["red"],
+        "battery_variant": ["40kWh"],
+        "price": "50000.00",
+        "status": "available",
+        "description": "Premium electric vehicle",
+        "features": [
+          "USB Charging Port",
+          "Parking Mode",
+          "Reverse Gear"
+        ],
+        "specifications": {
+          "Battery": "60V × 50AH",
+          "Motor Power": "48V/60V/72V 1000W",
+          "Charging Duration": "4-5h",
+          "Max Speed": "25 km/h",
+          "Mileage": "125+ km",
+          "Battery Type": "Lithium-ion Battery",
+          "Motor Type": "Brushless DC"
+        },
+        "images": [],
+        "primary_image_url": null,
+        "created_at": "2026-01-08T12:00:00Z",
+        "updated_at": "2026-01-08T12:00:00Z"
+      }
+      // ... more vehicles for each color-battery combination
+    ]
     
     Error Response (400):
     {
@@ -1389,6 +1717,7 @@ Super User: EVAdmin && EVAdmin@123
     - All fields are optional (partial update)
     - model_code is read-only and cannot be updated (it is auto-generated when the vehicle is created)
     - vehicle_color: Array of available colors (e.g., ["white", "red", "blue"]). Can be updated to change available colors.
+    - battery_variant: Array with single battery variant (e.g., ["40kWh"]). Can be updated to change battery variant.
     - Features and specifications are optional - can be omitted, updated, or left empty
     - No limit on number of features or specifications
     - image_ids: Array of image IDs from /api/inventory/images/upload/ to link to vehicle
@@ -1398,9 +1727,9 @@ Super User: EVAdmin && EVAdmin@123
     {
       "id": 1,
       "name": "EV Model X Updated",
-      "model_code": "EV-A9F3X2",
+      "model_code": "EV-WHT-40K-A9F3X2",  // Format: EV-{COLOR}-{BATTERY}-{RANDOM}
       "vehicle_color": ["white", "red", "blue"],  // Array of available colors
-      "battery_variant": "40kWh",
+      "battery_variant": ["40kWh"],  // Single battery variant per vehicle
       "price": "55000.00",
       "status": "out_of_stock",
       "description": "Updated description",

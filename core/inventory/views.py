@@ -3,9 +3,30 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, BasePermission
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
 from .models import Vehicle, VehicleImage
-from .serializers import VehicleSerializer, VehicleListSerializer, VehicleImageSerializer, ImageUploadSerializer
+from .serializers import VehicleSerializer, VehicleListSerializer, VehicleImageSerializer, ImageUploadSerializer, VehicleGroupedSerializer, VehicleVariantSerializer
+
+
+class VehicleGroupedPagination(PageNumberPagination):
+    """Custom pagination for grouped vehicle list"""
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+    page_query_param = 'page'
+    
+    def get_paginated_response(self, data):
+        """Return paginated response with count of vehicle groups (not individual vehicles)"""
+        return Response({
+            'count': self.page.paginator.count,  # Count of vehicle groups
+            'next': self.get_next_link(),
+            'previous': self.get_previous_link(),
+            'page_size': self.page_size,
+            'current_page': self.page.number,
+            'total_pages': self.page.paginator.num_pages,
+            'results': data
+        })
 
 
 class IsAdminOrReadOnly(BasePermission):
@@ -40,6 +61,7 @@ class VehicleViewSet(viewsets.ModelViewSet):
     queryset = Vehicle.objects.all()
     permission_classes = [IsAdminOrReadOnly]
     parser_classes = [parsers.JSONParser]  # JSON only - images uploaded separately
+    pagination_class = VehicleGroupedPagination
     
     def check_admin_permission(self):
         """Check if user is admin or superuser"""
@@ -50,41 +72,138 @@ class VehicleViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         """Use different serializers for list vs detail"""
         if self.action == 'list':
-            return VehicleListSerializer
+            return VehicleGroupedSerializer
         return VehicleSerializer
     
     def get_queryset(self):
-        """Filter vehicles based on user role and query params"""
-        queryset = Vehicle.objects.all()
+        """Filter vehicles based on query params"""
+        queryset = Vehicle.objects.all().prefetch_related('images')
+        
+        # Filter by name (exact match or contains)
+        name = self.request.query_params.get('name', None)
+        if name:
+            queryset = queryset.filter(name__icontains=name)
+        
+        # Filter by model_code (exact match or contains)
+        model_code = self.request.query_params.get('model_code', None)
+        if model_code:
+            queryset = queryset.filter(model_code__icontains=model_code)
         
         # Filter by status
         status_param = self.request.query_params.get('status', None)
         if status_param:
             queryset = queryset.filter(status=status_param)
         
-        # Filter by search query
+        # Filter by color (if vehicle_color array contains the color)
+        color = self.request.query_params.get('color', None)
+        if color:
+            queryset = queryset.filter(vehicle_color__contains=[color])
+        
+        # Filter by battery variant (if battery_variant array contains the variant)
+        battery = self.request.query_params.get('battery', None)
+        if battery:
+            queryset = queryset.filter(battery_variant__contains=[battery])
+        
+        # Filter by price range
+        min_price = self.request.query_params.get('min_price', None)
+        max_price = self.request.query_params.get('max_price', None)
+        if min_price:
+            try:
+                queryset = queryset.filter(price__gte=float(min_price))
+            except (ValueError, TypeError):
+                pass
+        if max_price:
+            try:
+                queryset = queryset.filter(price__lte=float(max_price))
+            except (ValueError, TypeError):
+                pass
+        
+        # Search query (searches across multiple fields)
         search = self.request.query_params.get('search', None)
         if search:
             queryset = queryset.filter(
                 Q(name__icontains=search) |
                 Q(model_code__icontains=search) |
-                Q(description__icontains=search)
+                Q(description__icontains=search) |
+                Q(features__icontains=search)  # Search in features array
             )
+        
+        # Order by created_at (newest first) by default
+        queryset = queryset.order_by('-created_at')
         
         return queryset
     
+    def list(self, request, *args, **kwargs):
+        """List vehicles grouped by name"""
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # Ensure images are prefetched
+        queryset = queryset.prefetch_related('images')
+        
+        # Group vehicles by name
+        from collections import defaultdict
+        grouped_vehicles = defaultdict(list)
+        
+        # Convert queryset to list to preserve prefetch
+        vehicles_list = list(queryset)
+        for vehicle in vehicles_list:
+            grouped_vehicles[vehicle.name].append(vehicle)
+        
+        # Convert to list of dictionaries for serializer
+        grouped_data = []
+        for name, vehicles in grouped_vehicles.items():
+            # Sort variants within each group by creation date (newest first)
+            sorted_variants = sorted(vehicles, key=lambda v: v.created_at, reverse=True)
+            grouped_data.append({
+                'name': name,
+                'variants': sorted_variants
+            })
+        
+        # Sort groups by name
+        grouped_data.sort(key=lambda x: x['name'])
+        
+        # Serialize grouped data with request context
+        serializer = self.get_serializer(grouped_data, many=True, context={'request': request})
+        
+        # Return paginated response if pagination is enabled
+        page = self.paginate_queryset(grouped_data)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        
+        return Response(serializer.data)
+    
     def create(self, request, *args, **kwargs):
-        """Create vehicle with JSON - Admin only"""
+        """Create vehicles with JSON - Admin only. Creates multiple vehicles for each color-battery combination."""
         # Permission is checked by IsAdminOrReadOnly permission class
         # Additional check for safety
         if not (request.user.is_superuser or request.user.role == 'admin'):
             raise PermissionDenied("Only admin users can create vehicles.")
         
-        # Use JSON parser only - images are linked via image_ids
-        return super().create(request, *args, **kwargs)
+        # Get serializer and validate data
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Create vehicles (serializer will create multiple vehicles)
+        serializer.save()
+        
+        # Get all created vehicles from serializer
+        created_vehicles = getattr(serializer, '_created_vehicles', [])
+        
+        if not created_vehicles:
+            return Response(
+                {'error': 'No vehicles were created.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Serialize all created vehicles
+        response_serializer = VehicleSerializer(created_vehicles, many=True, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
     
     def perform_create(self, serializer):
         """Create vehicle - images handled by serializer"""
+        # This is called by super().create(), but we override create() directly
+        # So this method may not be called, but keeping it for compatibility
         serializer.save()
     
     def perform_update(self, serializer):
