@@ -21,8 +21,8 @@ def payment_completed(booking_id, amount):
         # Check if booking has a referrer (priority: booking.referred_by, then user.referred_by)
         referrer = booking.referred_by or user.referred_by
         
-        # Grant commission if referrer exists and booking is active or completed
-        if referrer and booking.status in ['active', 'completed']:
+        # Grant commission if referrer exists, is a distributor, and booking is active or completed
+        if referrer and referrer.is_distributor and booking.status in ['active', 'completed']:
             # Calculate commission using configurable percentage
             commission_percentage = getattr(settings, 'REFERRAL_COMMISSION_PERCENTAGE', 5)
             referral_bonus = float(amount) * (commission_percentage / 100)
@@ -45,6 +45,11 @@ def payment_completed(booking_id, amount):
                     f"Error granting referral commission to {referrer.username} "
                     f"for booking {booking.booking_number}: {e}"
                 )
+        elif referrer and not referrer.is_distributor:
+            logger.warning(
+                f"Referral commission not granted: {referrer.username} is not a distributor. "
+                f"Booking: {booking.booking_number} (payment: ₹{amount})"
+            )
         
         # Update wallet if payment was from wallet
         # This is handled in the payment view

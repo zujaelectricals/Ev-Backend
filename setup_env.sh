@@ -58,6 +58,9 @@ MAX_BINARY_PAIRS_PER_MONTH=10
 # TDS Configuration
 TDS_PERCENTAGE=5
 TDS_CEILING=10000
+
+# Booking Reservation Timeout (hours, empty/null = never expires)
+BOOKING_RESERVATION_TIMEOUT_HOURS=24
 EOF
 
 echo ".env file created successfully!"

@@ -3,7 +3,7 @@ import json
 import logging
 import traceback
 from django.db import models as django_models
-from .models import Vehicle, VehicleImage
+from .models import Vehicle, VehicleImage, VehicleStock
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,22 @@ class VehicleSerializer(serializers.ModelSerializer):
         allow_empty=True,
         help_text='Dictionary mapping color names to image IDs (e.g., {"white": [1, 2, 3], "red": [4, 5]}). Images will be linked to vehicles matching the color.'
     )
+    initial_quantity = serializers.IntegerField(
+        required=False,
+        write_only=True,
+        default=0,
+        min_value=0,
+        help_text='Initial stock quantity for this vehicle. Applies to each variant created. Defaults to 0 if not provided.'
+    )
+    stock_quantity = serializers.IntegerField(
+        required=False,
+        write_only=True,
+        min_value=0,
+        help_text='Update stock quantity for this vehicle. Only used during vehicle update. Creates or updates VehicleStock record. (Alias: use initial_quantity for consistency with create)'
+    )
+    stock_total_quantity = serializers.SerializerMethodField()
+    stock_available_quantity = serializers.SerializerMethodField()
+    stock_reserved_quantity = serializers.SerializerMethodField()
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -90,7 +106,9 @@ class VehicleSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'name', 'model_code', 'vehicle_color', 'battery_variant',
             'price', 'status', 'description', 'features', 'specifications',
-            'images', 'image_ids', 'color_images', 'primary_image_url', 'created_at', 'updated_at'
+            'images', 'image_ids', 'color_images', 'primary_image_url', 'initial_quantity', 'stock_quantity',
+            'stock_total_quantity', 'stock_available_quantity', 'stock_reserved_quantity',
+            'created_at', 'updated_at'
         )
         read_only_fields = ('created_at', 'updated_at', 'model_code')
         extra_kwargs = {
@@ -114,6 +132,30 @@ class VehicleSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(first_image.image.url)
             return first_image.image.url
         return None
+    
+    def get_stock_total_quantity(self, obj):
+        """Return total stock quantity"""
+        try:
+            return obj.stock.total_quantity if hasattr(obj, 'stock') else 0
+        except VehicleStock.DoesNotExist:
+            return 0
+    
+    def get_stock_available_quantity(self, obj):
+        """Return available stock quantity"""
+        try:
+            return obj.stock.available_quantity if hasattr(obj, 'stock') else 0
+        except VehicleStock.DoesNotExist:
+            return 0
+    
+    def get_stock_reserved_quantity(self, obj):
+        """Return reserved stock quantity"""
+        try:
+            if hasattr(obj, 'stock'):
+                reserved = obj.stock.total_quantity - obj.stock.available_quantity
+                return max(0, reserved)
+            return 0
+        except VehicleStock.DoesNotExist:
+            return 0
     
     
     def validate_features(self, value):
@@ -360,6 +402,7 @@ class VehicleSerializer(serializers.ModelSerializer):
         
         image_ids = validated_data.pop('image_ids', [])
         color_images = validated_data.pop('color_images', {})
+        initial_quantity = validated_data.pop('initial_quantity', 0)
         
         # Ensure features and specifications have default values if None
         if 'features' not in validated_data or validated_data.get('features') is None:
@@ -442,6 +485,13 @@ class VehicleSerializer(serializers.ModelSerializer):
                         vehicle = Vehicle.objects.create(**vehicle_data)
                         created_vehicles.append(vehicle)
                         
+                        # Create VehicleStock with initial quantity
+                        VehicleStock.objects.create(
+                            vehicle=vehicle,
+                            total_quantity=initial_quantity,
+                            available_quantity=initial_quantity
+                        )
+                        
                         # Link images for this color if specified in color_images
                         # Duplicate image records for each vehicle of the same color
                         if color in color_images_map and color_images_map[color]:
@@ -478,6 +528,13 @@ class VehicleSerializer(serializers.ModelSerializer):
                     
                     vehicle = Vehicle.objects.create(**vehicle_data)
                     created_vehicles.append(vehicle)
+                    
+                    # Create VehicleStock with initial quantity
+                    VehicleStock.objects.create(
+                        vehicle=vehicle,
+                        total_quantity=initial_quantity,
+                        available_quantity=initial_quantity
+                    )
                 
                 # Link images to first vehicle only (fallback)
                 if images_to_link and created_vehicles:
@@ -500,6 +557,12 @@ class VehicleSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         """Update vehicle and handle image linking"""
         image_ids = validated_data.pop('image_ids', None)
+        color_images = validated_data.pop('color_images', None)
+        # Support both initial_quantity and stock_quantity for consistency
+        initial_quantity = validated_data.pop('initial_quantity', None)
+        stock_quantity = validated_data.pop('stock_quantity', None)
+        # Use initial_quantity if provided, otherwise use stock_quantity (backward compatibility)
+        quantity_to_update = initial_quantity if initial_quantity is not None else stock_quantity
         
         # Ensure features and specifications have default values if None
         if 'features' in validated_data and validated_data.get('features') is None:
@@ -510,13 +573,71 @@ class VehicleSerializer(serializers.ModelSerializer):
         if 'vehicle_color' in validated_data and validated_data.get('vehicle_color') is None:
             validated_data['vehicle_color'] = ["white"]
         
-        # Update vehicle fields
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
+        # Get the updated vehicle_color for validation (use new value if provided, otherwise current)
+        updated_vehicle_color = validated_data.get('vehicle_color', instance.vehicle_color)
+        if updated_vehicle_color is None:
+            updated_vehicle_color = ["white"]  # Default
         
-        # Handle image linking if image_ids provided
-        if image_ids is not None:
+        # Handle image linking - color_images takes precedence over image_ids (like in create)
+        # Validate BEFORE updating vehicle fields so we can check against the NEW vehicle_color
+        if color_images is not None:
+            # If color_images contains colors not in vehicle_color, automatically add them
+            vehicle_colors = set(updated_vehicle_color)
+            color_images_colors = set(color_images.keys())
+            missing_colors = color_images_colors - vehicle_colors
+            
+            if missing_colors:
+                # Automatically add missing colors to vehicle_color
+                updated_vehicle_color = list(vehicle_colors | missing_colors)
+                validated_data['vehicle_color'] = updated_vehicle_color
+                vehicle_colors = set(updated_vehicle_color)
+            
+            # Validate all image IDs exist and are unlinked
+            all_image_ids = []
+            for img_ids in color_images.values():
+                all_image_ids.extend(img_ids)
+            
+            if all_image_ids:
+                existing_images = VehicleImage.objects.filter(id__in=all_image_ids)
+                existing_image_ids = set(existing_images.values_list('id', flat=True))
+                invalid_ids = set(all_image_ids) - existing_image_ids
+                
+                if invalid_ids:
+                    raise serializers.ValidationError({
+                        'color_images': f'Image IDs {list(invalid_ids)} do not exist. Please upload images first using /api/inventory/images/upload/'
+                    })
+                
+                # Check if any images are already linked to another vehicle
+                linked_images = existing_images.exclude(vehicle__isnull=True).exclude(vehicle=instance)
+                if linked_images.exists():
+                    linked_ids = list(linked_images.values_list('id', flat=True))
+                    raise serializers.ValidationError({
+                        'color_images': f'Image IDs {linked_ids} are already linked to another vehicle. Please upload new images using /api/inventory/images/upload/'
+                    })
+            
+            # Remove all existing images for this vehicle
+            instance.images.all().update(vehicle=None)
+            
+            # Link images based on color mapping
+            # Since this is a single vehicle, we'll link images for all colors that match
+            existing_count = 0
+            for color, img_ids in color_images.items():
+                if color in vehicle_colors and img_ids:
+                    # Get unlinked images for this color
+                    images_to_link = VehicleImage.objects.filter(
+                        id__in=img_ids,
+                        vehicle__isnull=True
+                    ).order_by('id')
+                    
+                    for index, image in enumerate(images_to_link):
+                        image.vehicle = instance
+                        image.order = existing_count + index
+                        # Set first image as primary if no primary exists
+                        if existing_count == 0 and index == 0:
+                            image.is_primary = True
+                        image.save()
+                    existing_count += images_to_link.count()
+        elif image_ids is not None:
             # Get current images linked to this vehicle
             current_image_ids = set(instance.images.values_list('id', flat=True))
             requested_image_ids = set(image_ids)
@@ -564,13 +685,18 @@ class VehicleListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for vehicle listing"""
     primary_image_url = serializers.SerializerMethodField()
     image_count = serializers.SerializerMethodField()
+    stock_total_quantity = serializers.SerializerMethodField()
+    stock_available_quantity = serializers.SerializerMethodField()
+    stock_reserved_quantity = serializers.SerializerMethodField()
     
     class Meta:
         model = Vehicle
         fields = (
             'id', 'name', 'model_code', 'vehicle_color', 'battery_variant',
             'price', 'status', 'features', 'specifications',
-            'primary_image_url', 'image_count', 'created_at'
+            'primary_image_url', 'image_count',
+            'stock_total_quantity', 'stock_available_quantity', 'stock_reserved_quantity',
+            'created_at'
         )
         read_only_fields = ('model_code',)
     
@@ -593,6 +719,30 @@ class VehicleListSerializer(serializers.ModelSerializer):
     def get_image_count(self, obj):
         """Return total number of images"""
         return obj.images.count()
+    
+    def get_stock_total_quantity(self, obj):
+        """Return total stock quantity"""
+        try:
+            return obj.stock.total_quantity if hasattr(obj, 'stock') else 0
+        except VehicleStock.DoesNotExist:
+            return 0
+    
+    def get_stock_available_quantity(self, obj):
+        """Return available stock quantity"""
+        try:
+            return obj.stock.available_quantity if hasattr(obj, 'stock') else 0
+        except VehicleStock.DoesNotExist:
+            return 0
+    
+    def get_stock_reserved_quantity(self, obj):
+        """Return reserved stock quantity"""
+        try:
+            if hasattr(obj, 'stock'):
+                reserved = obj.stock.total_quantity - obj.stock.available_quantity
+                return max(0, reserved)
+            return 0
+        except VehicleStock.DoesNotExist:
+            return 0
 
 
 class VehicleVariantSerializer(serializers.ModelSerializer):
@@ -600,12 +750,17 @@ class VehicleVariantSerializer(serializers.ModelSerializer):
     primary_image_url = serializers.SerializerMethodField()
     image_count = serializers.SerializerMethodField()
     images = serializers.SerializerMethodField()
+    stock_total_quantity = serializers.SerializerMethodField()
+    stock_available_quantity = serializers.SerializerMethodField()
+    stock_reserved_quantity = serializers.SerializerMethodField()
     
     class Meta:
         model = Vehicle
         fields = (
             'id', 'model_code', 'vehicle_color', 'battery_variant',
-            'price', 'status', 'primary_image_url', 'image_count', 'images', 'created_at'
+            'price', 'status', 'primary_image_url', 'image_count', 'images',
+            'stock_total_quantity', 'stock_available_quantity', 'stock_reserved_quantity',
+            'created_at'
         )
         read_only_fields = ('model_code',)
     
@@ -628,6 +783,30 @@ class VehicleVariantSerializer(serializers.ModelSerializer):
     def get_image_count(self, obj):
         """Return total number of images"""
         return obj.images.count()
+    
+    def get_stock_total_quantity(self, obj):
+        """Return total stock quantity"""
+        try:
+            return obj.stock.total_quantity if hasattr(obj, 'stock') else 0
+        except VehicleStock.DoesNotExist:
+            return 0
+    
+    def get_stock_available_quantity(self, obj):
+        """Return available stock quantity"""
+        try:
+            return obj.stock.available_quantity if hasattr(obj, 'stock') else 0
+        except VehicleStock.DoesNotExist:
+            return 0
+    
+    def get_stock_reserved_quantity(self, obj):
+        """Return reserved stock quantity"""
+        try:
+            if hasattr(obj, 'stock'):
+                reserved = obj.stock.total_quantity - obj.stock.available_quantity
+                return max(0, reserved)
+            return 0
+        except VehicleStock.DoesNotExist:
+            return 0
     
     def get_images(self, obj):
         """Return all images for this variant"""
@@ -672,4 +851,76 @@ class VehicleGroupedSerializer(serializers.Serializer):
     def get_variants(self, obj):
         """Serialize vehicle variants"""
         return VehicleVariantSerializer(obj['variants'], many=True, context=self.context).data
+
+
+class VehicleStockSerializer(serializers.ModelSerializer):
+    """Serializer for VehicleStock"""
+    vehicle_name = serializers.CharField(source='vehicle.name', read_only=True)
+    vehicle_model_code = serializers.CharField(source='vehicle.model_code', read_only=True)
+    reserved_quantity = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = VehicleStock
+        fields = (
+            'id', 'vehicle', 'vehicle_name', 'vehicle_model_code',
+            'total_quantity', 'available_quantity', 'reserved_quantity',
+            'created_at', 'updated_at'
+        )
+        read_only_fields = ('available_quantity', 'created_at', 'updated_at', 'reserved_quantity')
+    
+    def get_reserved_quantity(self, obj):
+        """Calculate reserved quantity (always non-negative)"""
+        reserved = obj.total_quantity - obj.available_quantity
+        # Return 0 if calculation results in negative (data inconsistency)
+        return max(0, reserved)
+    
+    def validate_total_quantity(self, value):
+        """Validate total_quantity"""
+        if value < 0:
+            raise serializers.ValidationError("Total quantity cannot be negative")
+        
+        # If updating, ensure total_quantity is not less than reserved quantity
+        if self.instance:
+            reserved = self.instance.total_quantity - self.instance.available_quantity
+            if value < reserved:
+                raise serializers.ValidationError(
+                    f"Total quantity cannot be less than reserved quantity ({reserved})"
+                )
+            # Update available_quantity if total_quantity is increased
+            if value > self.instance.total_quantity:
+                # Increase available_quantity by the difference
+                diff = value - self.instance.total_quantity
+                self.instance.available_quantity += diff
+        
+        return value
+    
+    def update(self, instance, validated_data):
+        """Update stock and adjust available_quantity if needed"""
+        total_quantity = validated_data.get('total_quantity', instance.total_quantity)
+        
+        # Calculate current reserved quantity (can be negative if data is inconsistent)
+        current_reserved = instance.total_quantity - instance.available_quantity
+        
+        # If total_quantity is being increased, increase available_quantity
+        if total_quantity > instance.total_quantity:
+            diff = total_quantity - instance.total_quantity
+            instance.available_quantity += diff
+        # If total_quantity is being decreased, decrease available_quantity (but not below reserved)
+        elif total_quantity < instance.total_quantity:
+            # Ensure reserved quantity is non-negative
+            reserved = max(0, current_reserved)
+            # Set available_quantity = total_quantity - reserved (but ensure it's not negative)
+            instance.available_quantity = max(0, total_quantity - reserved)
+            # Ensure available_quantity doesn't exceed total_quantity
+            if instance.available_quantity > total_quantity:
+                instance.available_quantity = total_quantity
+        
+        instance.total_quantity = total_quantity
+        
+        # Final safety check: ensure available_quantity doesn't exceed total_quantity
+        if instance.available_quantity > instance.total_quantity:
+            instance.available_quantity = instance.total_quantity
+        
+        instance.save()
+        return instance
 

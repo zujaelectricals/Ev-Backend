@@ -1,4 +1,6 @@
 from django.db import models
+from django.utils import timezone
+from django.core.exceptions import ValidationError
 import random
 import string
 import re
@@ -214,4 +216,148 @@ class VehicleImage(models.Model):
         if self.is_primary and self.vehicle:
             VehicleImage.objects.filter(vehicle=self.vehicle, is_primary=True).exclude(pk=self.pk).update(is_primary=False)
         super().save(*args, **kwargs)
+
+
+class VehicleStock(models.Model):
+    """
+    Vehicle stock inventory tracking
+    Tracks total and available quantity for each vehicle
+    """
+    vehicle = models.OneToOneField(
+        Vehicle, 
+        on_delete=models.CASCADE, 
+        related_name='stock',
+        unique=True
+    )
+    total_quantity = models.IntegerField(default=0, help_text='Total quantity of this vehicle')
+    available_quantity = models.IntegerField(default=0, help_text='Available quantity (not reserved)')
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'vehicle_stock'
+        verbose_name = 'Vehicle Stock'
+        verbose_name_plural = 'Vehicle Stocks'
+        ordering = ['-updated_at']
+    
+    def __str__(self):
+        return f"{self.vehicle.name} - Available: {self.available_quantity}/{self.total_quantity}"
+    
+    def reserve(self, quantity=1):
+        """
+        Reserve quantity from available stock
+        Returns True if successful, False if insufficient stock
+        """
+        if self.available_quantity < quantity:
+            return False
+        
+        self.available_quantity -= quantity
+        self.save(update_fields=['available_quantity', 'updated_at'])
+        return True
+    
+    def release(self, quantity=1):
+        """
+        Release quantity back to available stock
+        """
+        if self.available_quantity + quantity > self.total_quantity:
+            # Don't exceed total_quantity
+            self.available_quantity = self.total_quantity
+        else:
+            self.available_quantity += quantity
+        
+        self.save(update_fields=['available_quantity', 'updated_at'])
+    
+    def complete(self, quantity=1):
+        """
+        Mark reservation as completed (quantity already reserved, no change needed)
+        This is called when payment is confirmed - stock remains reserved
+        """
+        # No change to available_quantity as it's already reserved
+        # This method exists for consistency with the flow
+        pass
+
+
+class StockReservation(models.Model):
+    """
+    Stock reservation for bookings
+    Tracks reserved stock that will be released if payment is not completed
+    """
+    STATUS_CHOICES = [
+        ('reserved', 'Reserved'),
+        ('released', 'Released'),
+        ('completed', 'Completed'),
+    ]
+    
+    booking = models.OneToOneField(
+        'booking.Booking',
+        on_delete=models.CASCADE,
+        related_name='stock_reservation',
+        unique=True
+    )
+    vehicle = models.ForeignKey(
+        Vehicle,
+        on_delete=models.CASCADE,
+        related_name='reservations'
+    )
+    vehicle_stock = models.ForeignKey(
+        VehicleStock,
+        on_delete=models.CASCADE,
+        related_name='reservations'
+    )
+    quantity = models.IntegerField(default=1, help_text='Quantity reserved')
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='reserved',
+        help_text='Reservation status'
+    )
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When reservation expires (null = never expires)'
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'stock_reservations'
+        verbose_name = 'Stock Reservation'
+        verbose_name_plural = 'Stock Reservations'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'expires_at']),
+        ]
+    
+    def __str__(self):
+        return f"Reservation for {self.booking.booking_number} - {self.status}"
+    
+    def is_expired(self):
+        """Check if reservation has expired"""
+        if self.expires_at is None:
+            return False  # Never expires
+        return timezone.now() > self.expires_at
+    
+    def release(self):
+        """
+        Release the reserved stock back to available inventory
+        """
+        if self.status == 'released':
+            return  # Already released
+        
+        self.vehicle_stock.release(quantity=self.quantity)
+        self.status = 'released'
+        self.save(update_fields=['status', 'updated_at'])
+    
+    def complete(self):
+        """
+        Mark reservation as completed (payment confirmed)
+        Stock remains reserved and is not released
+        """
+        if self.status == 'completed':
+            return  # Already completed
+        
+        self.status = 'completed'
+        self.save(update_fields=['status', 'updated_at'])
 

@@ -22,6 +22,8 @@ class BookingSerializer(serializers.ModelSerializer):
     vehicle_model_code = serializers.CharField(write_only=True, required=False)
     model_code = serializers.CharField(source='vehicle_model.model_code', read_only=True)
     referral_code = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    reservation_status = serializers.CharField(source='stock_reservation.status', read_only=True)
+    reservation_expires_at = serializers.DateTimeField(source='stock_reservation.expires_at', read_only=True)
     
     class Meta:
         model = Booking
@@ -67,7 +69,7 @@ class BookingSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(f"Vehicle with model_code '{value}' not found")
     
     def validate(self, data):
-        """Validate total_amount matches vehicle_model price"""
+        """Validate total_amount matches vehicle_model price and model_code matches color/battery"""
         # Get vehicle from vehicle_model_code if provided
         vehicle_model = None
         vehicle_model_code = data.get('vehicle_model_code')
@@ -84,6 +86,8 @@ class BookingSerializer(serializers.ModelSerializer):
             vehicle_model = data.get('vehicle_model')
         
         total_amount = data.get('total_amount')
+        vehicle_color = data.get('vehicle_color')
+        battery_variant = data.get('battery_variant')
         
         # For create: vehicle_model_code and total_amount must be provided
         if self.instance is None:
@@ -97,6 +101,44 @@ class BookingSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'total_amount': f'Total amount must match vehicle price (₹{vehicle_model.price})'
                 })
+            
+            # Validate model_code matches vehicle_color and battery_variant
+            if vehicle_model_code and vehicle_color and battery_variant:
+                # Parse model_code: format is EV-{COLOR_CODE}-{BATTERY_CODE}-{RANDOM}
+                parts = vehicle_model_code.split('-')
+                if len(parts) >= 3:
+                    model_color_code = parts[1] if len(parts) > 1 else None
+                    model_battery_code = parts[2] if len(parts) > 2 else None
+                    
+                    # Convert provided battery_variant to code
+                    provided_battery_code = Vehicle._get_battery_code(battery_variant)
+                    
+                    # Validate battery code matches (battery is less likely to change, so we keep this check)
+                    if model_battery_code and provided_battery_code != model_battery_code:
+                        raise serializers.ValidationError({
+                            'battery_variant': f'Battery variant does not match model code. Model code indicates battery code: {model_battery_code}, but provided battery converts to: {provided_battery_code}'
+                        })
+                    
+                    # Validate that color and battery_variant are in vehicle's available options
+                    # Note: We don't validate color against model_code because model_code is read-only
+                    # and doesn't update when vehicle_color changes. The important check is that the
+                    # color is in the vehicle's available colors array (checked below).
+                    vehicle_colors = vehicle_model.vehicle_color if isinstance(vehicle_model.vehicle_color, list) else []
+                    vehicle_batteries = vehicle_model.battery_variant if isinstance(vehicle_model.battery_variant, list) else []
+                    
+                    # Normalize colors for comparison (case-insensitive)
+                    vehicle_colors_lower = [c.lower().strip() for c in vehicle_colors]
+                    if vehicle_color.lower().strip() not in vehicle_colors_lower:
+                        raise serializers.ValidationError({
+                            'vehicle_color': f'Vehicle color "{vehicle_color}" is not available for this vehicle. Available colors: {vehicle_colors}'
+                        })
+                    
+                    # Normalize batteries for comparison (case-insensitive)
+                    vehicle_batteries_normalized = [str(b).strip().lower() for b in vehicle_batteries]
+                    if str(battery_variant).strip().lower() not in vehicle_batteries_normalized:
+                        raise serializers.ValidationError({
+                            'battery_variant': f'Battery variant "{battery_variant}" is not available for this vehicle. Available variants: {vehicle_batteries}'
+                        })
         else:
             # Updating existing booking
             vehicle_model = vehicle_model if vehicle_model is not None else self.instance.vehicle_model

@@ -779,6 +779,289 @@ Super User: EVAdmin && EVAdmin@123
 
 
 ================================================================================
+                    DISTRIBUTOR APPLICATION APIs
+================================================================================
+
+69. CREATE DISTRIBUTOR APPLICATION
+    Method: POST
+    URL: /api/users/distributor-application/
+    Authentication: Required
+    Description: Submit distributor application form. User must be an Active Buyer (total paid ≥ ₹5000) and have approved KYC.
+    
+    Eligibility Requirements:
+    - User must be an Active Buyer (is_active_buyer = True, total paid ≥ ₹5000)
+    - User must have approved KYC (kyc.status = 'approved')
+    - User can only submit one application
+    
+    Request Body (multipart/form-data):
+    {
+      "company_name": "ABC Distributors Pvt Ltd",  // Optional
+      "business_registration_number": "REG123456",  // Optional
+      "tax_id": "TAX789012",                        // Optional
+      "years_in_business": 5,                       // Optional
+      "previous_distribution_experience": "5 years of experience in EV distribution",  // Optional
+      "product_interest": "Electric vehicles and accessories",  // Optional
+      "reference_name": "John Smith",                // Optional
+      "reference_contact": "+919876543210",          // Optional
+      "reference_relationship": "Business Partner",  // Optional
+      "business_license": <file>,                     // Optional - Business license document
+      "tax_documents": <file>                         // Optional - Tax documents
+    }
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "user": 1,
+      "user_email": "user@example.com",
+      "user_username": "user@example.com",
+      "user_full_name": "John Doe",
+      "status": "pending",
+      "company_name": "ABC Distributors Pvt Ltd",
+      "business_registration_number": "REG123456",
+      "tax_id": "TAX789012",
+      "years_in_business": 5,
+      "previous_distribution_experience": "5 years of experience in EV distribution",
+      "product_interest": "Electric vehicles and accessories",
+      "reference_name": "John Smith",
+      "reference_contact": "+919876543210",
+      "reference_relationship": "Business Partner",
+      "business_license": "http://localhost:8000/media/distributor/business_license/license_1.pdf",
+      "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
+      "submitted_at": "2026-01-14T10:00:00Z",
+      "reviewed_at": null,
+      "reviewed_by": null,
+      "rejection_reason": ""
+    }
+    
+    Error Response (400 Bad Request):
+    {
+      "non_field_errors": [
+        "User must be an Active Buyer to apply for distributor program. Total paid amount must be at least ₹5000."
+      ]
+    }
+    OR
+    {
+      "non_field_errors": [
+        "User must have approved KYC to apply for distributor program."
+      ]
+    }
+    OR
+    {
+      "non_field_errors": [
+        "Application already exists. You can only submit one distributor application."
+      ]
+    }
+
+
+70. GET DISTRIBUTOR APPLICATION STATUS
+    Method: GET
+    URL: /api/users/distributor-application/
+    Authentication: Required
+    Description: Get current user's distributor application status
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "user": 1,
+      "user_email": "user@example.com",
+      "user_username": "user@example.com",
+      "user_full_name": "John Doe",
+      "status": "pending",  // "pending", "approved", "rejected"
+      "company_name": "ABC Distributors Pvt Ltd",
+      "submitted_at": "2026-01-14T10:00:00Z",
+      "reviewed_at": null,
+      "reviewed_by": null,
+      "rejection_reason": ""
+    }
+    
+    Response (404 Not Found) - If no application exists:
+    {
+      "detail": "Not found."
+    }
+
+
+71. GET DISTRIBUTOR APPLICATION BY ID
+    Method: GET
+    URL: /api/users/distributor-application/{id}/
+    Authentication: Required
+    Description: Get specific distributor application by ID. Access based on permissions:
+    
+    Permission Hierarchy:
+    - Admin/Superuser: Can view any application
+    - Staff: Can view any application
+    - Normal Users: Can only view their own application
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "user": 1,
+      "user_email": "user@example.com",
+      "user_username": "user@example.com",
+      "user_full_name": "John Doe",
+      "status": "approved",
+      "company_name": "ABC Distributors Pvt Ltd",
+      "business_registration_number": "REG123456",
+      "tax_id": "TAX789012",
+      "years_in_business": 5,
+      "previous_distribution_experience": "5 years of experience in EV distribution",
+      "product_interest": "Electric vehicles and accessories",
+      "reference_name": "John Smith",
+      "reference_contact": "+919876543210",
+      "reference_relationship": "Business Partner",
+      "business_license": "http://localhost:8000/media/distributor/business_license/license_1.pdf",
+      "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
+      "submitted_at": "2026-01-14T10:00:00Z",
+      "reviewed_at": "2026-01-14T11:00:00Z",
+      "reviewed_by": 2,
+      "rejection_reason": ""
+    }
+    
+    Error Response (404 Not Found):
+    {
+      "detail": "Not found."
+    }
+
+
+72. APPROVE DISTRIBUTOR APPLICATION (Admin/Staff Only)
+    Method: POST
+    URL: /api/users/distributor-application/{id}/approve/
+    Authentication: Required (Admin, Staff, or Superuser)
+    Description: Approve distributor application. Sets user.is_distributor = True and application.status = 'approved'
+    
+    Permission Requirements:
+    - Superuser (is_superuser=True)
+    - Admin users (role='admin' with is_staff=True)
+    - Staff users (role='staff' with is_staff=True)
+    
+    Response (200 OK):
+    {
+      "status": "approved",
+      "message": "Application approved. User user@example.com is now a distributor."
+    }
+    
+    Error Response (400 Bad Request):
+    {
+      "error": "Application is already approved"
+    }
+    
+    Error Response (403 Forbidden):
+    {
+      "detail": "You do not have permission to perform this action."
+    }
+    
+    Note:
+    - Upon approval, user.is_distributor is automatically set to True
+    - User can now earn from binary pairs and referrals
+    - Only one application per user is allowed
+    - Normal users cannot approve applications
+
+
+73. REJECT DISTRIBUTOR APPLICATION (Admin/Staff Only)
+    Method: POST
+    URL: /api/users/distributor-application/{id}/reject/
+    Authentication: Required (Admin, Staff, or Superuser)
+    Description: Reject distributor application. Admin/Staff can supply an optional reason.
+    
+    Permission Requirements:
+    - Superuser (is_superuser=True)
+    - Admin users (role='admin' with is_staff=True)
+    - Staff users (role='staff' with is_staff=True)
+    
+    Request Body:
+    {
+      "reason": "Insufficient business experience"  // Optional
+    }
+    
+    Response (200 OK):
+    {
+      "status": "rejected",
+      "message": "Application rejected."
+    }
+    
+    Error Response (400 Bad Request):
+    {
+      "error": "Application is already rejected"
+    }
+    
+    Error Response (403 Forbidden):
+    {
+      "detail": "You do not have permission to perform this action."
+    }
+    
+    Note:
+    - Normal users cannot reject applications
+
+
+74. LIST ALL DISTRIBUTOR APPLICATIONS (Admin/Staff Only)
+    Method: GET
+    URL: /api/users/distributor-application/list_all/
+    Authentication: Required (Admin, Staff, or Superuser)
+    Description: List all distributor applications with filtering and pagination. Admin/Staff/Superuser only.
+    
+    Permission Requirements:
+    - Superuser (is_superuser=True)
+    - Admin users (role='admin' with is_staff=True)
+    - Staff users (role='staff' with is_staff=True)
+    
+    Query Parameters:
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20, max: 100)
+    - status: Filter by status (pending, approved, rejected)
+    - submitted_date_from: Filter by submission date start (YYYY-MM-DD)
+    - submitted_date_to: Filter by submission date end (YYYY-MM-DD)
+    - reviewed_date_from: Filter by review date start (YYYY-MM-DD)
+    - reviewed_date_to: Filter by review date end (YYYY-MM-DD)
+    - user_id: Filter by specific user ID
+    - ordering: Sort results (default: -submitted_at)
+      Options: submitted_at, -submitted_at, reviewed_at, -reviewed_at, status, -status
+    
+    Example Requests:
+    GET /api/users/distributor-application/list_all/
+    GET /api/users/distributor-application/list_all/?status=pending
+    GET /api/users/distributor-application/list_all/?submitted_date_from=2026-01-01&submitted_date_to=2026-01-31
+    GET /api/users/distributor-application/list_all/?user_id=5&ordering=-submitted_at
+    GET /api/users/distributor-application/list_all/?reviewed_date_from=2026-01-01&reviewed_date_to=2026-01-31&status=approved
+    
+    Response (200 OK):
+    {
+      "count": 50,
+      "next": "http://localhost:8000/api/users/distributor-application/list_all/?page=2",
+      "previous": null,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "user_email": "user@example.com",
+          "user_username": "user@example.com",
+          "user_full_name": "John Doe",
+          "status": "pending",
+          "company_name": "ABC Distributors Pvt Ltd",
+          "business_registration_number": "REG123456",
+          "tax_id": "TAX789012",
+          "years_in_business": 5,
+          "submitted_at": "2026-01-14T10:00:00Z",
+          "reviewed_at": null,
+          "reviewed_by": null,
+          "rejection_reason": ""
+        }
+      ]
+    }
+    
+    Error Response (403 Forbidden):
+    {
+      "detail": "You do not have permission to perform this action."
+    }
+    
+    Notes:
+    - Only Admin/Staff/Superuser can access this endpoint
+    - Normal users cannot access this endpoint
+    - All filters can be combined
+    - Date filters use inclusive ranges (>= for from, <= for to)
+    - Default ordering is by submission date (newest first)
+    - Invalid filter values are ignored (e.g., invalid user_id)
+
+
+================================================================================
                             NOMINEE APIs
 ================================================================================
 
@@ -934,8 +1217,17 @@ Super User: EVAdmin && EVAdmin@123
       "delivery_pin": "400001",
       "terms_accepted": true,
       "expires_at": "2026-02-05T12:00:00Z",
+      "reservation_status": "reserved",  // "reserved", "released", "completed" - Stock reservation status
+      "reservation_expires_at": "2026-01-07T12:00:00Z",  // When reservation expires (null = never expires)
       "created_at": "2026-01-06T12:00:00Z"
     }
+    
+    Note on Stock Reservation:
+    - When booking is created, a stock reservation is automatically created
+    - Vehicle stock (available_quantity) is reduced by 1
+    - Reservation expires based on BOOKING_RESERVATION_TIMEOUT_HOURS setting (null = never expires)
+    - If reservation expires and payment is not completed, stock is automatically released
+    - Reservation is completed when first payment is confirmed (status='completed')
     
     Note on Referral Code:
     - If referral_code is provided, the system validates it and sets referred_by automatically
@@ -950,8 +1242,14 @@ Super User: EVAdmin && EVAdmin@123
       "vehicle_model_code": ["Vehicle with model_code 'EV-INVALID' not found"],
       "booking_amount": ["Minimum booking amount is ₹500"],
       "total_amount": ["Total amount must match vehicle price (₹50000.00)"],
-      "delivery_city": ["Delivery city is required"]
+      "delivery_city": ["Delivery city is required"],
+      "vehicle_model": ["Insufficient stock. Available: 0, Required: 1"]
     }
+    
+    Note on Stock Availability:
+    - System checks vehicle stock availability before creating booking
+    - If insufficient stock, booking creation fails with error message
+    - Stock is automatically reserved when booking is created successfully
     
     Rate Limit: 10 requests per minute per IP
 
@@ -1023,6 +1321,8 @@ Super User: EVAdmin && EVAdmin@123
       "referred_by": 5,
       "join_distributor_program": false,
       "expires_at": "2026-02-05T12:00:00Z",
+      "reservation_status": "reserved",  // "reserved", "released", "completed" - Stock reservation status
+      "reservation_expires_at": "2026-01-07T12:00:00Z",  // When reservation expires (null = never expires)
       "emi_amount": "5000.00",
       "emi_paid_count": 1,
       "emi_total_count": 10,
@@ -1049,9 +1349,10 @@ Super User: EVAdmin && EVAdmin@123
       "user": 1,
       "amount": "5000.00",
       "payment_method": "online",
-      "status": "completed",
-      "transaction_id": "TXN123456",
-      "payment_date": "2026-01-06T12:00:00Z"
+      "status": "pending",  // Payment status: "pending", "completed", "failed", "refunded"
+      "transaction_id": null,
+      "payment_date": "2026-01-06T12:00:00Z",
+      "completed_at": null
     }
     
     Error Response (400):
@@ -1060,13 +1361,20 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Note: 
-    - Payment automatically updates booking status:
-      * If total_paid ≥ ₹5000: status changes to 'active' (Active Buyer)
-      * If remaining_amount ≤ 0: status changes to 'completed'
+    - Payment is created with status='pending' (NOT automatically completed)
+    - Payment status must be changed to 'completed' by:
+      * Admin/Staff via /api/booking/payments/{id}/update_status/ endpoint
+      * Payment gateway webhook (when integrated)
+    - Only when payment status becomes 'completed':
+      * Booking payment is processed (total_paid updated)
+      * If total_paid ≥ ₹5000: booking status changes to 'active' (Active Buyer)
+      * If remaining_amount ≤ 0: booking status changes to 'completed'
+      * Stock reservation is marked as 'completed'
+      * Referral commission is granted (if applicable)
     - Active Buyer status is updated when total paid reaches ₹5000
-    - If booking was created with a referral_code, commission is automatically granted to the referrer
+    - If booking was created with a referral_code, commission is automatically granted to the referrer when payment is confirmed
       * Commission = payment_amount × REFERRAL_COMMISSION_PERCENTAGE / 100
-      * Commission is granted on every successful payment for the booking
+      * Commission is granted on every confirmed payment for the booking
 
 
 28. ACCEPT PAYMENT (Admin/Staff Only)
@@ -1110,8 +1418,11 @@ Super User: EVAdmin && EVAdmin@123
     
     Note:
     - Only admin or staff can use this endpoint
-    - Payment is automatically marked as 'completed'
-    - Booking status and referral commission are processed automatically
+    - Payment is automatically marked as 'completed' (admin/staff approval)
+    - When payment status becomes 'completed':
+      * Booking payment is processed (total_paid updated)
+      * Stock reservation is marked as 'completed'
+      * Booking status and referral commission are processed automatically
 
 
 29. LIST PAYMENTS
@@ -1175,6 +1486,7 @@ Super User: EVAdmin && EVAdmin@123
     Note:
     - User is automatically set from booking.user
     - If status is 'completed', booking payment is processed automatically
+    - Stock reservation is marked as 'completed' when payment status becomes 'completed'
 
 
 31. UPDATE PAYMENT STATUS (Admin/Staff Only)
@@ -1221,14 +1533,57 @@ Super User: EVAdmin && EVAdmin@123
       * completed -> refunded, failed
       * failed -> pending, completed
       * refunded -> (no transitions allowed)
-    - If status changes to 'completed', booking payment is processed automatically
+    - If status changes to 'completed':
+      * Booking payment is processed automatically (total_paid updated)
+      * Stock reservation is marked as 'completed' (if exists)
+      * Booking status updated (active/completed based on payment amount)
+      * Referral commission is granted (if applicable)
+
+
+32. CANCEL BOOKING
+    Method: POST
+    URL: /api/booking/bookings/{id}/cancel/
+    Authentication: Required
+    Description: Cancel a booking and release stock reservation
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "booking_number": "EVABC1234",
+      "status": "cancelled",
+      "reservation_status": "released",
+      "vehicle_color": "Red",
+      "battery_variant": "40kWh",
+      "total_amount": "50000.00",
+      "total_paid": "0.00",
+      "remaining_amount": "50000.00",
+      ...
+    }
+    
+    Error Response (400):
+    {
+      "error": "Cannot cancel booking with status: completed"
+    }
+    
+    Error Response (403):
+    {
+      "error": "Permission denied"
+    }
+    
+    Note:
+    - User can cancel their own booking, admin/staff can cancel any booking
+    - When booking is cancelled:
+      * Booking status is set to 'cancelled'
+      * Stock reservation is released (if exists)
+      * Vehicle stock (available_quantity) is restored
+    - Cannot cancel bookings with status 'cancelled' or 'completed'
 
 
 ================================================================================
                         VEHICLE INVENTORY APIs
 ================================================================================
 
-32. UPLOAD IMAGES
+33. UPLOAD IMAGES
     Method: POST
     URL: /api/inventory/images/upload/
     Authentication: Required (Admin/Superuser only)
@@ -1274,7 +1629,7 @@ Super User: EVAdmin && EVAdmin@123
     3. Use these IDs in vehicle creation: {"image_ids": [1, 2], ...}
 
 
-30. LIST VEHICLES
+34. LIST VEHICLES
     Method: GET
     URL: /api/inventory/vehicles/
     Authentication: Required (All authenticated users)
@@ -1323,6 +1678,9 @@ Super User: EVAdmin && EVAdmin@123
               "status": "available",
               "primary_image_url": null,
               "image_count": 0,
+              "stock_total_quantity": 10,
+              "stock_available_quantity": 7,
+              "stock_reserved_quantity": 3,
               "created_at": "2026-01-09T09:49:41.403303+05:30"
             },
             {
@@ -1334,6 +1692,9 @@ Super User: EVAdmin && EVAdmin@123
               "status": "available",
               "primary_image_url": null,
               "image_count": 0,
+              "stock_total_quantity": 10,
+              "stock_available_quantity": 7,
+              "stock_reserved_quantity": 3,
               "created_at": "2026-01-09T09:49:41.402882+05:30"
             },
             {
@@ -1345,6 +1706,9 @@ Super User: EVAdmin && EVAdmin@123
               "status": "available",
               "primary_image_url": null,
               "image_count": 0,
+              "stock_total_quantity": 10,
+              "stock_available_quantity": 7,
+              "stock_reserved_quantity": 3,
               "created_at": "2026-01-09T09:49:41.402442+05:30"
             },
             {
@@ -1356,6 +1720,9 @@ Super User: EVAdmin && EVAdmin@123
               "status": "available",
               "primary_image_url": null,
               "image_count": 0,
+              "stock_total_quantity": 10,
+              "stock_available_quantity": 7,
+              "stock_reserved_quantity": 3,
               "created_at": "2026-01-09T09:49:41.402047+05:30"
             },
             {
@@ -1367,6 +1734,9 @@ Super User: EVAdmin && EVAdmin@123
               "status": "available",
               "primary_image_url": null,
               "image_count": 0,
+              "stock_total_quantity": 10,
+              "stock_available_quantity": 7,
+              "stock_reserved_quantity": 3,
               "created_at": "2026-01-09T09:49:41.401623+05:30"
             },
             {
@@ -1413,7 +1783,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-31. GET VEHICLE DETAILS
+35. GET VEHICLE DETAILS
     Method: GET
     URL: /api/inventory/vehicles/{id}/
     Authentication: Required (All authenticated users)
@@ -1496,7 +1866,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-32. CREATE VEHICLE
+36. CREATE VEHICLE
     Method: POST
     URL: /api/inventory/vehicles/
     Authentication: Required (Admin/Superuser only)
@@ -1523,7 +1893,8 @@ Super User: EVAdmin && EVAdmin@123
         "red": [4, 5],
         "blue": [6, 7, 8]
       },
-      "image_ids": [1, 2, 3]  // Optional: Fallback - links to first vehicle if color_images not provided
+      "image_ids": [1, 2, 3],  // Optional: Fallback - links to first vehicle if color_images not provided
+      "initial_quantity": 10  // Optional: Initial stock quantity for each vehicle variant. Defaults to 0 if not provided.
     }
     
     Field Descriptions:
@@ -1543,6 +1914,11 @@ Super User: EVAdmin && EVAdmin@123
     - image_ids: (optional) Array of image IDs from /api/inventory/images/upload/ endpoint
       - Only used if color_images is not provided (backward compatibility)
       - Images are linked to the first created vehicle
+    - initial_quantity: (optional, default: 0) Initial stock quantity for the vehicle
+      - Applies to each variant created (each color-battery combination gets this quantity)
+      - Must be a non-negative integer (0 or greater)
+      - Creates VehicleStock record automatically for each vehicle with the specified quantity
+      - If not provided, VehicleStock is still created with quantity 0
     
     Notes:
     - If color_images provided: Creates one vehicle per color-battery combination (e.g., 3 colors × 2 batteries = 6 vehicles)
@@ -1568,6 +1944,10 @@ Super User: EVAdmin && EVAdmin@123
     - Features and specifications are completely optional - can be omitted or left empty
     - No limit on number of features or specifications
     - First image for each vehicle will be set as primary if no primary exists
+    - initial_quantity: Optional field to set initial stock quantity when creating vehicles
+      - Each vehicle variant (color-battery combination) gets its own VehicleStock with the specified quantity
+      - If not provided, defaults to 0 (VehicleStock still created)
+      - Use /api/inventory/stock/ endpoints to view or update stock quantities after creation
     
     Response (201 Created) - Array of created vehicles:
     [
@@ -1613,6 +1993,9 @@ Super User: EVAdmin && EVAdmin@123
           }
         ],
         "primary_image_url": "http://localhost:8000/media/vehicles/images/evx-red-1.jpg",
+        "stock_total_quantity": 10,
+        "stock_available_quantity": 10,
+        "stock_reserved_quantity": 0,
         "created_at": "2026-01-08T12:00:00Z",
         "updated_at": "2026-01-08T12:00:00Z"
       },
@@ -1641,6 +2024,9 @@ Super User: EVAdmin && EVAdmin@123
         },
         "images": [],
         "primary_image_url": null,
+        "stock_total_quantity": 10,
+        "stock_available_quantity": 10,
+        "stock_reserved_quantity": 0,
         "created_at": "2026-01-08T12:00:00Z",
         "updated_at": "2026-01-08T12:00:00Z"
       },
@@ -1691,7 +2077,7 @@ Super User: EVAdmin && EVAdmin@123
     2. Create vehicle: POST /api/inventory/vehicles/ with {"image_ids": [1, 2, 3], ...}
 
 
-33. UPDATE VEHICLE
+37. UPDATE VEHICLE
     Method: PATCH / PUT
     URL: /api/inventory/vehicles/{id}/
     Authentication: Required (Admin/Superuser only)
@@ -1710,7 +2096,12 @@ Super User: EVAdmin && EVAdmin@123
         "Battery": "60V × 50AH",
         "Max Speed": "30 km/h"
       },
-      "image_ids": [4, 5]
+      "color_images": {
+        "white": [1, 2, 3],
+        "red": [4, 5]
+      },
+      "image_ids": [4, 5],  // Fallback if color_images not provided
+      "initial_quantity": 25  // Or use stock_quantity (both supported)
     }
     
     Notes:
@@ -1720,8 +2111,28 @@ Super User: EVAdmin && EVAdmin@123
     - battery_variant: Array with single battery variant (e.g., ["40kWh"]). Can be updated to change battery variant.
     - Features and specifications are optional - can be omitted, updated, or left empty
     - No limit on number of features or specifications
-    - image_ids: Array of image IDs from /api/inventory/images/upload/ to link to vehicle
-    - Only unlinked images can be added (images already linked to other vehicles will be rejected)
+    - color_images: (optional) Dictionary mapping color names to arrays of image IDs (e.g., {"white": [1, 2, 3], "red": [4, 5]})
+      - Takes precedence over image_ids if both are provided
+      - Colors in color_images are automatically added to vehicle_color if not already present
+      - All image IDs must reference unlinked images from /api/inventory/images/upload/
+      - Images are linked to the vehicle based on color mapping
+      - **REPLACE behavior**: If color_images is provided, ALL existing images are removed and replaced with the new images from color_images
+    - image_ids: (optional) Array of image IDs from /api/inventory/images/upload/ to link to vehicle
+      - Only used if color_images is not provided (fallback, backward compatibility)
+      - **MERGE behavior**: Adds new images, removes images not in the array, keeps existing images that are in the array
+      - Images are reordered to match the order in image_ids array
+      - Only unlinked images can be added (images already linked to other vehicles will be rejected)
+    - image_ids: (optional) Array of image IDs from /api/inventory/images/upload/ to link to vehicle
+      - Only used if color_images is not provided (fallback, backward compatibility)
+      - Only unlinked images can be added (images already linked to other vehicles will be rejected)
+      - Existing images are updated/reordered based on image_ids array
+    - initial_quantity: (optional) Update stock quantity for this vehicle (same as CREATE endpoint)
+      - Must be a non-negative integer (0 or greater)
+      - Creates VehicleStock record if it doesn't exist
+      - Updates total_quantity and adjusts available_quantity accordingly
+      - If new quantity is less than current reserved quantity, available_quantity is set to 0
+      - If new quantity is greater than or equal to reserved quantity, available_quantity = new_quantity - reserved_quantity
+      - stock_quantity is also supported as an alias for backward compatibility
     
     Response (200 OK):
     {
@@ -1746,6 +2157,9 @@ Super User: EVAdmin && EVAdmin@123
       },
       "images": [...],
       "primary_image_url": "...",
+      "stock_total_quantity": 10,
+      "stock_available_quantity": 7,
+      "stock_reserved_quantity": 3,
       "created_at": "2026-01-06T12:00:00Z",
       "updated_at": "2026-01-06T16:00:00Z"
     }
@@ -1761,7 +2175,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-34. DELETE VEHICLE
+38. DELETE VEHICLE
     Method: DELETE
     URL: /api/inventory/vehicles/{id}/
     Authentication: Required (Admin/Superuser only)
@@ -1781,7 +2195,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-35. ADD IMAGES TO VEHICLE
+39. ADD IMAGES TO VEHICLE
     Method: POST
     URL: /api/inventory/vehicles/{id}/add-images/
     Authentication: Required (Admin/Superuser only)
@@ -1826,7 +2240,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-36. REMOVE IMAGE FROM VEHICLE
+40. REMOVE IMAGE FROM VEHICLE
     Method: DELETE
     URL: /api/inventory/vehicles/{id}/remove-image/{image_id}/
     Authentication: Required (Admin/Superuser only)
@@ -1848,7 +2262,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-37. SET PRIMARY IMAGE
+41. SET PRIMARY IMAGE
     Method: PATCH
     URL: /api/inventory/vehicles/{id}/set-primary-image/{image_id}/
     Authentication: Required (Admin/Superuser only)
@@ -1878,11 +2292,160 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
+42. LIST VEHICLE STOCK
+    Method: GET
+    URL: /api/inventory/stock/
+    Authentication: Required (Admin/Superuser only)
+    Description: List all vehicle stock records with filtering options
+    
+    Query Parameters:
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20)
+    - vehicle_id: Filter by vehicle ID
+    - model_code: Filter by vehicle model code (partial match)
+    - vehicle_name: Filter by vehicle name (partial match)
+    - min_available: Filter by minimum available quantity
+    - max_available: Filter by maximum available quantity
+    
+    Response (200 OK):
+    {
+      "count": 50,
+      "next": "http://localhost:8000/api/inventory/stock/?page=2",
+      "previous": null,
+      "results": [
+        {
+          "id": 1,
+          "vehicle": 1,
+          "vehicle_name": "EV Model X",
+          "vehicle_model_code": "EV-RED-40K-A9F3X2",
+          "total_quantity": 10,
+          "available_quantity": 7,
+          "reserved_quantity": 3,
+          "created_at": "2026-01-06T12:00:00Z",
+          "updated_at": "2026-01-06T15:00:00Z"
+        }
+      ]
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+
+
+43. GET VEHICLE STOCK BY ID
+    Method: GET
+    URL: /api/inventory/stock/{id}/
+    Authentication: Required (Admin/Superuser only)
+    Description: Get specific vehicle stock record
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "vehicle": 1,
+      "vehicle_name": "EV Model X",
+      "vehicle_model_code": "EV-RED-40K-A9F3X2",
+      "total_quantity": 10,
+      "available_quantity": 7,
+      "reserved_quantity": 3,
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T15:00:00Z"
+    }
+    
+    Error Response (404):
+    {
+      "detail": "Not found."
+    }
+
+
+44. UPDATE VEHICLE STOCK
+    Method: PATCH / PUT
+    URL: /api/inventory/stock/{id}/
+    Authentication: Required (Admin/Superuser only)
+    Description: Update vehicle stock quantity
+    
+    Request Body:
+    {
+      "total_quantity": 15
+    }
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "vehicle": 1,
+      "vehicle_name": "EV Model X",
+      "vehicle_model_code": "EV-RED-40K-A9F3X2",
+      "total_quantity": 15,
+      "available_quantity": 12,  // Automatically increased by 5 (15-10)
+      "reserved_quantity": 3,
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T16:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "total_quantity": ["Total quantity cannot be less than reserved quantity (3)"]
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+    
+    Note:
+    - total_quantity: Can be updated (admin sets this)
+    - available_quantity: Read-only (automatically calculated)
+    - reserved_quantity: Read-only (calculated: total_quantity - available_quantity)
+    - When total_quantity is increased: available_quantity is automatically increased by the difference
+    - When total_quantity is decreased: available_quantity is decreased, but cannot go below reserved quantity
+    - Cannot set total_quantity less than current reserved quantity
+
+
+45. UPDATE STOCK BY VEHICLE ID
+    Method: POST
+    URL: /api/inventory/stock/by-vehicle/{vehicle_id}/
+    Authentication: Required (Admin/Superuser only)
+    Description: Update or create stock for a specific vehicle by vehicle ID
+    
+    Request Body:
+    {
+      "total_quantity": 20
+    }
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "vehicle": 5,
+      "vehicle_name": "EV Model Y",
+      "vehicle_model_code": "EV-BLU-60K-XYZ789",
+      "total_quantity": 20,
+      "available_quantity": 20,  // If stock was just created, available = total
+      "reserved_quantity": 0,
+      "created_at": "2026-01-06T16:00:00Z",
+      "updated_at": "2026-01-06T16:00:00Z"
+    }
+    
+    Error Response (404):
+    {
+      "error": "Vehicle not found"
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin users can perform this action."
+    }
+    
+    Note:
+    - If stock doesn't exist for the vehicle, it will be created automatically
+    - If stock exists, it will be updated
+    - Same validation rules apply as UPDATE VEHICLE STOCK endpoint
+
+
 ================================================================================
                             WALLET APIs
 ================================================================================
 
-37. GET MY WALLET
+46. GET MY WALLET
     Method: GET
     URL: /api/wallet/my_wallet/
     Authentication: Required
@@ -1900,7 +2463,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-38. LIST WALLET TRANSACTIONS
+47. LIST WALLET TRANSACTIONS
     Method: GET
     URL: /api/wallet/transactions/
     Authentication: Required
@@ -1945,7 +2508,7 @@ Super User: EVAdmin && EVAdmin@123
                             BINARY APIs
 ================================================================================
 
-39. GET MY BINARY TREE
+48. GET MY BINARY TREE
     Method: GET
     URL: /api/binary/nodes/my_tree/
     Authentication: Required
@@ -1969,7 +2532,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-40. LIST BINARY NODES
+49. LIST BINARY NODES
     Method: GET
     URL: /api/binary/nodes/
     Authentication: Required
@@ -1992,7 +2555,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-41. CHECK FOR BINARY PAIRS
+50. CHECK FOR BINARY PAIRS
     Method: POST
     URL: /api/binary/pairs/check_pairs/
     Authentication: Required
@@ -2020,7 +2583,7 @@ Super User: EVAdmin && EVAdmin@123
     Note: Maximum 10 pairs per month per user
 
 
-42. LIST BINARY PAIRS
+51. LIST BINARY PAIRS
     Method: GET
     URL: /api/binary/pairs/
     Authentication: Required
@@ -2050,7 +2613,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-43. LIST BINARY EARNINGS
+52. LIST BINARY EARNINGS
     Method: GET
     URL: /api/binary/earnings/
     Authentication: Required
@@ -2083,7 +2646,7 @@ Super User: EVAdmin && EVAdmin@123
                             PAYOUT APIs
 ================================================================================
 
-44. CREATE PAYOUT REQUEST
+53. CREATE PAYOUT REQUEST
     Method: POST
     URL: /api/payout/
     Authentication: Required
@@ -2123,7 +2686,7 @@ Super User: EVAdmin && EVAdmin@123
     - Maximum ₹10,000 ceiling
 
 
-45. LIST PAYOUTS
+54. LIST PAYOUTS
     Method: GET
     URL: /api/payout/
     Authentication: Required
@@ -2148,7 +2711,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-46. PROCESS PAYOUT (Admin Only)
+55. PROCESS PAYOUT (Admin Only)
     Method: POST
     URL: /api/payout/{id}/process/
     Authentication: Required (Admin)
@@ -2169,7 +2732,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-47. COMPLETE PAYOUT (Admin Only)
+56. COMPLETE PAYOUT (Admin Only)
     Method: POST
     URL: /api/payout/{id}/complete/
     Authentication: Required (Admin)
@@ -2190,7 +2753,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-40. LIST PAYOUT TRANSACTIONS
+57. LIST PAYOUT TRANSACTIONS
     Method: GET
     URL: /api/payout/transactions/
     Authentication: Required
@@ -2217,7 +2780,7 @@ Super User: EVAdmin && EVAdmin@123
                          NOTIFICATION APIs
 ================================================================================
 
-48. LIST NOTIFICATIONS
+58. LIST NOTIFICATIONS
     Method: GET
     URL: /api/notifications/
     Authentication: Required
@@ -2246,7 +2809,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-49. MARK NOTIFICATION AS READ
+59. MARK NOTIFICATION AS READ
     Method: POST
     URL: /api/notifications/{id}/mark_read/
     Authentication: Required
@@ -2261,7 +2824,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-50. MARK ALL NOTIFICATIONS AS READ
+60. MARK ALL NOTIFICATIONS AS READ
     Method: POST
     URL: /api/notifications/mark_all_read/
     Authentication: Required
@@ -2273,7 +2836,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-51. GET UNREAD COUNT
+61. GET UNREAD COUNT
     Method: GET
     URL: /api/notifications/unread_count/
     Authentication: Required
@@ -2289,7 +2852,7 @@ Super User: EVAdmin && EVAdmin@123
                          COMPLIANCE APIs
 ================================================================================
 
-52. UPLOAD COMPLIANCE DOCUMENT
+62. UPLOAD COMPLIANCE DOCUMENT
     Method: POST
     URL: /api/compliance/documents/
     Authentication: Required
@@ -2314,7 +2877,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-53. LIST COMPLIANCE DOCUMENTS
+63. LIST COMPLIANCE DOCUMENTS
     Method: GET
     URL: /api/compliance/documents/
     Authentication: Required
@@ -2335,7 +2898,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-54. LIST TDS RECORDS
+64. LIST TDS RECORDS
     Method: GET
     URL: /api/compliance/tds/
     Authentication: Required
@@ -2362,7 +2925,7 @@ Super User: EVAdmin && EVAdmin@123
                             REPORTS APIs
 ================================================================================
 
-48. DASHBOARD STATISTICS
+65. DASHBOARD STATISTICS
     Method: GET
     URL: /api/reports/dashboard/
     Authentication: Required
@@ -2390,7 +2953,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-49. SALES REPORT (Admin Only)
+66. SALES REPORT (Admin Only)
     Method: GET
     URL: /api/reports/sales/
     Authentication: Required (Admin)
@@ -2408,7 +2971,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-50. USER REPORT
+67. USER REPORT
     Method: GET
     URL: /api/reports/user/
     Authentication: Required
@@ -2433,7 +2996,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-51. WALLET REPORT
+68. WALLET REPORT
     Method: GET
     URL: /api/reports/wallet/
     Authentication: Required
@@ -2462,6 +3025,72 @@ Super User: EVAdmin && EVAdmin@123
         }
       ]
     }
+
+
+================================================================================
+                         PLATFORM SETTINGS APIs
+================================================================================
+
+1. GET PLATFORM SETTINGS
+   Method: GET
+   URL: /api/settings/
+   Authentication: Required (All authenticated users)
+   Description: Get current platform settings
+   
+   Response (200 OK):
+   {
+     "id": 1,
+     "booking_reservation_timeout_minutes": 1440,  // 24 hours in minutes, null = never expires
+     "updated_at": "2026-01-14T09:00:00Z",
+     "updated_by": 1,
+     "updated_by_username": "admin@example.com",
+     "updated_by_email": "admin@example.com"
+   }
+   
+   Note:
+   - Returns singleton settings instance
+   - All authenticated users can view settings
+   - booking_reservation_timeout_minutes: Integer (minutes) or null (never expires)
+
+
+2. UPDATE PLATFORM SETTINGS (Admin Only)
+   Method: PATCH
+   URL: /api/settings/
+   Authentication: Required (Admin or Superuser only)
+   Description: Update platform settings. Only admin/superuser can modify settings.
+   
+   Request Body:
+   {
+     "booking_reservation_timeout_minutes": 1440  // Integer (minutes) or null (never expires)
+   }
+   
+   Response (200 OK):
+   {
+     "id": 1,
+     "booking_reservation_timeout_minutes": 1440,
+     "updated_at": "2026-01-14T09:15:00Z",
+     "updated_by": 1,
+     "updated_by_username": "admin@example.com",
+     "updated_by_email": "admin@example.com"
+   }
+   
+   Error Response (400):
+   {
+     "booking_reservation_timeout_minutes": ["booking_reservation_timeout_minutes must be at least 1 minute or null (never expires)"]
+   }
+   
+   Error Response (403):
+   {
+     "detail": "Only admin or superuser can update platform settings."
+   }
+   
+   Notes:
+   - Only admin or superuser can update settings
+   - booking_reservation_timeout_minutes: Minimum value is 1 minute, or null for never expires
+   - updated_by is automatically set to the current user making the update
+   - Settings are stored as a singleton (only one instance exists)
+   - Timeout is stored in minutes (converted from hours for backward compatibility)
+   - Example: 1440 minutes = 24 hours, 60 minutes = 1 hour, null = never expires
 
 
 ================================================================================
@@ -2540,6 +3169,12 @@ Standard Error Format:
 5. Binary Pairs Limit: Maximum 10 pairs per month per user
 6. TDS Percentage: 5% with ₹10,000 ceiling
 7. EMI Auto-fill: Optional feature in payout requests
+8. Payment Status: Payments default to 'pending' and require admin/staff approval or payment gateway confirmation
+9. Stock Reservation: Bookings automatically reserve vehicle stock; released if payment not confirmed within timeout
+10. Reservation Timeout: Configurable via Platform Settings API (stored in minutes, null = never expires)
+11. Distributor Requirement: Only approved distributors can earn from binary pairs and referral bonuses
+12. Distributor Eligibility: User must be Active Buyer (total paid ≥ ₹5000) and have approved KYC to apply for distributor program
+13. Distributor Application: Each user can submit only one distributor application; admin/staff approval required to become distributor
 
 
 ================================================================================

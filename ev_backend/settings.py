@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'core.notification',
     'core.compliance',
     'core.reports',
+    'core.settings',
 ]
 
 MIDDLEWARE = [
@@ -198,6 +199,15 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60
 CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60
 
+# Celery Beat Schedule for periodic tasks
+from celery.schedules import crontab
+CELERY_BEAT_SCHEDULE = {
+    'release-expired-reservations': {
+        'task': 'core.inventory.tasks.release_expired_reservations',
+        'schedule': crontab(minute='*/10'),  # Every 10 minutes
+    },
+}
+
 # CORS Settings
 CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,http://localhost:8000', cast=lambda v: [s.strip() for s in v.split(',')])
 CORS_ALLOW_CREDENTIALS = True
@@ -221,6 +231,13 @@ MAX_EARNINGS_BEFORE_ACTIVE_BUYER = config('MAX_EARNINGS_BEFORE_ACTIVE_BUYER', de
 EMI_DEDUCTION_PERCENTAGE = config('EMI_DEDUCTION_PERCENTAGE', default=20, cast=int)
 MAX_BINARY_PAIRS_PER_MONTH = config('MAX_BINARY_PAIRS_PER_MONTH', default=10, cast=int)
 REFERRAL_COMMISSION_PERCENTAGE = config('REFERRAL_COMMISSION_PERCENTAGE', default=5, cast=float)
+
+# Booking Reservation Timeout (hours, None/null = never expires)
+BOOKING_RESERVATION_TIMEOUT_HOURS = config(
+    'BOOKING_RESERVATION_TIMEOUT_HOURS', 
+    default=24, 
+    cast=lambda v: int(v) if v and str(v).strip() else None
+)
 
 # TDS Configuration
 TDS_PERCENTAGE = config('TDS_PERCENTAGE', default=5, cast=int)

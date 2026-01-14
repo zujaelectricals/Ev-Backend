@@ -75,7 +75,12 @@ def find_next_available_position(user, start_node):
 def check_and_create_pair(user):
     """
     Check if user has matching left/right pairs and create binary pair
+    Only distributors can create pairs and earn
     """
+    # Business Rule: Only distributors can create pairs and earn
+    if not user.is_distributor:
+        return None
+    
     try:
         node = BinaryNode.objects.get(user=user)
     except BinaryNode.DoesNotExist:

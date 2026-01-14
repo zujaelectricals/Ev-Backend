@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
-from .models import Vehicle, VehicleImage
+from .models import Vehicle, VehicleImage, VehicleStock, StockReservation
 
 
 class VehicleImageInline(admin.TabularInline):
@@ -165,4 +165,106 @@ class VehicleImageAdmin(admin.ModelAdmin):
         """Optimize queryset with select_related"""
         qs = super().get_queryset(request)
         return qs.select_related('vehicle')
+
+
+@admin.register(VehicleStock)
+class VehicleStockAdmin(admin.ModelAdmin):
+    """Admin interface for VehicleStock model"""
+    list_display = ('id', 'vehicle', 'total_quantity', 'available_quantity', 'reserved_quantity', 'updated_at')
+    list_filter = ('created_at', 'updated_at')
+    search_fields = ('vehicle__name', 'vehicle__model_code')
+    readonly_fields = ('available_quantity', 'created_at', 'updated_at', 'reserved_quantity')
+    list_per_page = 25
+    
+    fieldsets = (
+        ('Stock Information', {
+            'fields': ('vehicle', 'total_quantity', 'available_quantity', 'reserved_quantity')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def reserved_quantity(self, obj):
+        """Calculate reserved quantity (always non-negative)"""
+        reserved = obj.total_quantity - obj.available_quantity
+        # Return 0 if calculation results in negative (data inconsistency)
+        return max(0, reserved)
+    reserved_quantity.short_description = 'Reserved'
+    
+    def get_queryset(self, request):
+        """Optimize queryset with select_related"""
+        qs = super().get_queryset(request)
+        return qs.select_related('vehicle')
+
+
+@admin.register(StockReservation)
+class StockReservationAdmin(admin.ModelAdmin):
+    """Admin interface for StockReservation model"""
+    list_display = ('id', 'booking_number', 'vehicle', 'quantity', 'status', 'expires_at', 'is_expired_display', 'created_at')
+    list_filter = ('status', 'expires_at', 'created_at', 'updated_at')
+    search_fields = ('booking__booking_number', 'vehicle__name', 'vehicle__model_code')
+    readonly_fields = ('created_at', 'updated_at', 'is_expired_display')
+    list_per_page = 25
+    date_hierarchy = 'created_at'
+    
+    fieldsets = (
+        ('Reservation Information', {
+            'fields': ('booking', 'vehicle', 'vehicle_stock', 'quantity', 'status', 'expires_at', 'is_expired_display')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    actions = ['release_selected', 'complete_selected']
+    
+    def booking_number(self, obj):
+        """Display booking number"""
+        return obj.booking.booking_number
+    booking_number.short_description = 'Booking Number'
+    booking_number.admin_order_field = 'booking__booking_number'
+    
+    def is_expired_display(self, obj):
+        """Display if reservation is expired"""
+        if obj.is_expired():
+            return format_html('<span style="color: red; font-weight: bold;">Expired</span>')
+        elif obj.expires_at is None:
+            return format_html('<span style="color: green;">Never Expires</span>')
+        else:
+            return format_html('<span style="color: orange;">Active</span>')
+    is_expired_display.short_description = 'Expiry Status'
+    
+    def release_selected(self, request, queryset):
+        """Admin action to release selected reservations"""
+        from .utils import release_reservation
+        count = 0
+        for reservation in queryset.filter(status='reserved'):
+            try:
+                release_reservation(reservation)
+                count += 1
+            except Exception as e:
+                self.message_user(request, f"Error releasing reservation {reservation.id}: {e}", level='ERROR')
+        self.message_user(request, f"Released {count} reservation(s).")
+    release_selected.short_description = "Release selected reservations"
+    
+    def complete_selected(self, request, queryset):
+        """Admin action to complete selected reservations"""
+        from .utils import complete_reservation
+        count = 0
+        for reservation in queryset.filter(status='reserved'):
+            try:
+                complete_reservation(reservation)
+                count += 1
+            except Exception as e:
+                self.message_user(request, f"Error completing reservation {reservation.id}: {e}", level='ERROR')
+        self.message_user(request, f"Completed {count} reservation(s).")
+    complete_selected.short_description = "Complete selected reservations"
+    
+    def get_queryset(self, request):
+        """Optimize queryset with select_related"""
+        qs = super().get_queryset(request)
+        return qs.select_related('booking', 'vehicle', 'vehicle_stock')
 

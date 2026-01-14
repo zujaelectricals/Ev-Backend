@@ -14,11 +14,23 @@ def get_or_create_wallet(user):
 def add_wallet_balance(user, amount, transaction_type, description='', reference_id=None, reference_type=''):
     """
     Add balance to user's wallet
-    Handles business rules for Active Buyer and EMI deduction
+    Handles business rules for Active Buyer, EMI deduction, and Distributor requirement
     """
     with transaction.atomic():
         wallet = get_or_create_wallet(user)
         balance_before = wallet.balance
+        
+        # Business Rule: Only distributors can earn from binary pairs and referrals
+        if transaction_type in ['BINARY_PAIR', 'REFERRAL_BONUS']:
+            if not user.is_distributor:
+                # Log warning but don't raise error (silent failure for non-distributors)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"Attempted to credit {transaction_type} to non-distributor user {user.username}. "
+                    f"Amount: {amount}. Transaction blocked."
+                )
+                return wallet  # Return wallet without crediting
         
         # Business Rule: Check if user is Active Buyer
         is_active_buyer = user.is_active_buyer

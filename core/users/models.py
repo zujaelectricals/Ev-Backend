@@ -200,3 +200,51 @@ class Nominee(models.Model):
     def __str__(self):
         return f"Nominee - {self.full_name} ({self.user.username})"
 
+
+class DistributorApplication(models.Model):
+    """
+    Distributor application form for MLM distributors
+    """
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='distributor_application')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Business Information
+    company_name = models.CharField(max_length=200, blank=True, null=True)
+    business_registration_number = models.CharField(max_length=100, blank=True, null=True)
+    tax_id = models.CharField(max_length=50, blank=True, null=True)
+    years_in_business = models.IntegerField(null=True, blank=True)
+    
+    # Experience
+    previous_distribution_experience = models.TextField(blank=True, null=True)
+    product_interest = models.TextField(blank=True, null=True)
+    
+    # References
+    reference_name = models.CharField(max_length=200, blank=True, null=True)
+    reference_contact = models.CharField(max_length=50, blank=True, null=True)
+    reference_relationship = models.CharField(max_length=100, blank=True, null=True)
+    
+    # Supporting Documents
+    business_license = models.FileField(upload_to='distributor/business_license/', null=True, blank=True)
+    tax_documents = models.FileField(upload_to='distributor/tax_documents/', null=True, blank=True)
+    
+    # Review Fields
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='distributor_applications_reviewed')
+    rejection_reason = models.TextField(blank=True)
+    
+    class Meta:
+        db_table = 'distributor_applications'
+        verbose_name = 'Distributor Application'
+        verbose_name_plural = 'Distributor Applications'
+        ordering = ['-submitted_at']
+    
+    def __str__(self):
+        return f"Distributor Application - {self.user.username} ({self.status})"
+

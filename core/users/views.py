@@ -5,8 +5,10 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-from .models import User, KYC, Nominee
-from .serializers import UserSerializer, UserProfileSerializer, KYCSerializer, NomineeSerializer
+from django.utils import timezone
+from rest_framework.exceptions import ValidationError
+from .models import User, KYC, Nominee, DistributorApplication
+from .serializers import UserSerializer, UserProfileSerializer, KYCSerializer, NomineeSerializer, DistributorApplicationSerializer
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -217,6 +219,7 @@ class KYCViewSet(viewsets.ModelViewSet):
         kyc = self.get_object()
         kyc.status = 'approved'
         kyc.reviewed_by = request.user
+        kyc.reviewed_at = timezone.now()
         kyc.save()
         return Response({'status': 'approved'})
     
@@ -226,6 +229,7 @@ class KYCViewSet(viewsets.ModelViewSet):
         kyc = self.get_object()
         kyc.status = 'rejected'
         kyc.reviewed_by = request.user
+        kyc.reviewed_at = timezone.now()
         kyc.rejection_reason = request.data.get('reason', '')
         kyc.save()
         return Response({'status': 'rejected'})
@@ -325,4 +329,178 @@ class NomineeViewSet(viewsets.ModelViewSet):
         nominee.kyc_rejection_reason = request.data.get('reason', '')
         nominee.save()
         return Response({'status': 'rejected'})
+
+
+class DistributorApplicationViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for Distributor Application management
+    """
+    queryset = DistributorApplication.objects.all()
+    serializer_class = DistributorApplicationSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'head', 'options']
+    
+    def get_queryset(self):
+        """
+        Permission-based queryset:
+        - Admin/Superuser: Can view all applications
+        - Staff: Can view all applications
+        - Normal Users: Can only view their own application
+        """
+        user = self.request.user
+        if user.is_superuser or user.role in ['admin', 'staff']:
+            return DistributorApplication.objects.all().select_related('user', 'reviewed_by')
+        else:
+            return DistributorApplication.objects.filter(user=user).select_related('user', 'reviewed_by')
+    
+    def list(self, request, *args, **kwargs):
+        """List distributor applications (user sees own, admin/staff see all)"""
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # For normal users, return their application if it exists
+        if not (request.user.is_superuser or request.user.role in ['admin', 'staff']):
+            # Normal users can only see their own application
+            application = queryset.first()
+            if application:
+                serializer = self.get_serializer(application)
+                return Response(serializer.data)
+            else:
+                return Response({'detail': 'No application found.'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # For admin/staff, return paginated list
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    def create(self, request, *args, **kwargs):
+        """Create distributor application with eligibility validation"""
+        user = request.user
+        
+        # Check eligibility
+        if not user.is_active_buyer:
+            return Response(
+                {'non_field_errors': ['User must be an Active Buyer to apply for distributor program. Total paid amount must be at least ₹5000.']},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not hasattr(user, 'kyc') or user.kyc.status != 'approved':
+            return Response(
+                {'non_field_errors': ['User must have approved KYC to apply for distributor program.']},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if hasattr(user, 'distributor_application'):
+            return Response(
+                {'non_field_errors': ['Application already exists. You can only submit one distributor application.']},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(user=user)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def approve(self, request, pk=None):
+        """Approve distributor application (Admin/Staff only)"""
+        application = self.get_object()
+        
+        if application.status == 'approved':
+            return Response(
+                {'error': 'Application is already approved'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        application.status = 'approved'
+        application.reviewed_by = request.user
+        application.reviewed_at = timezone.now()
+        application.rejection_reason = ''  # Clear rejection reason if any
+        application.save()
+        
+        # Set user as distributor
+        user = application.user
+        user.is_distributor = True
+        user.save(update_fields=['is_distributor'])
+        
+        return Response({
+            'status': 'approved',
+            'message': f'Application approved. User {user.username} is now a distributor.'
+        })
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def reject(self, request, pk=None):
+        """Reject distributor application (Admin/Staff only)"""
+        application = self.get_object()
+        
+        if application.status == 'rejected':
+            return Response(
+                {'error': 'Application is already rejected'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        application.status = 'rejected'
+        application.reviewed_by = request.user
+        application.reviewed_at = timezone.now()
+        application.rejection_reason = request.data.get('reason', '')
+        application.save()
+        
+        return Response({
+            'status': 'rejected',
+            'message': 'Application rejected.'
+        })
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAdminUser])
+    def list_all(self, request):
+        """
+        List all distributor applications with filtering (Admin only)
+        Supports filtering by status, date ranges, user_id, and ordering
+        """
+        queryset = DistributorApplication.objects.all().select_related('user', 'reviewed_by')
+        
+        # Filter by status
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        
+        # Filter by submission date range
+        submitted_date_from = request.query_params.get('submitted_date_from')
+        submitted_date_to = request.query_params.get('submitted_date_to')
+        if submitted_date_from:
+            queryset = queryset.filter(submitted_at__date__gte=submitted_date_from)
+        if submitted_date_to:
+            queryset = queryset.filter(submitted_at__date__lte=submitted_date_to)
+        
+        # Filter by review date range
+        reviewed_date_from = request.query_params.get('reviewed_date_from')
+        reviewed_date_to = request.query_params.get('reviewed_date_to')
+        if reviewed_date_from:
+            queryset = queryset.filter(reviewed_at__date__gte=reviewed_date_from)
+        if reviewed_date_to:
+            queryset = queryset.filter(reviewed_at__date__lte=reviewed_date_to)
+        
+        # Filter by user ID
+        user_id = request.query_params.get('user_id')
+        if user_id:
+            try:
+                queryset = queryset.filter(user_id=int(user_id))
+            except (ValueError, TypeError):
+                pass  # Invalid user_id, ignore filter
+        
+        # Ordering
+        ordering = request.query_params.get('ordering', '-submitted_at')
+        if ordering:
+            queryset = queryset.order_by(ordering)
+        
+        # Pagination
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 

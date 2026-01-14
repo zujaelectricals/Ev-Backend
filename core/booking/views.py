@@ -5,6 +5,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
 from django.conf import settings
 from django.utils import timezone
+from decimal import Decimal
+from core.users.models import User
+from core.inventory.utils import create_reservation
 from .models import Booking, Payment
 from .serializers import BookingSerializer, PaymentSerializer
 
@@ -58,6 +61,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         if referring_user and not self.request.user.referred_by:
             self.request.user.referred_by = referring_user
             self.request.user.save(update_fields=['referred_by'])
+        
+        # Create stock reservation for the booking
+        try:
+            create_reservation(booking=booking, vehicle=booking.vehicle_model, quantity=1)
+        except ValueError as e:
+            # If insufficient stock, raise validation error
+            raise serializers.ValidationError({'vehicle_model': str(e)})
     
     @action(detail=True, methods=['post'])
     def make_payment(self, request, pk=None):
@@ -70,7 +80,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        amount = float(request.data.get('amount', 0))
+        amount = Decimal(str(request.data.get('amount', 0)))
         payment_method = request.data.get('payment_method', 'online')
         
         if amount <= 0:
@@ -85,17 +95,16 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Create payment record
+        # Create payment record with status='pending' (not automatically completed)
         payment = Payment.objects.create(
             booking=booking,
             user=request.user,
             amount=amount,
             payment_method=payment_method,
-            status='completed'
+            status='pending'  # Changed from 'completed' - requires admin approval or gateway confirmation
         )
         
-        # Update booking
-        booking.make_payment(amount)
+        # Don't update booking automatically - only when payment status becomes 'completed'
         
         serializer = PaymentSerializer(payment)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -119,7 +128,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        amount = float(request.data.get('amount', 0))
+        amount = Decimal(str(request.data.get('amount', 0)))
         payment_method = request.data.get('payment_method', 'cash')
         transaction_id = request.data.get('transaction_id', '')
         notes = request.data.get('notes', '')
@@ -148,8 +157,21 @@ class BookingViewSet(viewsets.ModelViewSet):
             completed_at=timezone.now()
         )
         
-        # Update booking
+        # Update booking (only when admin/staff accepts payment)
         booking.make_payment(amount)
+        
+        # Complete the stock reservation if it exists
+        from core.inventory.utils import complete_reservation
+        try:
+            reservation = booking.stock_reservation
+            if reservation and reservation.status == 'reserved':
+                complete_reservation(reservation)
+        except:
+            pass  # No reservation exists, skip
+        
+        # Trigger Celery task for payment processing (referral bonus, etc.)
+        from core.booking.tasks import payment_completed
+        payment_completed.delay(booking.id, float(amount))
         
         serializer = PaymentSerializer(payment)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -196,7 +218,21 @@ class PaymentViewSet(viewsets.ModelViewSet):
         if payment.status == 'completed':
             payment.completed_at = timezone.now()
             payment.save(update_fields=['completed_at'])
+            booking = payment.booking
             booking.make_payment(payment.amount)
+            
+            # Complete the stock reservation if it exists
+            from core.inventory.utils import complete_reservation
+            try:
+                reservation = booking.stock_reservation
+                if reservation and reservation.status == 'reserved':
+                    complete_reservation(reservation)
+            except:
+                pass  # No reservation exists, skip
+            
+            # Trigger Celery task for payment processing (referral bonus, etc.)
+            from core.booking.tasks import payment_completed
+            payment_completed.delay(booking.id, float(payment.amount))
     
     def perform_update(self, serializer):
         """Update payment - only admin/staff can update payments"""
@@ -213,6 +249,32 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment.save(update_fields=['completed_at'])
             booking = payment.booking
             booking.make_payment(payment.amount)
+            
+            # Complete the stock reservation if it exists
+            from core.inventory.utils import complete_reservation
+            try:
+                reservation = booking.stock_reservation
+                if reservation and reservation.status == 'reserved':
+                    complete_reservation(reservation)
+            except:
+                pass  # No reservation exists, skip
+            
+            # Trigger Celery task for payment processing (referral bonus, etc.)
+            from core.booking.tasks import payment_completed
+            payment_completed.delay(booking.id, float(payment.amount))
+        # If status changed to 'failed', optionally release reservation
+        elif new_status == 'failed':
+            booking = payment.booking
+            from core.inventory.utils import release_reservation
+            try:
+                reservation = booking.stock_reservation
+                if reservation and reservation.status == 'reserved':
+                    # Optionally release reservation on payment failure
+                    # Uncomment the line below if you want automatic release on failure
+                    # release_reservation(reservation)
+                    pass
+            except:
+                pass  # No reservation exists, skip
         # If status changed from 'completed' to something else, handle refund/reversal
         elif old_status == 'completed' and payment.status != 'completed':
             # Note: Refund logic can be added here if needed
@@ -263,7 +325,67 @@ class PaymentViewSet(viewsets.ModelViewSet):
         if old_status != 'completed' and new_status == 'completed':
             booking = payment.booking
             booking.make_payment(payment.amount)
+            
+            # Complete the stock reservation if it exists
+            from core.inventory.utils import complete_reservation
+            try:
+                reservation = booking.stock_reservation
+                if reservation and reservation.status == 'reserved':
+                    complete_reservation(reservation)
+            except:
+                pass  # No reservation exists, skip
+            
+            # Trigger Celery task for payment processing (referral bonus, etc.)
+            from core.booking.tasks import payment_completed
+            payment_completed.delay(booking.id, float(payment.amount))
         
         serializer = PaymentSerializer(payment)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def perform_destroy(self, instance):
+        """Handle booking deletion - release reservation if exists"""
+        from core.inventory.utils import release_reservation
+        try:
+            reservation = instance.stock_reservation
+            if reservation and reservation.status == 'reserved':
+                release_reservation(reservation)
+        except:
+            pass  # No reservation exists, skip
+        
+        instance.delete()
+    
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """Cancel a booking and release reservation"""
+        booking = self.get_object()
+        
+        # Check permission - user can cancel their own booking, admin/staff can cancel any
+        if booking.user != request.user and not (request.user.is_superuser or request.user.role in ['admin', 'staff']):
+            return Response(
+                {'error': 'Permission denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if booking can be cancelled
+        if booking.status in ['cancelled', 'completed']:
+            return Response(
+                {'error': f'Cannot cancel booking with status: {booking.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Release reservation if exists
+        from core.inventory.utils import release_reservation
+        try:
+            reservation = booking.stock_reservation
+            if reservation and reservation.status == 'reserved':
+                release_reservation(reservation)
+        except:
+            pass  # No reservation exists, skip
+        
+        # Update booking status
+        booking.status = 'cancelled'
+        booking.save(update_fields=['status'])
+        
+        serializer = BookingSerializer(booking)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

@@ -5,8 +5,13 @@ from rest_framework.permissions import IsAuthenticated, BasePermission
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
-from .models import Vehicle, VehicleImage
-from .serializers import VehicleSerializer, VehicleListSerializer, VehicleImageSerializer, ImageUploadSerializer, VehicleGroupedSerializer, VehicleVariantSerializer
+from .models import Vehicle, VehicleImage, VehicleStock
+from .serializers import (
+    VehicleSerializer, VehicleListSerializer, VehicleImageSerializer, 
+    ImageUploadSerializer, VehicleGroupedSerializer, VehicleVariantSerializer,
+    VehicleStockSerializer
+)
+from .utils import get_or_create_vehicle_stock
 
 
 class VehicleGroupedPagination(PageNumberPagination):
@@ -16,13 +21,23 @@ class VehicleGroupedPagination(PageNumberPagination):
     max_page_size = 100
     page_query_param = 'page'
     
+    def paginate_queryset(self, queryset, request, view=None):
+        """Paginate queryset (or list) and update page_size from request"""
+        # Get page_size from request query params
+        page_size = self.get_page_size(request)
+        if page_size:
+            self.page_size = page_size
+        return super().paginate_queryset(queryset, request, view)
+    
     def get_paginated_response(self, data):
         """Return paginated response with count of vehicle groups (not individual vehicles)"""
+        # Get the actual page size used (from the paginator, which respects query params)
+        actual_page_size = self.page.paginator.per_page
         return Response({
             'count': self.page.paginator.count,  # Count of vehicle groups
             'next': self.get_next_link(),
             'previous': self.get_previous_link(),
-            'page_size': self.page_size,
+            'page_size': actual_page_size,
             'current_page': self.page.number,
             'total_pages': self.page.paginator.num_pages,
             'results': data
@@ -77,7 +92,7 @@ class VehicleViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """Filter vehicles based on query params"""
-        queryset = Vehicle.objects.all().prefetch_related('images')
+        queryset = Vehicle.objects.all().prefetch_related('images', 'stock')
         
         # Filter by name (exact match or contains)
         name = self.request.query_params.get('name', None)
@@ -137,8 +152,8 @@ class VehicleViewSet(viewsets.ModelViewSet):
         """List vehicles grouped by name"""
         queryset = self.filter_queryset(self.get_queryset())
         
-        # Ensure images are prefetched
-        queryset = queryset.prefetch_related('images')
+        # Ensure images and stock are prefetched
+        queryset = queryset.prefetch_related('images', 'stock')
         
         # Group vehicles by name
         from collections import defaultdict
@@ -350,3 +365,96 @@ def upload_images(request):
     # Serialize and return
     serializer = ImageUploadSerializer(created_images, many=True, context={'request': request})
     return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class VehicleStockViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for VehicleStock management
+    Admin/Superuser only - for managing vehicle inventory stock
+    """
+    queryset = VehicleStock.objects.all()
+    serializer_class = VehicleStockSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    
+    def get_queryset(self):
+        """Filter stocks based on query params"""
+        queryset = VehicleStock.objects.all().select_related('vehicle')
+        
+        # Filter by vehicle ID
+        vehicle_id = self.request.query_params.get('vehicle_id')
+        if vehicle_id:
+            try:
+                queryset = queryset.filter(vehicle_id=int(vehicle_id))
+            except (ValueError, TypeError):
+                pass
+        
+        # Filter by vehicle model_code
+        model_code = self.request.query_params.get('model_code')
+        if model_code:
+            queryset = queryset.filter(vehicle__model_code__icontains=model_code)
+        
+        # Filter by vehicle name
+        vehicle_name = self.request.query_params.get('vehicle_name')
+        if vehicle_name:
+            queryset = queryset.filter(vehicle__name__icontains=vehicle_name)
+        
+        # Filter by available quantity
+        min_available = self.request.query_params.get('min_available')
+        max_available = self.request.query_params.get('max_available')
+        if min_available:
+            try:
+                queryset = queryset.filter(available_quantity__gte=int(min_available))
+            except (ValueError, TypeError):
+                pass
+        if max_available:
+            try:
+                queryset = queryset.filter(available_quantity__lte=int(max_available))
+            except (ValueError, TypeError):
+                pass
+        
+        return queryset.order_by('-updated_at')
+    
+    def perform_create(self, serializer):
+        """Create stock - only admin/superuser allowed"""
+        if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
+            raise PermissionDenied("Only admin users can create stock records.")
+        serializer.save()
+    
+    def perform_update(self, serializer):
+        """Update stock - only admin/superuser allowed"""
+        if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
+            raise PermissionDenied("Only admin users can update stock records.")
+        serializer.save()
+    
+    def perform_destroy(self, instance):
+        """Delete stock - only admin/superuser allowed"""
+        if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
+            raise PermissionDenied("Only admin users can delete stock records.")
+        instance.delete()
+    
+    @action(detail=False, methods=['post'], url_path='by-vehicle/(?P<vehicle_id>[^/.]+)')
+    def update_by_vehicle(self, request, vehicle_id=None):
+        """
+        Update or create stock for a specific vehicle
+        POST /api/inventory/stock/by-vehicle/{vehicle_id}/
+        """
+        if not (request.user.is_superuser or request.user.role == 'admin'):
+            raise PermissionDenied("Only admin users can update stock.")
+        
+        try:
+            vehicle = Vehicle.objects.get(id=vehicle_id)
+        except Vehicle.DoesNotExist:
+            return Response(
+                {'error': 'Vehicle not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get or create stock
+        stock = get_or_create_vehicle_stock(vehicle)
+        
+        # Update stock
+        serializer = self.get_serializer(stock, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        
+        return Response(serializer.data, status=status.HTTP_200_OK)
