@@ -5,6 +5,23 @@ from core.inventory.models import Vehicle
 from .models import Booking, Payment
 
 
+class ReferredUserSerializer(serializers.Serializer):
+    """Nested serializer for referred user details"""
+    id = serializers.IntegerField()
+    fullname = serializers.SerializerMethodField()
+    email = serializers.EmailField()
+    
+    def get_fullname(self, obj):
+        """Get full name from first_name and last_name"""
+        return obj.get_full_name() if obj else None
+    
+    def to_representation(self, instance):
+        """Handle None values"""
+        if instance is None:
+            return None
+        return super().to_representation(instance)
+
+
 class VehicleDetailSerializer(serializers.Serializer):
     """Nested serializer for Vehicle details in read operations"""
     id = serializers.IntegerField()
@@ -17,13 +34,15 @@ class VehicleDetailSerializer(serializers.Serializer):
 
 class BookingSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(source='user.email', read_only=True)
-    user_mobile = serializers.CharField(source='user.mobile', read_only=True)
+    user_mobile = serializers.SerializerMethodField()
     vehicle_details = VehicleDetailSerializer(source='vehicle_model', read_only=True)
     vehicle_model_code = serializers.CharField(write_only=True, required=False)
     model_code = serializers.CharField(source='vehicle_model.model_code', read_only=True)
     referral_code = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    manual_placement = serializers.BooleanField(write_only=True, required=False, default=False)
     reservation_status = serializers.CharField(source='stock_reservation.status', read_only=True)
     reservation_expires_at = serializers.DateTimeField(source='stock_reservation.expires_at', read_only=True)
+    referred_by = ReferredUserSerializer(read_only=True, allow_null=True)
     
     class Meta:
         model = Booking
@@ -150,6 +169,32 @@ class BookingSerializer(serializers.ModelSerializer):
                 })
         
         return data
+    
+    def get_user_mobile(self, obj):
+        """Get user mobile number, ensuring it's properly accessed"""
+        # Get mobile from the booking's user object (loaded via select_related)
+        if hasattr(obj, 'user') and obj.user:
+            mobile = getattr(obj.user, 'mobile', None)
+            # If mobile is None, try to extract from username (for users who logged in via mobile OTP)
+            if not mobile and hasattr(obj.user, 'username'):
+                username = obj.user.username
+                # Check if username looks like a mobile number (all digits, 10-15 chars)
+                if username and username.isdigit() and 10 <= len(username) <= 15:
+                    return username
+            return mobile
+        
+        # Fallback to request user if available (for create operations)
+        request = self.context.get('request')
+        if request and hasattr(request, 'user'):
+            mobile = getattr(request.user, 'mobile', None)
+            # If mobile is None, try to extract from username
+            if not mobile and hasattr(request.user, 'username'):
+                username = request.user.username
+                if username and username.isdigit() and 10 <= len(username) <= 15:
+                    return username
+            return mobile
+        
+        return None
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -189,6 +234,24 @@ class PaymentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'amount': 'Amount exceeds remaining booking amount'
                 })
+        
+        # Check for duplicate transaction_id (if provided)
+        transaction_id = data.get('transaction_id')
+        if transaction_id:
+            # On create: check if transaction_id exists
+            if not self.instance:
+                existing_payment = Payment.objects.filter(transaction_id=transaction_id).first()
+                if existing_payment:
+                    raise serializers.ValidationError({
+                        'transaction_id': f'Payment with transaction_id "{transaction_id}" already exists'
+                    })
+            # On update: check if transaction_id exists for a different payment
+            else:
+                existing_payment = Payment.objects.filter(transaction_id=transaction_id).exclude(pk=self.instance.pk).first()
+                if existing_payment:
+                    raise serializers.ValidationError({
+                        'transaction_id': f'Payment with transaction_id "{transaction_id}" already exists'
+                    })
         
         return data
 

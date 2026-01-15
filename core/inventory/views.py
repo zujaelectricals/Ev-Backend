@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated, BasePermission
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
+from django.db import connection
 from .models import Vehicle, VehicleImage, VehicleStock
 from .serializers import (
     VehicleSerializer, VehicleListSerializer, VehicleImageSerializer, 
@@ -110,14 +111,24 @@ class VehicleViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(status=status_param)
         
         # Filter by color (if vehicle_color array contains the color)
+        # Store filter for Python-based filtering (works across all databases)
         color = self.request.query_params.get('color', None)
         if color:
-            queryset = queryset.filter(vehicle_color__contains=[color])
+            self._color_filter = color
+            # Try database-level filtering for PostgreSQL
+            vendor = connection.vendor
+            if vendor == 'postgresql':
+                queryset = queryset.filter(vehicle_color__contains=[color])
         
         # Filter by battery variant (if battery_variant array contains the variant)
+        # Store filter for Python-based filtering (works across all databases)
         battery = self.request.query_params.get('battery', None)
         if battery:
-            queryset = queryset.filter(battery_variant__contains=[battery])
+            self._battery_filter = battery
+            # Try database-level filtering for PostgreSQL
+            vendor = connection.vendor
+            if vendor == 'postgresql':
+                queryset = queryset.filter(battery_variant__contains=[battery])
         
         # Filter by price range
         min_price = self.request.query_params.get('min_price', None)
@@ -136,12 +147,16 @@ class VehicleViewSet(viewsets.ModelViewSet):
         # Search query (searches across multiple fields)
         search = self.request.query_params.get('search', None)
         if search:
-            queryset = queryset.filter(
-                Q(name__icontains=search) |
-                Q(model_code__icontains=search) |
-                Q(description__icontains=search) |
-                Q(features__icontains=search)  # Search in features array
-            )
+            # Build search query - avoid JSON field lookups for non-PostgreSQL databases
+            vendor = connection.vendor
+            search_queries = Q(name__icontains=search) | Q(model_code__icontains=search) | Q(description__icontains=search)
+            
+            # Only use JSON field lookup for PostgreSQL
+            if vendor == 'postgresql':
+                search_queries |= Q(features__icontains=search)
+            # For non-PostgreSQL, features search is skipped (would require Python filtering which is inefficient)
+            
+            queryset = queryset.filter(search_queries)
         
         # Order by created_at (newest first) by default
         queryset = queryset.order_by('-created_at')
@@ -155,12 +170,36 @@ class VehicleViewSet(viewsets.ModelViewSet):
         # Ensure images and stock are prefetched
         queryset = queryset.prefetch_related('images', 'stock')
         
+        # Convert queryset to list to preserve prefetch
+        vehicles_list = list(queryset)
+        
+        # Apply Python-based filtering for color and battery (for non-PostgreSQL databases)
+        # This works across all database backends
+        color_filter = getattr(self, '_color_filter', None)
+        battery_filter = getattr(self, '_battery_filter', None)
+        
+        if color_filter or battery_filter:
+            filtered_vehicles = []
+            for vehicle in vehicles_list:
+                # Filter by color if specified
+                if color_filter:
+                    vehicle_colors = vehicle.vehicle_color if isinstance(vehicle.vehicle_color, list) else []
+                    if color_filter.lower() not in [c.lower() for c in vehicle_colors]:
+                        continue
+                
+                # Filter by battery if specified
+                if battery_filter:
+                    vehicle_batteries = vehicle.battery_variant if isinstance(vehicle.battery_variant, list) else []
+                    if battery_filter.lower() not in [b.lower() for b in vehicle_batteries]:
+                        continue
+                
+                filtered_vehicles.append(vehicle)
+            vehicles_list = filtered_vehicles
+        
         # Group vehicles by name
         from collections import defaultdict
         grouped_vehicles = defaultdict(list)
         
-        # Convert queryset to list to preserve prefetch
-        vehicles_list = list(queryset)
         for vehicle in vehicles_list:
             grouped_vehicles[vehicle.name].append(vehicle)
         

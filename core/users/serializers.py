@@ -4,6 +4,40 @@ from .models import User, KYC, Nominee, DistributorApplication
 from django.utils import timezone
 
 
+class ReferredByUserSerializer(serializers.Serializer):
+    """Nested serializer for referred_by user details"""
+    id = serializers.IntegerField()
+    fullname = serializers.SerializerMethodField()
+    email = serializers.EmailField()
+    
+    def get_fullname(self, obj):
+        """Get full name from first_name and last_name"""
+        return obj.get_full_name() if obj else None
+    
+    def to_representation(self, instance):
+        """Handle None values"""
+        if instance is None:
+            return None
+        return super().to_representation(instance)
+
+
+class ReviewedByUserSerializer(serializers.Serializer):
+    """Nested serializer for reviewed_by user details"""
+    id = serializers.IntegerField()
+    fullname = serializers.SerializerMethodField()
+    email = serializers.EmailField()
+    
+    def get_fullname(self, obj):
+        """Get full name from first_name and last_name"""
+        return obj.get_full_name() if obj else None
+    
+    def to_representation(self, instance):
+        """Handle None values"""
+        if instance is None:
+            return None
+        return super().to_representation(instance)
+
+
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -19,6 +53,7 @@ class UserSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     kyc_status = serializers.SerializerMethodField()
     nominee_exists = serializers.SerializerMethodField()
+    referred_by = ReferredByUserSerializer(read_only=True, allow_null=True)
     
     class Meta:
         model = User
@@ -31,15 +66,22 @@ class UserProfileSerializer(serializers.ModelSerializer):
                            'referral_code', 'referred_by', 'date_joined')
     
     def get_kyc_status(self, obj):
-        if hasattr(obj, 'kyc'):
+        """Get KYC status if KYC exists for the user"""
+        # For OneToOneField reverse relationships, use hasattr which safely checks existence
+        # This avoids triggering unnecessary database queries
+        if hasattr(obj, 'kyc') and obj.kyc is not None:
             return obj.kyc.status
         return None
     
     def get_nominee_exists(self, obj):
-        return hasattr(obj, 'nominee')
+        """Check if nominee exists for the user"""
+        # For OneToOneField reverse relationships, use hasattr which safely checks existence
+        return hasattr(obj, 'nominee') and obj.nominee is not None
 
 
 class KYCSerializer(serializers.ModelSerializer):
+    reviewed_by = ReviewedByUserSerializer(read_only=True, allow_null=True)
+    
     class Meta:
         model = KYC
         fields = '__all__'
@@ -90,6 +132,7 @@ class DistributorApplicationSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(source='user.email', read_only=True)
     user_username = serializers.CharField(source='user.username', read_only=True)
     user_full_name = serializers.SerializerMethodField()
+    reviewed_by = ReviewedByUserSerializer(read_only=True, allow_null=True)
     
     class Meta:
         model = DistributorApplication

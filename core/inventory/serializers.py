@@ -846,7 +846,77 @@ class VehicleVariantSerializer(serializers.ModelSerializer):
 class VehicleGroupedSerializer(serializers.Serializer):
     """Serializer for grouped vehicles by name"""
     name = serializers.CharField()
+    colors_available = serializers.SerializerMethodField()
+    battery_capacities_available = serializers.SerializerMethodField()
+    price_range = serializers.SerializerMethodField()
+    total_variants = serializers.SerializerMethodField()
+    status_summary = serializers.SerializerMethodField()
+    features = serializers.SerializerMethodField()
+    specifications = serializers.SerializerMethodField()
+    description = serializers.SerializerMethodField()
     variants = serializers.SerializerMethodField()
+    
+    def get_colors_available(self, obj):
+        """Get all unique colors available across all variants"""
+        colors_set = set()
+        for vehicle in obj['variants']:
+            if isinstance(vehicle.vehicle_color, list):
+                colors_set.update(vehicle.vehicle_color)
+        return sorted(list(colors_set))
+    
+    def get_battery_capacities_available(self, obj):
+        """Get all unique battery capacities available across all variants"""
+        batteries_set = set()
+        for vehicle in obj['variants']:
+            if isinstance(vehicle.battery_variant, list):
+                batteries_set.update(vehicle.battery_variant)
+        return sorted(list(batteries_set))
+    
+    def get_price_range(self, obj):
+        """Get price range (min and max) across all variants"""
+        prices = [float(vehicle.price) for vehicle in obj['variants'] if vehicle.price]
+        if prices:
+            return {
+                'min': min(prices),
+                'max': max(prices)
+            }
+        return {'min': None, 'max': None}
+    
+    def get_total_variants(self, obj):
+        """Get total number of variants for this vehicle"""
+        return len(obj['variants'])
+    
+    def get_status_summary(self, obj):
+        """Get status summary across all variants"""
+        status_counts = {}
+        for vehicle in obj['variants']:
+            status = vehicle.status or 'available'
+            status_counts[status] = status_counts.get(status, 0) + 1
+        return status_counts
+    
+    def get_features(self, obj):
+        """Get aggregated features from all variants (unique features)"""
+        features_set = set()
+        for vehicle in obj['variants']:
+            if isinstance(vehicle.features, list):
+                features_set.update(vehicle.features)
+        return sorted(list(features_set))
+    
+    def get_specifications(self, obj):
+        """Get aggregated specifications from all variants (merge all specs)"""
+        merged_specs = {}
+        for vehicle in obj['variants']:
+            if isinstance(vehicle.specifications, dict):
+                # Merge specifications, keeping all unique keys
+                merged_specs.update(vehicle.specifications)
+        return merged_specs
+    
+    def get_description(self, obj):
+        """Get description from first variant (or aggregated if needed)"""
+        for vehicle in obj['variants']:
+            if vehicle.description:
+                return vehicle.description
+        return None
     
     def get_variants(self, obj):
         """Serialize vehicle variants"""

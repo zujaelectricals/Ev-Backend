@@ -150,13 +150,12 @@ Super User: EVAdmin && EVAdmin@123
    Method: POST
    URL: /api/auth/verify-signup-otp/
    Authentication: Not Required
-   Description: Verify OTP for both email and mobile, then create user account
+   Description: Verify OTP and create user account. The same OTP code is sent to both email and mobile, so use the same code for verification. This will create the user account with all profile fields from the signup form.
    
    Request Body:
    {
-     "signup_token": "ABC123XYZ789...",
-     "email_otp": "123456",
-     "mobile_otp": "654321"
+     "signup_token": "ABC123XYZ789...",    // Token received from /auth/signup/ endpoint
+     "otp_code": "123456"                  // OTP code received via email or mobile (same code for both)
    }
    
    Response (201 Created):
@@ -180,9 +179,13 @@ Super User: EVAdmin && EVAdmin@123
    Error Response (400):
    {
      "signup_token": ["Invalid or expired signup token"],
-     "email_otp": ["Invalid or expired email OTP"],
-     "mobile_otp": ["Invalid or expired mobile OTP"]
+     "otp_code": ["Invalid or expired OTP"]
    }
+   
+   Notes:
+   - The signup_token expires after 15 minutes
+   - If user already exists (e.g., logged in via OTP login), the profile will be updated with signup data
+   - The same OTP code works for both email and mobile verification
    
    Rate Limit: 5 requests per minute per IP
 
@@ -675,32 +678,30 @@ Super User: EVAdmin && EVAdmin@123
     - Normal user accessing any other KYC by ID: ✗ 404 Not Found
 
 
-19. APPROVE KYC (Admin Only)
+19. UPDATE KYC STATUS (Admin Only)
     Method: POST
-    URL: /api/users/kyc/{id}/approve/
+    URL: /api/users/kyc/{id}/update-status/
     Authentication: Required (Admin)
-    Description: Approve KYC submission
-    
-    Response (200 OK):
-    {
-      "status": "approved"
-    }
-
-
-20. REJECT KYC (Admin Only)
-    Method: POST
-    URL: /api/users/kyc/{id}/reject/
-    Authentication: Required (Admin)
-    Description: Reject KYC submission
+    Description: Update KYC status - approve or reject KYC submission
     
     Request Body:
     {
-      "reason": "PAN document is not clear"
+      "status": "approved"  // or "rejected"
+      "reason": "PAN document is not clear"  // Optional, only required/used when status is "rejected"
     }
     
     Response (200 OK):
     {
-      "status": "rejected"
+      "status": "approved"  // or "rejected"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Invalid status. Must be 'approved' or 'rejected'"
+    }
+    or
+    {
+      "error": "KYC is already approved"  // or "KYC is already rejected"
     }
 
 
@@ -782,7 +783,7 @@ Super User: EVAdmin && EVAdmin@123
                     DISTRIBUTOR APPLICATION APIs
 ================================================================================
 
-69. CREATE DISTRIBUTOR APPLICATION
+74. CREATE DISTRIBUTOR APPLICATION
     Method: POST
     URL: /api/users/distributor-application/
     Authentication: Required
@@ -853,7 +854,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-70. GET DISTRIBUTOR APPLICATION STATUS
+75. GET DISTRIBUTOR APPLICATION STATUS
     Method: GET
     URL: /api/users/distributor-application/
     Authentication: Required
@@ -880,7 +881,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-71. GET DISTRIBUTOR APPLICATION BY ID
+76. GET DISTRIBUTOR APPLICATION BY ID
     Method: GET
     URL: /api/users/distributor-application/{id}/
     Authentication: Required
@@ -922,45 +923,11 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-72. APPROVE DISTRIBUTOR APPLICATION (Admin/Staff Only)
+77. UPDATE DISTRIBUTOR APPLICATION STATUS (Admin/Staff Only)
     Method: POST
-    URL: /api/users/distributor-application/{id}/approve/
+    URL: /api/users/distributor-application/{id}/update-status/
     Authentication: Required (Admin, Staff, or Superuser)
-    Description: Approve distributor application. Sets user.is_distributor = True and application.status = 'approved'
-    
-    Permission Requirements:
-    - Superuser (is_superuser=True)
-    - Admin users (role='admin' with is_staff=True)
-    - Staff users (role='staff' with is_staff=True)
-    
-    Response (200 OK):
-    {
-      "status": "approved",
-      "message": "Application approved. User user@example.com is now a distributor."
-    }
-    
-    Error Response (400 Bad Request):
-    {
-      "error": "Application is already approved"
-    }
-    
-    Error Response (403 Forbidden):
-    {
-      "detail": "You do not have permission to perform this action."
-    }
-    
-    Note:
-    - Upon approval, user.is_distributor is automatically set to True
-    - User can now earn from binary pairs and referrals
-    - Only one application per user is allowed
-    - Normal users cannot approve applications
-
-
-73. REJECT DISTRIBUTOR APPLICATION (Admin/Staff Only)
-    Method: POST
-    URL: /api/users/distributor-application/{id}/reject/
-    Authentication: Required (Admin, Staff, or Superuser)
-    Description: Reject distributor application. Admin/Staff can supply an optional reason.
+    Description: Approve or reject distributor application. Sets application.status to 'approved' or 'rejected'. Upon approval, sets user.is_distributor = True.
     
     Permission Requirements:
     - Superuser (is_superuser=True)
@@ -969,10 +936,30 @@ Super User: EVAdmin && EVAdmin@123
     
     Request Body:
     {
-      "reason": "Insufficient business experience"  // Optional
+      "status": "approved"  // Required: "approved" or "rejected"
+      "reason": "Insufficient business experience"  // Optional, only used when status is "rejected"
     }
     
-    Response (200 OK):
+    Example Request (Approve):
+    POST /api/users/distributor-application/1/update-status/
+    {
+      "status": "approved"
+    }
+    
+    Example Request (Reject):
+    POST /api/users/distributor-application/1/update-status/
+    {
+      "status": "rejected",
+      "reason": "Insufficient business experience"
+    }
+    
+    Response (200 OK) - When Approved:
+    {
+      "status": "approved",
+      "message": "Application approved. User user@example.com is now a distributor."
+    }
+    
+    Response (200 OK) - When Rejected:
     {
       "status": "rejected",
       "message": "Application rejected."
@@ -980,7 +967,12 @@ Super User: EVAdmin && EVAdmin@123
     
     Error Response (400 Bad Request):
     {
-      "error": "Application is already rejected"
+      "error": "Application is already approved"  // or "Application is already rejected"
+    }
+    
+    Error Response (400 Bad Request):
+    {
+      "error": "Invalid status. Must be 'approved' or 'rejected'"
     }
     
     Error Response (403 Forbidden):
@@ -988,11 +980,15 @@ Super User: EVAdmin && EVAdmin@123
       "detail": "You do not have permission to perform this action."
     }
     
-    Note:
-    - Normal users cannot reject applications
+    Notes:
+    - Upon approval, user.is_distributor is automatically set to True
+    - User can now earn from binary pairs and referrals after approval
+    - Only one application per user is allowed
+    - Normal users cannot update application status
+    - Reason field is optional and only used when status is "rejected"
 
 
-74. LIST ALL DISTRIBUTOR APPLICATIONS (Admin/Staff Only)
+78. LIST ALL DISTRIBUTOR APPLICATIONS (Admin/Staff Only)
     Method: GET
     URL: /api/users/distributor-application/list_all/
     Authentication: Required (Admin, Staff, or Superuser)
@@ -1124,34 +1120,30 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-24. NOMINEE KYC REVIEW (Admin Only)
-    Approve or reject nominee KYC submissions. These endpoints are restricted to admin/superuser.
-
-    APPROVE NOMINEE KYC
+24. UPDATE NOMINEE KYC STATUS (Admin Only)
     Method: POST
-    URL: /api/users/nominee/{id}/approve/
+    URL: /api/users/nominee/{id}/update-kyc-status/
     Authentication: Required (Admin)
-    Description: Mark nominee's KYC as `verified`. Sets `kyc_verified_by` and `kyc_verified_at`.
-
-    Response (200 OK):
-    {
-      "status": "verified"
-    }
-
-    REJECT NOMINEE KYC
-    Method: POST
-    URL: /api/users/nominee/{id}/reject/
-    Authentication: Required (Admin)
-    Description: Mark nominee's KYC as `rejected`. Admin can supply an optional `reason`.
-
+    Description: Update nominee KYC status - verify or reject nominee KYC submissions. This endpoint is restricted to admin/superuser.
+    
     Request Body:
     {
-      "reason": "ID document is blurred"
+      "status": "verified"  // or "rejected"
+      "reason": "ID document is blurred"  // Optional, only required/used when status is "rejected"
     }
-
+    
     Response (200 OK):
     {
-      "status": "rejected"
+      "status": "verified"  // or "rejected"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Invalid status. Must be 'verified' or 'rejected'"
+    }
+    or
+    {
+      "error": "Nominee KYC is already verified"  // or "Nominee KYC is already rejected"
     }
 
     Notes:
@@ -1182,6 +1174,7 @@ Super User: EVAdmin && EVAdmin@123
       "delivery_pin": "400001",           // Required
       "terms_accepted": true,             // Required
       "referral_code": "ABC12345",        // Optional - Referral code of referring user
+      "manual_placement": false,           // Optional - If true, skip automatic binary tree placement (default: false)
       "join_distributor_program": false,  // Optional
       "payment_gateway_ref": "TXN123",    // Optional
       "emi_amount": 5000,                 // Optional
@@ -1236,6 +1229,12 @@ Super User: EVAdmin && EVAdmin@123
     - Commission is granted to the referrer after successful payment capture
       * Commission = payment_amount × REFERRAL_COMMISSION_PERCENTAGE / 100
       * Commission is granted on every successful payment for the booking
+    
+    Note on Binary Tree Placement:
+    - If referral_code is provided and manual_placement=false (default), user is automatically added to referrer's binary tree
+    - Automatic placement: Prefers left side if available, otherwise right, or finds next available position
+    - If manual_placement=true, automatic placement is skipped - user can be placed later via /api/binary/nodes/place_user/
+    - Referrer can view pending users via /api/binary/nodes/pending_users/ and place them manually
     
     Error Response (400):
     {
@@ -2642,11 +2641,641 @@ Super User: EVAdmin && EVAdmin@123
     - Active Buyers: Full earnings from all pairs
 
 
+53. GET FULL TREE STRUCTURE
+    Method: GET
+    URL: /api/binary/nodes/tree_structure/
+    Authentication: Required
+    Description: Get full binary tree structure with all children (recursive tree view)
+    
+    Query Parameters:
+    - max_depth: Maximum depth to traverse (default: 5, optional)
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "user_id": 1,
+      "user_email": "user@example.com",
+      "user_username": "user@example.com",
+      "user_full_name": "John Doe",
+      "user_mobile": "+919876543210",
+      "user_first_name": "John",
+      "user_last_name": "Doe",
+      "user_city": "Mumbai",
+      "user_state": "Maharashtra",
+      "is_distributor": true,
+      "is_active_buyer": true,
+      "referral_code": "REF00001",
+      "date_joined": "2026-01-06T12:00:00Z",
+      "wallet_balance": "15000.00",
+      "total_bookings": 5,
+      "total_binary_pairs": 10,
+      "total_earnings": "20000.00",
+      "parent": null,
+      "side": null,
+      "level": 0,
+      "left_count": 5,
+      "right_count": 3,
+      "left_side_members": [
+        {
+          "id": 2,
+          "user_id": 2,
+          "user_email": "user2@example.com",
+          "user_username": "user2@example.com",
+          "user_full_name": "Jane Smith",
+          "user_mobile": "+919876543211",
+          "user_first_name": "Jane",
+          "user_last_name": "Smith",
+          "user_city": "Delhi",
+          "user_state": "Delhi",
+          "is_distributor": false,
+          "is_active_buyer": true,
+          "referral_code": "REF00002",
+          "date_joined": "2026-01-07T10:00:00Z",
+          "wallet_balance": "5000.00",
+          "total_bookings": 2,
+          "total_binary_pairs": 3,
+          "total_earnings": "8000.00",
+          "parent": 1,
+          "side": "left",
+          "level": 1,
+          "left_count": 2,
+          "right_count": 1,
+          "created_at": "2026-01-07T10:00:00Z",
+          "updated_at": "2026-01-07T10:00:00Z"
+        },
+        {
+          "id": 4,
+          "user_id": 4,
+          "user_email": "user4@example.com",
+          "user_username": "user4@example.com",
+          "user_full_name": "Alice Brown",
+          "user_mobile": "+919876543212",
+          "user_first_name": "Alice",
+          "user_last_name": "Brown",
+          "user_city": "Bangalore",
+          "user_state": "Karnataka",
+          "is_distributor": false,
+          "is_active_buyer": false,
+          "referral_code": "REF00004",
+          "date_joined": "2026-01-08T14:00:00Z",
+          "wallet_balance": "0.00",
+          "total_bookings": 0,
+          "total_binary_pairs": 0,
+          "total_earnings": "0.00",
+          "parent": 2,
+          "side": "left",
+          "level": 2,
+          "left_count": 0,
+          "right_count": 0,
+          "created_at": "2026-01-08T14:00:00Z",
+          "updated_at": "2026-01-08T14:00:00Z"
+        },
+        {
+          "id": 5,
+          "user_id": 5,
+          "user_email": "user5@example.com",
+          "user_username": "user5@example.com",
+          "user_full_name": "Charlie Wilson",
+          "user_mobile": "+919876543213",
+          "user_first_name": "Charlie",
+          "user_last_name": "Wilson",
+          "user_city": "Chennai",
+          "user_state": "Tamil Nadu",
+          "is_distributor": false,
+          "is_active_buyer": false,
+          "referral_code": "REF00005",
+          "date_joined": "2026-01-09T09:00:00Z",
+          "wallet_balance": "0.00",
+          "total_bookings": 0,
+          "total_binary_pairs": 0,
+          "total_earnings": "0.00",
+          "parent": 2,
+          "side": "right",
+          "level": 2,
+          "left_count": 0,
+          "right_count": 0,
+          "created_at": "2026-01-09T09:00:00Z",
+          "updated_at": "2026-01-09T09:00:00Z"
+        }
+      ],
+      "right_side_members": [
+        {
+          "id": 3,
+          "user_id": 3,
+          "user_email": "user3@example.com",
+          "user_username": "user3@example.com",
+          "user_full_name": "Bob Johnson",
+          "user_mobile": "+919876543214",
+          "user_first_name": "Bob",
+          "user_last_name": "Johnson",
+          "user_city": "Pune",
+          "user_state": "Maharashtra",
+          "is_distributor": false,
+          "is_active_buyer": true,
+          "referral_code": "REF00003",
+          "date_joined": "2026-01-07T15:00:00Z",
+          "wallet_balance": "3000.00",
+          "total_bookings": 1,
+          "total_binary_pairs": 2,
+          "total_earnings": "5000.00",
+          "parent": 1,
+          "side": "right",
+          "level": 1,
+          "left_count": 1,
+          "right_count": 2,
+          "created_at": "2026-01-07T15:00:00Z",
+          "updated_at": "2026-01-07T15:00:00Z"
+        },
+        {
+          "id": 6,
+          "user_id": 6,
+          "user_email": "user6@example.com",
+          "user_username": "user6@example.com",
+          "user_full_name": "David Lee",
+          "user_mobile": "+919876543215",
+          "user_first_name": "David",
+          "user_last_name": "Lee",
+          "user_city": "Hyderabad",
+          "user_state": "Telangana",
+          "is_distributor": false,
+          "is_active_buyer": false,
+          "referral_code": "REF00006",
+          "date_joined": "2026-01-10T11:00:00Z",
+          "wallet_balance": "0.00",
+          "total_bookings": 0,
+          "total_binary_pairs": 0,
+          "total_earnings": "0.00",
+          "parent": 3,
+          "side": "left",
+          "level": 2,
+          "left_count": 0,
+          "right_count": 0,
+          "created_at": "2026-01-10T11:00:00Z",
+          "updated_at": "2026-01-10T11:00:00Z"
+        },
+        {
+          "id": 7,
+          "user_id": 7,
+          "user_email": "user7@example.com",
+          "user_username": "user7@example.com",
+          "user_full_name": "Emma Davis",
+          "user_mobile": "+919876543216",
+          "user_first_name": "Emma",
+          "user_last_name": "Davis",
+          "user_city": "Kolkata",
+          "user_state": "West Bengal",
+          "is_distributor": false,
+          "is_active_buyer": false,
+          "referral_code": "REF00007",
+          "date_joined": "2026-01-11T08:00:00Z",
+          "wallet_balance": "0.00",
+          "total_bookings": 0,
+          "total_binary_pairs": 0,
+          "total_earnings": "0.00",
+          "parent": 3,
+          "side": "right",
+          "level": 2,
+          "left_count": 0,
+          "right_count": 0,
+          "created_at": "2026-01-11T08:00:00Z",
+          "updated_at": "2026-01-11T08:00:00Z"
+        }
+      ],
+      "left_child": {
+        "id": 2,
+        "user_id": 2,
+        "user_email": "user2@example.com",
+        "user_username": "user2@example.com",
+        "user_full_name": "Jane Smith",
+        "user_mobile": "+919876543211",
+        "user_first_name": "Jane",
+        "user_last_name": "Smith",
+        "user_city": "Delhi",
+        "user_state": "Delhi",
+        "is_distributor": false,
+        "is_active_buyer": true,
+        "referral_code": "REF00002",
+        "date_joined": "2026-01-07T10:00:00Z",
+        "wallet_balance": "5000.00",
+        "total_bookings": 2,
+        "total_binary_pairs": 3,
+        "total_earnings": "8000.00",
+        "parent": 1,
+        "side": "left",
+        "level": 1,
+        "left_count": 2,
+        "right_count": 1,
+        "left_child": {
+          "id": 4,
+          "user_id": 4,
+          "user_email": "user4@example.com",
+          "user_username": "user4@example.com",
+          "user_full_name": "Alice Brown",
+          "user_mobile": "+919876543212",
+          "user_first_name": "Alice",
+          "user_last_name": "Brown",
+          "user_city": "Bangalore",
+          "user_state": "Karnataka",
+          "is_distributor": false,
+          "is_active_buyer": false,
+          "referral_code": "REF00004",
+          "date_joined": "2026-01-08T14:00:00Z",
+          "wallet_balance": "0.00",
+          "total_bookings": 0,
+          "total_binary_pairs": 0,
+          "total_earnings": "0.00",
+          "parent": 2,
+          "side": "left",
+          "level": 2,
+          "left_count": 0,
+          "right_count": 0,
+          "left_child": null,
+          "right_child": null,
+          "created_at": "2026-01-08T14:00:00Z",
+          "updated_at": "2026-01-08T14:00:00Z"
+        },
+        "right_child": {
+          "id": 5,
+          "user_id": 5,
+          "user_email": "user5@example.com",
+          "user_username": "user5@example.com",
+          "user_full_name": "Charlie Wilson",
+          "user_mobile": "+919876543213",
+          "user_first_name": "Charlie",
+          "user_last_name": "Wilson",
+          "user_city": "Chennai",
+          "user_state": "Tamil Nadu",
+          "is_distributor": false,
+          "is_active_buyer": false,
+          "referral_code": "REF00005",
+          "date_joined": "2026-01-09T09:00:00Z",
+          "wallet_balance": "0.00",
+          "total_bookings": 0,
+          "total_binary_pairs": 0,
+          "total_earnings": "0.00",
+          "parent": 2,
+          "side": "right",
+          "level": 2,
+          "left_count": 0,
+          "right_count": 0,
+          "left_child": null,
+          "right_child": null,
+          "created_at": "2026-01-09T09:00:00Z",
+          "updated_at": "2026-01-09T09:00:00Z"
+        },
+        "created_at": "2026-01-07T10:00:00Z",
+        "updated_at": "2026-01-07T10:00:00Z"
+      },
+      "right_child": {
+        "id": 3,
+        "user_id": 3,
+        "user_email": "user3@example.com",
+        "user_username": "user3@example.com",
+        "user_full_name": "Bob Johnson",
+        "user_mobile": "+919876543214",
+        "user_first_name": "Bob",
+        "user_last_name": "Johnson",
+        "user_city": "Pune",
+        "user_state": "Maharashtra",
+        "is_distributor": false,
+        "is_active_buyer": true,
+        "referral_code": "REF00003",
+        "date_joined": "2026-01-07T15:00:00Z",
+        "wallet_balance": "3000.00",
+        "total_bookings": 1,
+        "total_binary_pairs": 2,
+        "total_earnings": "5000.00",
+        "parent": 1,
+        "side": "right",
+        "level": 1,
+        "left_count": 1,
+        "right_count": 2,
+        "left_child": {
+          "id": 6,
+          "user_id": 6,
+          "user_email": "user6@example.com",
+          "user_username": "user6@example.com",
+          "user_full_name": "David Lee",
+          "user_mobile": "+919876543215",
+          "user_first_name": "David",
+          "user_last_name": "Lee",
+          "user_city": "Hyderabad",
+          "user_state": "Telangana",
+          "is_distributor": false,
+          "is_active_buyer": false,
+          "referral_code": "REF00006",
+          "date_joined": "2026-01-10T11:00:00Z",
+          "wallet_balance": "0.00",
+          "total_bookings": 0,
+          "total_binary_pairs": 0,
+          "total_earnings": "0.00",
+          "parent": 3,
+          "side": "left",
+          "level": 2,
+          "left_count": 0,
+          "right_count": 0,
+          "left_child": null,
+          "right_child": null,
+          "created_at": "2026-01-10T11:00:00Z",
+          "updated_at": "2026-01-10T11:00:00Z"
+        },
+        "right_child": {
+          "id": 7,
+          "user_id": 7,
+          "user_email": "user7@example.com",
+          "user_username": "user7@example.com",
+          "user_full_name": "Emma Davis",
+          "user_mobile": "+919876543216",
+          "user_first_name": "Emma",
+          "user_last_name": "Davis",
+          "user_city": "Kolkata",
+          "user_state": "West Bengal",
+          "is_distributor": false,
+          "is_active_buyer": false,
+          "referral_code": "REF00007",
+          "date_joined": "2026-01-11T08:00:00Z",
+          "wallet_balance": "0.00",
+          "total_bookings": 0,
+          "total_binary_pairs": 0,
+          "total_earnings": "0.00",
+          "parent": 3,
+          "side": "right",
+          "level": 2,
+          "left_count": 0,
+          "right_count": 0,
+          "left_child": null,
+          "right_child": null,
+          "created_at": "2026-01-11T08:00:00Z",
+          "updated_at": "2026-01-11T08:00:00Z"
+        },
+        "created_at": "2026-01-07T15:00:00Z",
+        "updated_at": "2026-01-07T15:00:00Z"
+      },
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (404):
+    {
+      "message": "No binary node found"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Invalid max_depth parameter"
+    }
+    
+    Notes:
+    - Returns recursive tree structure with all child nodes
+    - max_depth parameter limits how deep the tree is traversed (prevents excessive recursion)
+    - Only tree owner can view their own tree structure
+    - Each node includes comprehensive member details:
+      * Basic Info: user_id, user_email, user_username, user_full_name, user_mobile
+      * Personal Details: user_first_name, user_last_name, user_city, user_state
+      * Status: is_distributor, is_active_buyer, referral_code, date_joined
+      * Financial: wallet_balance, total_earnings
+      * Activity: total_bookings, total_binary_pairs
+      * Tree Position: parent, side, level, left_count, right_count
+      * Children: left_child, right_child (recursive structure)
+      * Side Members: left_side_members, right_side_members (flat lists of all members on each side)
+    - left_side_members: Array containing all members on the left side with full details (all levels)
+    - right_side_members: Array containing all members on the right side with full details (all levels)
+    - left_child/right_child: Recursive tree structure showing parent-child relationships
+    - left_side_members/right_side_members: Flat lists showing all members on each side for easy access
+    - All member details are included for each node in the tree (both left and right sides)
+    - Wallet balance and earnings are returned as strings with 2 decimal places
+    - If user doesn't have a wallet, balance and earnings default to "0.00"
+
+
+54. MANUALLY PLACE USER IN TREE
+    Method: POST
+    URL: /api/binary/nodes/place_user/
+    Authentication: Required
+    Description: Manually place a user in a specific position in the binary tree. Only the tree owner (referrer) can place users who used their referral code.
+    
+    Request Body:
+    {
+      "target_user_id": 8,
+      "parent_node_id": 5,
+      "side": "left",  // "left" or "right"
+      "allow_replacement": false  // Optional, default: false
+    }
+    
+    Response (201 Created):
+    {
+      "id": 10,
+      "user": 8,
+      "user_email": "user8@example.com",
+      "parent": 5,
+      "parent_username": "user5@example.com",
+      "side": "left",
+      "level": 2,
+      "left_count": 0,
+      "right_count": 0,
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "error": "target_user_id, parent_node_id, and side are required"
+    }
+    OR
+    {
+      "error": "side must be 'left' or 'right'"
+    }
+    OR
+    {
+      "error": "Position left under parent node 5 is already occupied"
+    }
+    
+    Error Response (403):
+    {
+      "error": "You can only place users in your own binary tree"
+    }
+    OR
+    {
+      "error": "This user did not use your referral code and cannot be placed in your tree"
+    }
+    
+    Error Response (404):
+    {
+      "error": "Target user not found"
+    }
+    OR
+    {
+      "error": "Parent node not found"
+    }
+    
+    Notes:
+    - Only the tree owner (referrer) can place users in their tree
+    - Target user must have used referrer's referral code (checked via user.referred_by or booking.referred_by)
+    - If user already has a node, it will be moved to the new position
+    - If position is occupied and allow_replacement=false, returns error
+    - Parent node must belong to referrer's tree
+    - Automatically updates parent counts after placement
+
+
+55. MOVE USER IN TREE
+    Method: POST
+    URL: /api/binary/nodes/move_user/
+    Authentication: Required
+    Description: Move an existing user to a new position in the binary tree. Only the tree owner can move users in their tree.
+    
+    Request Body:
+    {
+      "node_id": 10,
+      "new_parent_node_id": 7,
+      "new_side": "right"  // "left" or "right"
+    }
+    
+    Response (200 OK):
+    {
+      "id": 10,
+      "user": 8,
+      "user_email": "user8@example.com",
+      "parent": 7,
+      "parent_username": "user7@example.com",
+      "side": "right",
+      "level": 3,
+      "left_count": 0,
+      "right_count": 0,
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "error": "node_id, new_parent_node_id, and new_side are required"
+    }
+    OR
+    {
+      "error": "new_side must be 'left' or 'right'"
+    }
+    OR
+    {
+      "error": "Cannot move node to its own descendant (would create cycle)"
+    }
+    OR
+    {
+      "error": "Position right under parent node 7 is already occupied"
+    }
+    
+    Error Response (403):
+    {
+      "error": "You can only move users in your own binary tree"
+    }
+    OR
+    {
+      "error": "New parent must be in your binary tree"
+    }
+    
+    Error Response (404):
+    {
+      "error": "Node not found"
+    }
+    
+    Notes:
+    - Only the tree owner can move users in their tree
+    - Node and new_parent must both belong to referrer's tree
+    - Prevents cycles (cannot move node to its own descendant)
+    - Preserves child nodes when moving (children move with parent)
+    - Automatically updates levels of all descendants
+    - Updates parent counts for both old and new parents
+
+
+56. LIST AVAILABLE POSITIONS
+    Method: GET
+    URL: /api/binary/nodes/available_positions/
+    Authentication: Required
+    Description: List available positions in the current user's binary tree (nodes with open left or right slots)
+    
+    Response (200 OK):
+    {
+      "count": 5,
+      "available_positions": [
+        {
+          "node_id": 1,
+          "user_id": 1,
+          "user_email": "user@example.com",
+          "user_username": "user@example.com",
+          "level": 0,
+          "left_available": true,
+          "right_available": false,
+          "left_count": 0,
+          "right_count": 3
+        },
+        {
+          "node_id": 5,
+          "user_id": 5,
+          "user_email": "user5@example.com",
+          "user_username": "user5@example.com",
+          "level": 1,
+          "left_available": false,
+          "right_available": true,
+          "left_count": 2,
+          "right_count": 0
+        }
+      ]
+    }
+    
+    Error Response (404):
+    {
+      "message": "No binary node found"
+    }
+    
+    Notes:
+    - Returns all nodes in the tree that have at least one available slot (left or right)
+    - Helps UI show where users can be placed
+    - Only tree owner can view available positions in their tree
+
+
+57. LIST PENDING USERS
+    Method: GET
+    URL: /api/binary/nodes/pending_users/
+    Authentication: Required
+    Description: List users who used referrer's code but are not yet placed in the tree or are placed but not in referrer's tree
+    
+    Response (200 OK):
+    {
+      "count": 3,
+      "pending_users": [
+        {
+          "user_id": 8,
+          "user_email": "user8@example.com",
+          "user_username": "user8@example.com",
+          "user_full_name": "John Doe",
+          "has_node": false,
+          "node_id": null,
+          "in_tree": false
+        },
+        {
+          "user_id": 9,
+          "user_email": "user9@example.com",
+          "user_username": "user9@example.com",
+          "user_full_name": "Jane Smith",
+          "has_node": true,
+          "node_id": 15,
+          "in_tree": false
+        }
+      ]
+    }
+    
+    Notes:
+    - Returns users who:
+      * Have referred_by = current user, OR
+      * Have bookings with referred_by = current user
+    - Includes users who don't have a binary node yet
+    - Includes users who have a node but are not in referrer's tree
+    - Excludes users who are already placed in referrer's tree
+    - Helps referrer identify which users need to be placed manually
+
+
 ================================================================================
                             PAYOUT APIs
 ================================================================================
 
-53. CREATE PAYOUT REQUEST
+58. CREATE PAYOUT REQUEST
     Method: POST
     URL: /api/payout/
     Authentication: Required
@@ -2686,7 +3315,7 @@ Super User: EVAdmin && EVAdmin@123
     - Maximum ₹10,000 ceiling
 
 
-54. LIST PAYOUTS
+59. LIST PAYOUTS
     Method: GET
     URL: /api/payout/
     Authentication: Required
@@ -2711,7 +3340,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-55. PROCESS PAYOUT (Admin Only)
+60. PROCESS PAYOUT (Admin Only)
     Method: POST
     URL: /api/payout/{id}/process/
     Authentication: Required (Admin)
@@ -2732,7 +3361,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-56. COMPLETE PAYOUT (Admin Only)
+61. COMPLETE PAYOUT (Admin Only)
     Method: POST
     URL: /api/payout/{id}/complete/
     Authentication: Required (Admin)
@@ -2753,7 +3382,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-57. LIST PAYOUT TRANSACTIONS
+62. LIST PAYOUT TRANSACTIONS
     Method: GET
     URL: /api/payout/transactions/
     Authentication: Required
@@ -2780,7 +3409,7 @@ Super User: EVAdmin && EVAdmin@123
                          NOTIFICATION APIs
 ================================================================================
 
-58. LIST NOTIFICATIONS
+63. LIST NOTIFICATIONS
     Method: GET
     URL: /api/notifications/
     Authentication: Required
@@ -2809,7 +3438,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-59. MARK NOTIFICATION AS READ
+64. MARK NOTIFICATION AS READ
     Method: POST
     URL: /api/notifications/{id}/mark_read/
     Authentication: Required
@@ -2824,7 +3453,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-60. MARK ALL NOTIFICATIONS AS READ
+65. MARK ALL NOTIFICATIONS AS READ
     Method: POST
     URL: /api/notifications/mark_all_read/
     Authentication: Required
@@ -2836,7 +3465,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-61. GET UNREAD COUNT
+66. GET UNREAD COUNT
     Method: GET
     URL: /api/notifications/unread_count/
     Authentication: Required
@@ -2852,7 +3481,7 @@ Super User: EVAdmin && EVAdmin@123
                          COMPLIANCE APIs
 ================================================================================
 
-62. UPLOAD COMPLIANCE DOCUMENT
+67. UPLOAD COMPLIANCE DOCUMENT
     Method: POST
     URL: /api/compliance/documents/
     Authentication: Required
@@ -2877,7 +3506,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-63. LIST COMPLIANCE DOCUMENTS
+68. LIST COMPLIANCE DOCUMENTS
     Method: GET
     URL: /api/compliance/documents/
     Authentication: Required
@@ -2898,7 +3527,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-64. LIST TDS RECORDS
+79. LIST TDS RECORDS
     Method: GET
     URL: /api/compliance/tds/
     Authentication: Required
@@ -2925,7 +3554,7 @@ Super User: EVAdmin && EVAdmin@123
                             REPORTS APIs
 ================================================================================
 
-65. DASHBOARD STATISTICS
+80. DASHBOARD STATISTICS
     Method: GET
     URL: /api/reports/dashboard/
     Authentication: Required
@@ -2953,7 +3582,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-66. SALES REPORT (Admin Only)
+81. SALES REPORT (Admin Only)
     Method: GET
     URL: /api/reports/sales/
     Authentication: Required (Admin)
@@ -2971,7 +3600,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-67. USER REPORT
+82. USER REPORT
     Method: GET
     URL: /api/reports/user/
     Authentication: Required
@@ -2996,7 +3625,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-68. WALLET REPORT
+83. WALLET REPORT
     Method: GET
     URL: /api/reports/wallet/
     Authentication: Required
@@ -3031,7 +3660,7 @@ Super User: EVAdmin && EVAdmin@123
                          PLATFORM SETTINGS APIs
 ================================================================================
 
-1. GET PLATFORM SETTINGS
+84. GET PLATFORM SETTINGS
    Method: GET
    URL: /api/settings/
    Authentication: Required (All authenticated users)
@@ -3053,7 +3682,7 @@ Super User: EVAdmin && EVAdmin@123
    - booking_reservation_timeout_minutes: Integer (minutes) or null (never expires)
 
 
-2. UPDATE PLATFORM SETTINGS (Admin Only)
+85. UPDATE PLATFORM SETTINGS (Admin Only)
    Method: PATCH
    URL: /api/settings/
    Authentication: Required (Admin or Superuser only)
@@ -3175,6 +3804,8 @@ Standard Error Format:
 11. Distributor Requirement: Only approved distributors can earn from binary pairs and referral bonuses
 12. Distributor Eligibility: User must be Active Buyer (total paid ≥ ₹5000) and have approved KYC to apply for distributor program
 13. Distributor Application: Each user can submit only one distributor application; admin/staff approval required to become distributor
+14. Binary Tree Placement: Users are automatically added to referrer's binary tree when booking is created with referral_code (unless manual_placement=true)
+15. Manual Tree Placement: Tree owners can manually place/move users in their tree via placement APIs; only users who used referrer's code can be placed
 
 
 ================================================================================

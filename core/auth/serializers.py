@@ -3,6 +3,7 @@ from django.conf import settings
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from rest_framework_simplejwt.tokens import RefreshToken
 from .utils import (
     send_email_otp, send_mobile_otp, verify_otp, generate_referral_code,
@@ -338,6 +339,30 @@ class VerifySignupOTPSerializer(serializers.Serializer):
         email = session_data['email']
         mobile = session_data['mobile']
         
+        # Check if user already exists with both email and mobile
+        existing_user_both = User.objects.filter(
+            Q(email=email) & Q(mobile=mobile)
+        ).first()
+        
+        if existing_user_both:
+            raise serializers.ValidationError({
+                'error': 'An account with this email and mobile number already exists. Please login instead.'
+            })
+        
+        # Check if email is already taken by a different user
+        existing_user_email = User.objects.filter(email=email).exclude(mobile=mobile).first()
+        if existing_user_email:
+            raise serializers.ValidationError({
+                'email': 'This email is already registered with another account.'
+            })
+        
+        # Check if mobile is already taken by a different user
+        existing_user_mobile = User.objects.filter(mobile=mobile).exclude(email=email).first()
+        if existing_user_mobile:
+            raise serializers.ValidationError({
+                'mobile': 'This mobile number is already registered with another account.'
+            })
+        
         # Verify OTP - check if it matches either email or mobile OTP
         # Since same OTP is sent to both, we check both but only need one to match
         email_valid = verify_otp(email, otp_code, 'email')
@@ -391,7 +416,31 @@ class VerifySignupOTPSerializer(serializers.Serializer):
         if isinstance(date_of_birth, str):
             date_of_birth = datetime.strptime(date_of_birth, '%Y-%m-%d').date()
         
-        # Create user
+        # Check if user already exists with both email and mobile
+        existing_user_both = User.objects.filter(
+            Q(email=email) & Q(mobile=mobile)
+        ).first()
+        
+        if existing_user_both:
+            raise serializers.ValidationError({
+                'error': 'An account with this email and mobile number already exists. Please login instead.'
+            })
+        
+        # Check if email is already taken by a different user
+        existing_user_email = User.objects.filter(email=email).exclude(mobile=mobile).first()
+        if existing_user_email:
+            raise serializers.ValidationError({
+                'email': 'This email is already registered with another account.'
+            })
+        
+        # Check if mobile is already taken by a different user
+        existing_user_mobile = User.objects.filter(mobile=mobile).exclude(email=email).first()
+        if existing_user_mobile:
+            raise serializers.ValidationError({
+                'mobile': 'This mobile number is already registered with another account.'
+            })
+        
+        # Create new user (email and mobile are both unique at this point)
         username = email or mobile
         user = User.objects.create(
             username=username,
@@ -410,9 +459,9 @@ class VerifySignupOTPSerializer(serializers.Serializer):
             role='user'
         )
         
-        # Handle referral
+        # Handle referral (only if user doesn't have a referrer)
         referral_code = signup_data.get('referral_code')
-        if referral_code:
+        if referral_code and not user.referred_by:
             try:
                 referrer = User.objects.get(referral_code=referral_code)
                 user.referred_by = referrer
@@ -420,8 +469,9 @@ class VerifySignupOTPSerializer(serializers.Serializer):
             except User.DoesNotExist:
                 pass
         
-        # Generate referral code
-        generate_referral_code(user)
+        # Generate referral code if user doesn't have one
+        if not user.referral_code:
+            generate_referral_code(user)
         
         # Delete signup session
         delete_signup_session(signup_token)

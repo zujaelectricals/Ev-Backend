@@ -8,6 +8,7 @@ from django.utils import timezone
 from decimal import Decimal
 from core.users.models import User
 from core.inventory.utils import create_reservation
+from core.binary.utils import add_to_binary_tree
 from .models import Booking, Payment
 from .serializers import BookingSerializer, PaymentSerializer
 
@@ -16,15 +17,16 @@ class BookingViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Booking management
     """
-    queryset = Booking.objects.all()
+    queryset = Booking.objects.select_related('user', 'vehicle_model', 'referred_by').all()
     serializer_class = BookingSerializer
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         user = self.request.user
+        queryset = Booking.objects.select_related('user', 'vehicle_model', 'referred_by')
         if user.is_superuser or user.role == 'admin':
-            return Booking.objects.all()
-        return Booking.objects.filter(user=user)
+            return queryset.all()
+        return queryset.filter(user=user)
     
     def perform_create(self, serializer):
         # Capture IP address
@@ -35,6 +37,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         
         # Handle referral code
         referral_code = serializer.validated_data.pop('referral_code', None)
+        manual_placement = serializer.validated_data.pop('manual_placement', False)
         referring_user = None
         
         if referral_code:
@@ -61,6 +64,36 @@ class BookingViewSet(viewsets.ModelViewSet):
         if referring_user and not self.request.user.referred_by:
             self.request.user.referred_by = referring_user
             self.request.user.save(update_fields=['referred_by'])
+        
+        # Add user to binary tree of referrer when booking is created with referral code
+        # Skip automatic placement if manual_placement flag is set
+        if referring_user and not manual_placement:
+            # Add user to binary tree - only if they don't already have a node
+            try:
+                from core.binary.models import BinaryNode
+                # Check if user already has a binary node (avoid duplicates)
+                if not BinaryNode.objects.filter(user=self.request.user).exists():
+                    # Determine preferred side: prefer left if available, otherwise right
+                    # The add_to_binary_tree function will handle automatic placement
+                    referrer_node, _ = BinaryNode.objects.get_or_create(user=referring_user)
+                    preferred_side = None
+                    # Prefer left side if available, otherwise right
+                    if referrer_node.left_count == 0:
+                        preferred_side = 'left'
+                    elif referrer_node.right_count == 0:
+                        preferred_side = 'right'
+                    # If both sides have children, add_to_binary_tree will find next available position
+                    
+                    binary_node = add_to_binary_tree(
+                        user=self.request.user,
+                        referrer=referring_user,
+                        side=preferred_side
+                    )
+            except Exception as e:
+                # Log error but don't fail the booking creation
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Failed to add user {self.request.user.id} to binary tree of referrer {referring_user.id}: {str(e)}")
         
         # Create stock reservation for the booking
         try:
@@ -144,6 +177,19 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {'error': 'Amount exceeds remaining amount'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        
+        # Check if transaction_id already exists (if provided)
+        if transaction_id:
+            existing_payment = Payment.objects.filter(transaction_id=transaction_id).first()
+            if existing_payment:
+                return Response(
+                    {
+                        'error': f'Payment with transaction_id "{transaction_id}" already exists',
+                        'existing_payment_id': existing_payment.id,
+                        'existing_booking_id': existing_payment.booking.id
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         
         # Create payment record with status='completed'
         payment = Payment.objects.create(
@@ -308,8 +354,18 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         old_status = payment.status
         
-        # Update payment
+        # Check if transaction_id already exists (if being updated)
         if transaction_id:
+            existing_payment = Payment.objects.filter(transaction_id=transaction_id).exclude(pk=payment.pk).first()
+            if existing_payment:
+                return Response(
+                    {
+                        'error': f'Payment with transaction_id "{transaction_id}" already exists',
+                        'existing_payment_id': existing_payment.id,
+                        'existing_booking_id': existing_payment.booking.id
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             payment.transaction_id = transaction_id
         if notes is not None:
             payment.notes = notes

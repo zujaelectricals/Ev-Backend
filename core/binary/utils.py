@@ -148,3 +148,165 @@ def check_and_create_pair(user):
     
     return None
 
+
+def place_user_manually(user, parent_node, side, allow_replacement=False):
+    """
+    Manually place a user in a specific position in the binary tree
+    
+    Args:
+        user: User to place
+        parent_node: BinaryNode to place under
+        side: 'left' or 'right'
+        allow_replacement: If True, replace existing node if position is occupied
+    
+    Returns:
+        BinaryNode: The created or updated node
+    
+    Raises:
+        ValueError: If position is invalid or occupied (when allow_replacement=False)
+    """
+    if side not in ['left', 'right']:
+        raise ValueError(f"Invalid side: {side}. Must be 'left' or 'right'")
+    
+    # Check if position is available
+    existing_node = BinaryNode.objects.filter(parent=parent_node, side=side).first()
+    
+    if existing_node:
+        if not allow_replacement:
+            raise ValueError(f"Position {side} under parent node {parent_node.id} is already occupied")
+        # If allowing replacement, we need to handle the existing node
+        # For now, we'll raise an error - replacement logic can be added later
+        raise ValueError("Replacement of existing nodes is not yet supported")
+    
+    # Check if user already has a node
+    existing_user_node = BinaryNode.objects.filter(user=user).first()
+    
+    if existing_user_node:
+        # Move existing node to new position
+        return move_binary_node(existing_user_node, parent_node, side)
+    else:
+        # Create new node
+        return create_binary_node(user, parent=parent_node, side=side)
+
+
+def move_binary_node(node, new_parent, new_side):
+    """
+    Move an existing binary node to a new position
+    
+    Args:
+        node: BinaryNode to move
+        new_parent: New parent BinaryNode
+        new_side: New side ('left' or 'right')
+    
+    Returns:
+        BinaryNode: The moved node
+    
+    Raises:
+        ValueError: If move is invalid (cycle, position occupied, etc.)
+    """
+    if new_side not in ['left', 'right']:
+        raise ValueError(f"Invalid side: {new_side}. Must be 'left' or 'right'")
+    
+    # Prevent moving node to itself or its descendants
+    if node == new_parent:
+        raise ValueError("Cannot move node to itself")
+    
+    # Check for cycles: new_parent cannot be a descendant of node
+    current = new_parent
+    while current:
+        if current == node:
+            raise ValueError("Cannot move node to its own descendant (would create cycle)")
+        current = current.parent
+    
+    # Check if target position is available
+    existing_node = BinaryNode.objects.filter(parent=new_parent, side=new_side).first()
+    if existing_node and existing_node != node:
+        raise ValueError(f"Position {new_side} under parent node {new_parent.id} is already occupied")
+    
+    # Store old parent for count updates
+    old_parent = node.parent
+    old_side = node.side
+    
+    with transaction.atomic():
+        # Update node position
+        node.parent = new_parent
+        node.side = new_side
+        node.level = new_parent.level + 1 if new_parent else 0
+        node.save()
+        
+        # Update old parent's counts
+        if old_parent:
+            old_parent.update_counts()
+        
+        # Update new parent's counts
+        if new_parent:
+            new_parent.update_counts()
+        
+        # Update levels of all descendants
+        update_descendant_levels(node)
+    
+    return node
+
+
+def update_descendant_levels(node):
+    """
+    Recursively update levels of all descendant nodes after a move
+    """
+    children = BinaryNode.objects.filter(parent=node)
+    for child in children:
+        child.level = node.level + 1
+        child.save(update_fields=['level'])
+        update_descendant_levels(child)
+
+
+def is_node_in_tree(node, tree_owner):
+    """
+    Check if a node belongs to the tree owned by tree_owner
+    
+    Args:
+        node: BinaryNode to check
+        tree_owner: User who owns the tree
+    
+    Returns:
+        bool: True if node is in tree_owner's tree
+    """
+    try:
+        owner_node = BinaryNode.objects.get(user=tree_owner)
+    except BinaryNode.DoesNotExist:
+        return False
+    
+    # Traverse up from node to root
+    current = node
+    while current:
+        if current == owner_node:
+            return True
+        current = current.parent
+    
+    return False
+
+
+def can_user_be_placed(referrer, target_user):
+    """
+    Check if a user can be placed in referrer's tree
+    
+    Args:
+        referrer: User who owns the tree
+        target_user: User to be placed
+    
+    Returns:
+        bool: True if user can be placed
+    """
+    # Check if target_user used referrer's referral code
+    # Check user.referred_by
+    if target_user.referred_by == referrer:
+        return True
+    
+    # Check bookings with referrer's code
+    from core.booking.models import Booking
+    has_booking_with_referrer = Booking.objects.filter(
+        user=target_user,
+        referred_by=referrer
+    ).exists()
+    
+    return has_booking_with_referrer
+
