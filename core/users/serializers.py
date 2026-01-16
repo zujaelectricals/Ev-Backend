@@ -146,13 +146,7 @@ class DistributorApplicationSerializer(serializers.ModelSerializer):
         """Validate eligibility before allowing application"""
         user = self.context['request'].user
         
-        # Check if user is Active Buyer
-        if not user.is_active_buyer:
-            raise serializers.ValidationError({
-                'non_field_errors': ['User must be an Active Buyer to apply for distributor program. Total paid amount must be at least ₹5000.']
-            })
-        
-        # Check if user has approved KYC
+        # Check if user has approved KYC (Active Buyer requirement removed)
         if not hasattr(user, 'kyc') or user.kyc.status != 'approved':
             raise serializers.ValidationError({
                 'non_field_errors': ['User must have approved KYC to apply for distributor program.']

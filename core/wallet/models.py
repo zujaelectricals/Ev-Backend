@@ -32,6 +32,10 @@ class WalletTransaction(models.Model):
     TRANSACTION_TYPE_CHOICES = [
         ('REFERRAL_BONUS', 'Referral Bonus'),
         ('BINARY_PAIR', 'Binary Pair'),
+        ('BINARY_PAIR_COMMISSION', 'Binary Pair Commission'),
+        ('DIRECT_USER_COMMISSION', 'Direct User Commission'),
+        ('TDS_DEDUCTION', 'TDS Deduction'),
+        ('EXTRA_DEDUCTION', 'Extra Deduction'),
         ('EMI_DEDUCTION', 'EMI Deduction'),
         ('RESERVE_DEDUCTION', 'Reserve Deduction'),
         ('PAYOUT', 'Payout'),
@@ -42,7 +46,7 @@ class WalletTransaction(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='wallet_transactions')
     wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, related_name='transactions')
     
-    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPE_CHOICES)
+    transaction_type = models.CharField(max_length=25, choices=TRANSACTION_TYPE_CHOICES)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     balance_before = models.DecimalField(max_digits=12, decimal_places=2)
     balance_after = models.DecimalField(max_digits=12, decimal_places=2)

@@ -790,9 +790,9 @@ Super User: EVAdmin && EVAdmin@123
     Description: Submit distributor application form. User must be an Active Buyer (total paid ≥ ₹5000) and have approved KYC.
     
     Eligibility Requirements:
-    - User must be an Active Buyer (is_active_buyer = True, total paid ≥ ₹5000)
     - User must have approved KYC (kyc.status = 'approved')
     - User can only submit one application
+    - Note: Active Buyer requirement removed - only KYC verification needed
     
     Request Body (multipart/form-data):
     {
@@ -835,12 +835,6 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Error Response (400 Bad Request):
-    {
-      "non_field_errors": [
-        "User must be an Active Buyer to apply for distributor program. Total paid amount must be at least ₹5000."
-      ]
-    }
-    OR
     {
       "non_field_errors": [
         "User must have approved KYC to apply for distributor program."
@@ -1226,15 +1220,27 @@ Super User: EVAdmin && EVAdmin@123
     - If referral_code is provided, the system validates it and sets referred_by automatically
     - User cannot use their own referral code (self-referral prevention)
     - If user.referred_by is not set, it will be set from the referral_code
-    - Commission is granted to the referrer after successful payment capture
+    - The system stores whether the referrer was a distributor when the booking was created (referrer_was_distributor field)
+    - Commission is granted to the referrer after successful payment capture ONLY if referrer_was_distributor is True
       * Commission = payment_amount × REFERRAL_COMMISSION_PERCENTAGE / 100
       * Commission is granted on every successful payment for the booking
+      * No retroactive commissions: Only bookings created AFTER the referrer becomes a distributor get commission
     
     Note on Binary Tree Placement:
     - If referral_code is provided and manual_placement=false (default), user is automatically added to referrer's binary tree
     - Automatic placement: Prefers left side if available, otherwise right, or finds next available position
     - If manual_placement=true, automatic placement is skipped - user can be placed later via /api/binary/nodes/place_user/
     - Referrer can view pending users via /api/binary/nodes/pending_users/ and place them manually
+    
+    Note on Direct User Commission:
+    - When User A is added as a direct child of User B, User B receives direct user commission (configurable, default: ₹1000)
+    - Direct user commission is paid only for the first 3 direct children (configurable threshold)
+    - After 3 direct children are added, binary commission activates automatically
+    - 20% TDS is deducted from direct user commission (configurable percentage)
+    - Net amount (₹800 = ₹1000 - ₹200 TDS) is credited to referrer's wallet immediately upon user addition
+    - TDS is deducted from referrer's oldest active booking remaining amount
+    - Only distributors can receive commissions
+    - Note: Direct user commissions are NOT restricted for non-Active Buyer distributors (can earn unlimited before binary activation)
     
     Error Response (400):
     {
@@ -1374,6 +1380,8 @@ Super User: EVAdmin && EVAdmin@123
     - If booking was created with a referral_code, commission is automatically granted to the referrer when payment is confirmed
       * Commission = payment_amount × REFERRAL_COMMISSION_PERCENTAGE / 100
       * Commission is granted on every confirmed payment for the booking
+      * Commission is only granted if referrer_was_distributor is True (referrer was distributor when booking was created)
+      * No retroactive commissions: Only bookings created AFTER referrer becomes distributor get commission
 
 
 28. ACCEPT PAYMENT (Admin/Staff Only)
@@ -2495,7 +2503,11 @@ Super User: EVAdmin && EVAdmin@123
     
     Transaction Types:
     - REFERRAL_BONUS: Referral earnings
-    - BINARY_PAIR: Binary pair matching earnings
+    - BINARY_PAIR: Binary pair matching earnings (legacy)
+    - BINARY_PAIR_COMMISSION: Binary pair commission after activation (new commission structure)
+    - DIRECT_USER_COMMISSION: Commission for direct user addition before activation (net amount after TDS)
+    - TDS_DEDUCTION: TDS deducted from all binary commissions (direct user and pairs, deducted from booking remaining amount)
+    - EXTRA_DEDUCTION: Extra deduction for 6th+ binary pairs (additional 20%, deducted from booking remaining amount)
     - EMI_DEDUCTION: Automatic EMI deductions
     - RESERVE_DEDUCTION: Reserve fund deductions
     - PAYOUT: Withdrawal transactions
@@ -2522,6 +2534,8 @@ Super User: EVAdmin && EVAdmin@123
       "level": 0,
       "left_count": 5,
       "right_count": 3,
+      "binary_commission_activated": true,  // Whether binary commission is activated
+      "direct_children_count": 3,  // Count of direct children (left + right)
       "created_at": "2026-01-06T12:00:00Z"
     }
     
@@ -2529,6 +2543,11 @@ Super User: EVAdmin && EVAdmin@123
     {
       "message": "No binary node found"
     }
+    
+    Notes:
+    - binary_commission_activated: True if user has reached the activation threshold (default: 3 direct children)
+    - direct_children_count: Number of direct children (nodes where parent = this node)
+    - Binary commission activates when direct_children_count >= activation_count (configurable via settings)
 
 
 49. LIST BINARY NODES
@@ -2558,7 +2577,7 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/binary/pairs/check_pairs/
     Authentication: Required
-    Description: Manually trigger pair checking
+    Description: Manually trigger pair checking. Only works if binary commission is activated (user has 3+ direct children).
     
     Response (201 Created):
     {
@@ -2566,11 +2585,12 @@ Super User: EVAdmin && EVAdmin@123
       "user": 1,
       "left_user": 2,
       "right_user": 3,
-      "pair_amount": "1000.00",
-      "earning_amount": "500.00",
+      "pair_amount": "2000.00",  // Commission amount (configurable, default: ₹2000)
+      "earning_amount": "2000.00",  // Net amount after TDS (if applicable)
       "status": "matched",
       "pair_month": 1,
       "pair_year": 2026,
+      "pair_number_after_activation": 1,  // Pair number after activation (null if before activation)
       "created_at": "2026-01-06T12:00:00Z"
     }
     
@@ -2579,7 +2599,18 @@ Super User: EVAdmin && EVAdmin@123
       "message": "No pairs available"
     }
     
-    Note: Maximum 10 pairs per month per user
+    Notes:
+    - Maximum 10 pairs per DAY per user (configurable daily limit)
+    - Binary commission must be activated (user must have 3+ direct children)
+    - Commission amount is configurable via Platform Settings (default: ₹2000)
+    - 20% TDS is applied on ALL pair commissions (1st pair onwards, configurable percentage)
+    - Extra 20% deduction applies from 6th pair onwards (configurable threshold and percentage)
+    - Pairs 1-5: ₹2000 - 20% TDS = ₹1600 credited
+    - Pairs 6+: ₹2000 - 20% TDS - 20% extra = ₹1200 credited (extra deducted from booking balance)
+    - TDS and extra deduction are deducted from user's oldest active booking remaining amount
+    - earning_amount shows net amount after TDS and extra deduction (if applicable)
+    - Daily limit reset: Resets at midnight (00:00 server time)
+    - After 10 pairs in a day: SHORT leg (fewer remaining members) is ignored, LONG leg (more remaining) is carried forward
 
 
 51. LIST BINARY PAIRS
@@ -2601,15 +2632,26 @@ Super User: EVAdmin && EVAdmin@123
           "user": 1,
           "left_user": 2,
           "right_user": 3,
-          "pair_amount": "1000.00",
-          "earning_amount": "500.00",
+          "pair_amount": "2000.00",  // Commission amount (configurable)
+          "earning_amount": "2000.00",  // Net amount after TDS (if applicable)
           "status": "processed",
           "pair_month": 1,
           "pair_year": 2026,
+          "pair_number_after_activation": 1,  // Pair number after activation (null if before activation)
           "matched_at": "2026-01-06T12:00:00Z"
         }
       ]
     }
+    
+    Notes:
+    - pair_amount: Gross commission amount (configurable via settings, default: ₹2000)
+    - earning_amount: Net amount credited to wallet (after TDS and extra deduction if applicable)
+    - pair_number_after_activation: Tracks which pair this is after binary commission activation
+    - pair_date: Date when pair was created (for daily limit tracking)
+    - is_carry_forward_pair: Whether this pair used carried-forward members from previous day
+    - extra_deduction_applied: Amount of extra deduction applied (for 6th+ pairs)
+    - 20% TDS is applied on ALL pair commissions (1st pair onwards)
+    - Extra 20% deduction applies from 6th pair onwards (configurable threshold)
 
 
 52. LIST BINARY EARNINGS
@@ -2626,19 +2668,27 @@ Super User: EVAdmin && EVAdmin@123
           "id": 1,
           "user": 1,
           "binary_pair": 1,
-          "amount": "500.00",
+          "amount": "2000.00",  // Gross commission amount
           "pair_number": 1,
           "emi_deducted": "0.00",
-          "net_amount": "500.00",
+          "net_amount": "2000.00",  // Net amount after TDS (if applicable)
           "created_at": "2026-01-06T12:00:00Z"
         }
       ]
     }
     
     Business Rules:
-    - First 5 pairs: Full credit (even without Active Buyer)
-    - From 6th pair: 20% EMI deduction if not Active Buyer
-    - Active Buyers: Full earnings from all pairs
+    - Binary commission only activates after user has 3 direct children (configurable threshold)
+    - Commission amount is configurable via Platform Settings (default: ₹2000 per pair)
+    - 20% TDS is applied on ALL binary pair commissions (1st pair onwards, configurable percentage)
+    - Extra 20% deduction applies from 6th pair onwards (configurable threshold, default: 5 pairs)
+    - Daily pair limit: Maximum 10 pairs per day (configurable, default: 10 pairs = ₹20,000 before deductions)
+    - Pairs 1-5: ₹2000 - 20% TDS = ₹1600 credited
+    - Pairs 6+: ₹2000 - 20% TDS - 20% extra = ₹1200 credited (extra deducted from booking balance)
+    - TDS and extra deduction are deducted from user's oldest active booking remaining amount
+    - If no active booking exists, TDS is still recorded but not deducted from any booking
+    - After 10 pairs in a day: SHORT leg (fewer remaining members) is ignored, LONG leg (more remaining) is carried forward to next day
+    - Carry-forward: Next day, new members on ignored side match with carried-forward members from long leg
 
 
 53. GET FULL TREE STRUCTURE
@@ -3670,6 +3720,13 @@ Super User: EVAdmin && EVAdmin@123
    {
      "id": 1,
      "booking_reservation_timeout_minutes": 1440,  // 24 hours in minutes, null = never expires
+     "direct_user_commission_amount": "1000.00",  // Commission per direct user before activation (default: ₹1000)
+     "binary_commission_activation_count": 3,  // Number of direct users needed to activate binary commission (default: 3)
+     "binary_pair_commission_amount": "2000.00",  // Commission per binary pair after activation (default: ₹2000)
+     "binary_tds_threshold_pairs": 5,  // Number of pairs after activation before extra deduction starts (default: 5)
+     "binary_commission_tds_percentage": "20.00",  // TDS percentage on ALL binary commissions (default: 20%)
+     "binary_extra_deduction_percentage": "20.00",  // Extra deduction percentage on 6th+ pairs (default: 20%)
+     "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000)
      "updated_at": "2026-01-14T09:00:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -3680,6 +3737,10 @@ Super User: EVAdmin && EVAdmin@123
    - Returns singleton settings instance
    - All authenticated users can view settings
    - booking_reservation_timeout_minutes: Integer (minutes) or null (never expires)
+   - All binary commission settings are configurable via UPDATE PLATFORM SETTINGS endpoint
+   - binary_commission_tds_percentage: Applied to ALL commissions (direct user and pairs)
+   - binary_extra_deduction_percentage: Additional deduction for 6th+ pairs (in addition to TDS)
+   - binary_daily_pair_limit: Maximum pairs per day (resets at midnight)
 
 
 85. UPDATE PLATFORM SETTINGS (Admin Only)
@@ -3688,15 +3749,29 @@ Super User: EVAdmin && EVAdmin@123
    Authentication: Required (Admin or Superuser only)
    Description: Update platform settings. Only admin/superuser can modify settings.
    
-   Request Body:
+   Request Body (all fields optional - partial update supported):
    {
-     "booking_reservation_timeout_minutes": 1440  // Integer (minutes) or null (never expires)
+     "booking_reservation_timeout_minutes": 1440,  // Integer (minutes) or null (never expires)
+     "direct_user_commission_amount": 1000,  // Commission per direct user before activation (default: ₹1000)
+     "binary_commission_activation_count": 3,  // Number of direct users needed to activate binary commission (default: 3, min: 1)
+     "binary_pair_commission_amount": 2000,  // Commission per binary pair after activation (default: ₹2000)
+     "binary_tds_threshold_pairs": 5,  // Number of pairs after activation before extra deduction starts (default: 5, min: 0)
+     "binary_commission_tds_percentage": 20,  // TDS percentage on ALL binary commissions (default: 20%, range: 0-100)
+     "binary_extra_deduction_percentage": 20,  // Extra deduction percentage on 6th+ pairs (default: 20%, range: 0-100)
+     "binary_daily_pair_limit": 10  // Maximum binary pairs per day after activation (default: 10, min: 1)
    }
    
    Response (200 OK):
    {
      "id": 1,
      "booking_reservation_timeout_minutes": 1440,
+     "direct_user_commission_amount": "1000.00",
+     "binary_commission_activation_count": 3,
+     "binary_pair_commission_amount": "2000.00",
+     "binary_tds_threshold_pairs": 5,
+     "binary_commission_tds_percentage": "20.00",
+     "binary_extra_deduction_percentage": "20.00",
+     "binary_daily_pair_limit": 10,
      "updated_at": "2026-01-14T09:15:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -3705,7 +3780,14 @@ Super User: EVAdmin && EVAdmin@123
    
    Error Response (400):
    {
-     "booking_reservation_timeout_minutes": ["booking_reservation_timeout_minutes must be at least 1 minute or null (never expires)"]
+     "booking_reservation_timeout_minutes": ["booking_reservation_timeout_minutes must be at least 1 minute or null (never expires)"],
+     "direct_user_commission_amount": ["direct_user_commission_amount must be non-negative"],
+     "binary_commission_activation_count": ["binary_commission_activation_count must be at least 1"],
+     "binary_pair_commission_amount": ["binary_pair_commission_amount must be non-negative"],
+     "binary_tds_threshold_pairs": ["binary_tds_threshold_pairs must be non-negative"],
+     "binary_commission_tds_percentage": ["binary_commission_tds_percentage must be between 0 and 100"],
+     "binary_extra_deduction_percentage": ["binary_extra_deduction_percentage must be between 0 and 100"],
+     "binary_daily_pair_limit": ["binary_daily_pair_limit must be at least 1"]
    }
    
    Error Response (403):
@@ -3715,11 +3797,20 @@ Super User: EVAdmin && EVAdmin@123
    
    Notes:
    - Only admin or superuser can update settings
+   - All fields are optional (partial update supported)
    - booking_reservation_timeout_minutes: Minimum value is 1 minute, or null for never expires
+   - direct_user_commission_amount: Commission paid per direct user added before binary commission activation
+   - binary_commission_activation_count: Number of direct children needed to activate binary commission (default: 3)
+   - binary_pair_commission_amount: Commission paid per binary pair after activation (default: ₹2000)
+   - binary_tds_threshold_pairs: Number of pairs after activation before extra deduction applies (default: 5)
+   - binary_commission_tds_percentage: TDS percentage applied to ALL binary commissions - direct user and pairs (default: 20%, range: 0-100)
+   - binary_extra_deduction_percentage: Extra deduction percentage for 6th+ pairs in addition to TDS (default: 20%, range: 0-100)
+   - binary_daily_pair_limit: Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000 before deductions)
    - updated_by is automatically set to the current user making the update
    - Settings are stored as a singleton (only one instance exists)
    - Timeout is stored in minutes (converted from hours for backward compatibility)
    - Example: 1440 minutes = 24 hours, 60 minutes = 1 hour, null = never expires
+   - Daily pair limit resets at midnight (00:00 server time)
 
 
 ================================================================================
@@ -3793,19 +3884,56 @@ Standard Error Format:
 
 1. Pre-booking Minimum: ₹500
 2. Active Buyer Threshold: ₹5000 total paid
-3. First 5 Binary Pairs: Full credit (even without Active Buyer)
-4. From 6th Binary Pair: 20% EMI deduction if not Active Buyer
-5. Binary Pairs Limit: Maximum 10 pairs per month per user
-6. TDS Percentage: 5% with ₹10,000 ceiling
-7. EMI Auto-fill: Optional feature in payout requests
-8. Payment Status: Payments default to 'pending' and require admin/staff approval or payment gateway confirmation
-9. Stock Reservation: Bookings automatically reserve vehicle stock; released if payment not confirmed within timeout
-10. Reservation Timeout: Configurable via Platform Settings API (stored in minutes, null = never expires)
-11. Distributor Requirement: Only approved distributors can earn from binary pairs and referral bonuses
-12. Distributor Eligibility: User must be Active Buyer (total paid ≥ ₹5000) and have approved KYC to apply for distributor program
-13. Distributor Application: Each user can submit only one distributor application; admin/staff approval required to become distributor
-14. Binary Tree Placement: Users are automatically added to referrer's binary tree when booking is created with referral_code (unless manual_placement=true)
-15. Manual Tree Placement: Tree owners can manually place/move users in their tree via placement APIs; only users who used referrer's code can be placed
+3. Direct User Commission: ₹1000 per direct user added (configurable via settings)
+   - Paid only for first 3 direct children (configurable threshold, default: 3)
+   - Stops after binary commission activation
+   - 20% TDS is deducted from direct user commission (configurable percentage)
+   - Net amount (₹800 = ₹1000 - ₹200 TDS) is credited to wallet
+   - TDS is deducted from referrer's oldest active booking remaining amount
+   - Only distributors can receive commissions
+4. Binary Commission Activation: Activates automatically when user has 3 direct children (configurable threshold)
+   - Tree counting: All direct and indirect referrals (entire subtree) are counted for commission calculation
+5. Binary Pair Commission: ₹2000 per pair after activation (configurable via settings)
+   - Only pairs created after activation count towards commission
+   - Maximum 10 pairs per DAY per user (configurable daily limit, default: 10 pairs = ₹20,000)
+   - Daily limit resets at midnight (00:00 server time)
+   - 20% TDS is applied on ALL pair commissions (1st pair onwards, configurable percentage)
+   - Pairs 1-5: ₹2000 - 20% TDS = ₹1600 credited
+   - Pairs 6+: ₹2000 - 20% TDS - 20% extra = ₹1200 credited (extra deducted from booking balance)
+6. Binary Commission TDS and Deductions:
+   - TDS percentage: 20% on ALL binary commissions (configurable, range: 0-100%)
+   - Extra deduction threshold: 5 pairs after activation (configurable)
+   - Extra deduction percentage: 20% for 6th+ pairs (configurable, range: 0-100%)
+   - TDS and extra deduction are deducted from user's oldest active booking remaining amount
+   - If no active booking exists, deductions are still recorded but not deducted from any booking
+7. Daily Pair Limit and Carry-Forward:
+   - After 10 pairs in a day: Compare remaining unmatched members on each side
+   - SHORT leg (fewer remaining members) is IGNORED for commission that day
+   - LONG leg (more remaining members) has ALL remaining members CARRIED FORWARD to next day
+   - Next day: New members on ignored side match with carried-forward members from long leg
+   - Daily limit reset: Resets at midnight (00:00 server time)
+7. Payout TDS: 5% with ₹10,000 ceiling (separate from binary commission TDS)
+8. EMI Auto-fill: Optional feature in payout requests
+9. Payment Status: Payments default to 'pending' and require admin/staff approval or payment gateway confirmation
+10. Stock Reservation: Bookings automatically reserve vehicle stock; released if payment not confirmed within timeout
+11. Reservation Timeout: Configurable via Platform Settings API (stored in minutes, null = never expires)
+12. Distributor Requirement: Only approved distributors can earn from binary pairs, direct user commissions, and referral bonuses
+13. Distributor Eligibility: User must have approved KYC to apply for distributor program (Active Buyer requirement removed)
+14. Distributor Application: Each user can submit only one distributor application; admin/staff approval required to become distributor
+15. Binary Tree Placement: Users are automatically added to referrer's binary tree when booking is created with referral_code (unless manual_placement=true)
+16. Manual Tree Placement: Tree owners can manually place/move users in their tree via placement APIs; only users who used referrer's code can be placed
+17. Commission Configuration: All binary commission amounts, thresholds, TDS settings, and daily limits are configurable via Platform Settings API
+18. Referral Commission Timing: Commission is only granted for bookings created AFTER the referrer becomes a distributor (no retroactive commissions)
+    - System stores referrer_was_distributor flag at booking creation time
+    - Commission is granted only if referrer_was_distributor is True when payment is completed
+19. Tree Counting: left_count and right_count now count ALL descendants recursively (entire subtree, not just direct children)
+20. Distributor Eligibility: Active Buyer requirement removed - only KYC verification needed to apply for distributor program
+21. Commission Restriction for Non-Active Buyer Distributors:
+    - Can earn unlimited direct user commissions (₹1000 per direct user, before binary activation)
+    - Can earn commission for first 5 binary pairs after binary activation (₹2000 per pair)
+    - Binary pair commissions from 6th pair onwards are BLOCKED until they become Active Buyer
+    - When distributor becomes Active Buyer (total paid ≥ ₹5000), future binary pairs (6th+) will be paid normally
+    - No retroactive commissions for pairs that were blocked during restriction period
 
 
 ================================================================================

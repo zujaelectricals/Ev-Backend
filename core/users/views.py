@@ -429,13 +429,7 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
         """Create distributor application with eligibility validation"""
         user = request.user
         
-        # Check eligibility
-        if not user.is_active_buyer:
-            return Response(
-                {'non_field_errors': ['User must be an Active Buyer to apply for distributor program. Total paid amount must be at least ₹5000.']},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
+        # Check eligibility (Active Buyer requirement removed - only KYC needed)
         if not hasattr(user, 'kyc') or user.kyc.status != 'approved':
             return Response(
                 {'non_field_errors': ['User must have approved KYC to apply for distributor program.']},

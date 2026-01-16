@@ -81,7 +81,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         
         if not was_active and self.is_active_buyer:
             # User just became Active Buyer - trigger any necessary actions
-            pass
+            if self.is_distributor:
+                # Log that distributor earnings can now resume for future binary pairs
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"Distributor {self.username} became Active Buyer. "
+                    f"Future binary pair commissions (6th+) will now be paid normally."
+                )
         
         self.save(update_fields=['is_active_buyer'])
         return self.is_active_buyer

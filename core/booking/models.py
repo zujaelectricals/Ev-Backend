@@ -41,6 +41,10 @@ class Booking(models.Model):
         User, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='referred_bookings'
     )
+    referrer_was_distributor = models.BooleanField(
+        default=False,
+        help_text="Whether the referrer was a distributor when this booking was created"
+    )
     join_distributor_program = models.BooleanField(default=False)
     
     # Payment & Delivery Fields

@@ -54,10 +54,14 @@ class BookingViewSet(viewsets.ModelViewSet):
         serializer.validated_data.pop('vehicle_model_code', None)
         
         # Save booking with referred_by if referral code is valid
+        # Store whether referrer was a distributor at booking creation time
+        referrer_was_distributor = referring_user.is_distributor if referring_user else False
+        
         booking = serializer.save(
             user=self.request.user, 
             ip_address=ip_address,
-            referred_by=referring_user
+            referred_by=referring_user,
+            referrer_was_distributor=referrer_was_distributor
         )
         
         # Set user.referred_by if not already set (first-time referral)
@@ -215,7 +219,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         except:
             pass  # No reservation exists, skip
         
-        # Trigger Celery task for payment processing (referral bonus, etc.)
+        # Trigger Celery task for payment processing (direct user commission, etc.)
         from core.booking.tasks import payment_completed
         payment_completed.delay(booking.id, float(amount))
         
@@ -276,7 +280,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             except:
                 pass  # No reservation exists, skip
             
-            # Trigger Celery task for payment processing (referral bonus, etc.)
+            # Trigger Celery task for payment processing (direct user commission, etc.)
             from core.booking.tasks import payment_completed
             payment_completed.delay(booking.id, float(payment.amount))
     
@@ -305,7 +309,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             except:
                 pass  # No reservation exists, skip
             
-            # Trigger Celery task for payment processing (referral bonus, etc.)
+            # Trigger Celery task for payment processing (direct user commission, etc.)
             from core.booking.tasks import payment_completed
             payment_completed.delay(booking.id, float(payment.amount))
         # If status changed to 'failed', optionally release reservation
@@ -391,7 +395,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             except:
                 pass  # No reservation exists, skip
             
-            # Trigger Celery task for payment processing (referral bonus, etc.)
+            # Trigger Celery task for payment processing (direct user commission, etc.)
             from core.booking.tasks import payment_completed
             payment_completed.delay(booking.id, float(payment.amount))
         
