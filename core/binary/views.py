@@ -150,17 +150,36 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
+        # Check if user has successful payment before allowing placement
+        from core.booking.models import Payment
+        has_payment = Payment.objects.filter(
+            user=target_user,
+            status='completed'
+        ).exists()
+        
+        if not has_payment:
+            return Response(
+                {'error': 'User must have at least one successful payment before placement'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         # Place the user
         try:
-            from .utils import place_user_manually
+            from .utils import place_user_manually, process_direct_user_commission
             node = place_user_manually(
                 user=target_user,
                 parent_node=parent_node,
                 side=side,
                 allow_replacement=allow_replacement
             )
+            
+            # Process commission after placement (commission only paid if payment was completed)
+            commission_paid = process_direct_user_commission(request.user, target_user)
+            
             serializer = BinaryNodeSerializer(node)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            response_data = serializer.data
+            response_data['commission_paid'] = commission_paid
+            return Response(response_data, status=status.HTTP_201_CREATED)
         except ValueError as e:
             return Response(
                 {'error': str(e)},
@@ -170,17 +189,17 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['post'])
     def move_user(self, request):
         """
-        Move an existing user to a new position in the binary tree
+        Move a direct child to a new side (left or right) under the same parent
+        Only allows moving direct children (not descendants)
         Only the tree owner can move users in their tree
         """
         node_id = request.data.get('node_id')
-        new_parent_node_id = request.data.get('new_parent_node_id')
         new_side = request.data.get('new_side')
         
         # Validate required fields
-        if not node_id or not new_parent_node_id or not new_side:
+        if not node_id or not new_side:
             return Response(
-                {'error': 'node_id, new_parent_node_id, and new_side are required'},
+                {'error': 'node_id and new_side are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -192,7 +211,6 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         
         try:
             node = BinaryNode.objects.get(id=node_id)
-            new_parent = BinaryNode.objects.get(id=new_parent_node_id)
         except BinaryNode.DoesNotExist:
             return Response(
                 {'error': 'Node not found'},
@@ -205,30 +223,56 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 "You can only move users in your own binary tree"
             )
         
-        # Check if new_parent is in the same tree
-        if not self._is_tree_owner(request.user, new_parent):
-            raise PermissionDenied(
-                "New parent must be in your binary tree"
+        # Only allow moving direct children (parent must be current user's node)
+        try:
+            owner_node = BinaryNode.objects.get(user=request.user)
+        except BinaryNode.DoesNotExist:
+            return Response(
+                {'error': 'No binary node found for current user'},
+                status=status.HTTP_404_NOT_FOUND
             )
         
-        # Validate no cycles
-        try:
-            self._validate_no_cycles(node, new_parent)
-        except ValidationError as e:
+        # Check if node is a direct child of owner
+        if node.parent != owner_node:
             return Response(
-                {'error': str(e)},
+                {'error': 'You can only move your direct children. This user is not a direct child.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Move the node
-        try:
-            from .utils import move_binary_node
-            moved_node = move_binary_node(node, new_parent, new_side)
-            serializer = BinaryNodeSerializer(moved_node)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        except ValueError as e:
+        # Check if trying to move to the same side
+        if node.side == new_side:
             return Response(
-                {'error': str(e)},
+                {'error': f'User is already on the {new_side} side'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if new side is available (exclude the node being moved)
+        existing_on_new_side = BinaryNode.objects.filter(
+            parent=owner_node, 
+            side=new_side
+        ).exclude(id=node.id).first()
+        
+        if existing_on_new_side:
+            return Response(
+                {'error': f'{new_side.capitalize()} side is already occupied'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Move the node to new side
+        try:
+            with transaction.atomic():
+                old_side = node.side
+                node.side = new_side
+                node.save(update_fields=['side'])
+                
+                # Recalculate parent's counts properly (don't swap, recalculate from actual data)
+                owner_node.update_counts()
+                
+                serializer = BinaryNodeSerializer(node)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {'error': f'Error moving user: {str(e)}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
     
@@ -264,11 +308,19 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             right_available = not BinaryNode.objects.filter(parent=node, side='right').exists()
             
             if left_available or right_available:
+                # Get referral code that was used by this user (if any)
+                referral_code_used = None
+                if node.user and node.user.referred_by:
+                    referral_code_used = node.user.referred_by.referral_code
+                
                 available_positions.append({
                     'node_id': node.id,
                     'user_id': node.user.id,
                     'user_email': node.user.email,
                     'user_username': node.user.username,
+                    'user_full_name': node.user.get_full_name() if node.user else None,
+                    'referral_code': node.user.referral_code if node.user else None,
+                    'referral_code_used': referral_code_used,
                     'level': node.level,
                     'left_available': left_available,
                     'right_available': right_available,
@@ -297,7 +349,7 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         from core.booking.models import Booking
         booking_users = User.objects.filter(
             bookings__referred_by=referrer
-        ).distinct()
+        )
         
         # Combine both sets
         all_referred_users = (referred_users | booking_users).distinct()
@@ -335,6 +387,308 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             'count': len(pending_users),
             'pending_users': pending_users
         })
+    
+    @action(detail=False, methods=['post'])
+    def auto_place_pending(self, request):
+        """
+        Automatically place pending users in the binary tree using left-priority algorithm
+        Can place all pending users or a specific user
+        """
+        referrer = request.user
+        target_user_id = request.data.get('target_user_id')
+        referring_user_id = request.data.get('referring_user_id')
+        
+        # Get users who have referred_by = referrer
+        from core.users.models import User
+        from core.booking.models import Booking
+        from .utils import add_to_binary_tree
+        
+        referred_users = User.objects.filter(referred_by=referrer)
+        booking_users = User.objects.filter(
+            bookings__referred_by=referrer
+        )
+        
+        # Combine both sets
+        all_referred_users = (referred_users | booking_users).distinct()
+        
+        # Filter to specific user if target_user_id provided
+        if target_user_id:
+            try:
+                all_referred_users = all_referred_users.filter(id=target_user_id)
+                if not all_referred_users.exists():
+                    return Response(
+                        {'error': f'User {target_user_id} not found or did not use your referral code'},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+            except ValueError:
+                return Response(
+                    {'error': 'Invalid target_user_id'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # If no pending users found
+        if not all_referred_users.exists():
+            return Response({
+                'placed_count': 0,
+                'failed_count': 0,
+                'placed_users': [],
+                'failed_users': [],
+                'message': 'No pending users found'
+            })
+        
+        placed_users = []
+        failed_users = []
+        
+        for user in all_referred_users:
+            try:
+                # IMPORTANT: Check if user has successful payment before allowing placement
+                from core.booking.models import Payment
+                has_payment = Payment.objects.filter(
+                    user=user,
+                    status='completed'
+                ).exists()
+                
+                if not has_payment:
+                    failed_users.append({
+                        'user_id': user.id,
+                        'user_email': user.email,
+                        'user_full_name': user.get_full_name() or user.username,
+                        'error': 'User must have at least one successful payment before placement'
+                    })
+                    continue
+                
+                # Check if user is already in referrer's tree
+                try:
+                    user_node = BinaryNode.objects.get(user=user)
+                    is_in_tree = self._is_tree_owner(referrer, user_node)
+                    if is_in_tree:
+                        # User already in tree, skip
+                        continue
+                except BinaryNode.DoesNotExist:
+                    # User doesn't have a node, will create one
+                    pass
+                
+                # Determine actual referrer (from user.referred_by or booking.referred_by)
+                actual_referrer = referring_user_id
+                if not actual_referrer:
+                    # Try to get from user.referred_by first
+                    if user.referred_by:
+                        actual_referrer = user.referred_by.id
+                    else:
+                        # Get from first booking
+                        booking = Booking.objects.filter(user=user, referred_by=referrer).first()
+                        if booking and booking.referred_by:
+                            actual_referrer = booking.referred_by.id
+                    
+                    # If still no referrer, use the main referrer (request.user)
+                    if not actual_referrer:
+                        actual_referrer = referrer.id
+                
+                # Convert to User object if needed
+                if isinstance(actual_referrer, int):
+                    actual_referrer_user = User.objects.get(id=actual_referrer)
+                else:
+                    actual_referrer_user = actual_referrer
+                
+                # If user already has a node but not in referrer's tree, we need to handle it
+                # For now, we'll try to place it - add_to_binary_tree will create if not exists
+                # or we can move it manually if needed
+                user_node = BinaryNode.objects.filter(user=user).first()
+                if user_node and not self._is_tree_owner(referrer, user_node):
+                    # User has a node but not in referrer's tree
+                    # We'll place them in referrer's tree (the node will be moved/re-parented)
+                    # Note: This might require additional logic for moving existing nodes
+                    # For now, we'll use add_to_binary_tree which should handle creation
+                    pass
+                
+                # Place user in binary tree using automatic placement algorithm
+                node = add_to_binary_tree(
+                    user=user,
+                    referrer=referrer,
+                    side=None,  # Let algorithm determine side automatically
+                    referring_user=actual_referrer_user if actual_referrer_user != referrer else referrer
+                )
+                
+                if node:
+                    # Process commission after placement (commission only paid if payment was completed)
+                    from .utils import process_direct_user_commission
+                    commission_paid = process_direct_user_commission(referrer, user)
+                    
+                    placed_users.append({
+                        'user_id': user.id,
+                        'user_email': user.email,
+                        'user_full_name': user.get_full_name() or user.username,
+                        'node_id': node.id,
+                        'parent_node_id': node.parent.id if node.parent else None,
+                        'parent_email': node.parent.user.email if node.parent else None,
+                        'side': node.side,
+                        'level': node.level,
+                        'commission_paid': commission_paid
+                    })
+                else:
+                    failed_users.append({
+                        'user_id': user.id,
+                        'user_email': user.email,
+                        'user_full_name': user.get_full_name() or user.username,
+                        'error': 'Failed to place user in binary tree'
+                    })
+            except Exception as e:
+                # Log error and add to failed list
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error placing user {user.id} in binary tree: {str(e)}")
+                failed_users.append({
+                    'user_id': user.id,
+                    'user_email': user.email,
+                    'user_full_name': user.get_full_name() or user.username,
+                    'error': str(e)
+                })
+        
+        response_data = {
+            'placed_count': len(placed_users),
+            'failed_count': len(failed_users),
+            'placed_users': placed_users,
+            'failed_users': failed_users
+        }
+        
+        if len(placed_users) == 0 and len(failed_users) == 0:
+            response_data['message'] = 'No eligible pending users found to place'
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=['post'])
+    def swap_direct_children(self, request):
+        """
+        Swap left and right direct children of current user's node
+        Only tree owner can swap their direct children
+        Preserves all descendant nodes (they move with their parent)
+        """
+        try:
+            owner_node = BinaryNode.objects.get(user=request.user)
+        except BinaryNode.DoesNotExist:
+            return Response(
+                {'error': 'No binary node found for current user'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get direct children
+        left_child = BinaryNode.objects.filter(parent=owner_node, side='left').first()
+        right_child = BinaryNode.objects.filter(parent=owner_node, side='right').first()
+        
+        # Both children must exist to swap
+        if not left_child or not right_child:
+            return Response(
+                {'error': 'Both left and right children must exist to swap'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Swap sides
+        try:
+            with transaction.atomic():
+                # Update left child to right
+                left_child.side = 'right'
+                left_child.save(update_fields=['side'])
+                
+                # Update right child to left
+                right_child.side = 'left'
+                right_child.save(update_fields=['side'])
+                
+                # Update counts (swap left_count and right_count)
+                owner_node.left_count, owner_node.right_count = owner_node.right_count, owner_node.left_count
+                owner_node.save(update_fields=['left_count', 'right_count'])
+                
+                # Return updated tree structure
+                serializer = BinaryNodeSerializer(owner_node)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {'error': f'Error swapping children: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=False, methods=['post'])
+    def choose_side_for_direct_referral(self, request):
+        """
+        Pre-select side for an upcoming direct referral
+        Parent can choose left/right for their direct referrals
+        Only works for users who haven't been placed yet
+        """
+        target_user_id = request.data.get('target_user_id')
+        side = request.data.get('side')
+        
+        # Validate required fields
+        if not target_user_id or not side:
+            return Response(
+                {'error': 'target_user_id and side are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if side not in ['left', 'right']:
+            return Response(
+                {'error': "side must be 'left' or 'right'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            from core.users.models import User
+            target_user = User.objects.get(id=target_user_id)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'Target user not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check if user is eligible to be placed (used referrer's code)
+        if not self._can_place_user(request.user, target_user):
+            return Response(
+                {'error': 'This user did not use your referral code'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if user already has a node
+        try:
+            existing_node = BinaryNode.objects.get(user=target_user)
+            # If node exists and is already in referrer's tree, return error
+            if self._is_tree_owner(request.user, existing_node):
+                return Response(
+                    {'error': 'User is already placed in your tree'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except BinaryNode.DoesNotExist:
+            pass  # User doesn't have a node yet, that's fine
+        
+        try:
+            owner_node = BinaryNode.objects.get(user=request.user)
+        except BinaryNode.DoesNotExist:
+            return Response(
+                {'error': 'No binary node found for current user'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check if the requested side is available (use direct database check, not cached count)
+        existing_on_side = BinaryNode.objects.filter(parent=owner_node, side=side).exists()
+        if existing_on_side:
+            return Response(
+                {'error': f'{side.capitalize()} side is already occupied'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Place user on the chosen side
+        try:
+            from .utils import place_user_manually
+            node = place_user_manually(
+                user=target_user,
+                parent_node=owner_node,
+                side=side,
+                allow_replacement=False
+            )
+            serializer = BinaryNodeSerializer(node)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 
 class BinaryPairViewSet(viewsets.ReadOnlyModelViewSet):

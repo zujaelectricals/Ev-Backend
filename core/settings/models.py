@@ -51,6 +51,12 @@ class PlatformSettings(models.Model):
         default=10,
         help_text="Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000)"
     )
+    binary_tree_default_placement_side = models.CharField(
+        max_length=5,
+        choices=[('left', 'Left'), ('right', 'Right')],
+        default='left',
+        help_text="Default placement side for binary tree (left or right). Controls which side chain is followed after first 2 users."
+    )
     
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(
@@ -88,6 +94,7 @@ class PlatformSettings(models.Model):
                 'binary_commission_tds_percentage': 20,
                 'binary_extra_deduction_percentage': 20,
                 'binary_daily_pair_limit': 10,
+                'binary_tree_default_placement_side': 'left',
             }
         )
         return settings

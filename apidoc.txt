@@ -1227,17 +1227,32 @@ Super User: EVAdmin && EVAdmin@123
       * No retroactive commissions: Only bookings created AFTER the referrer becomes a distributor get commission
     
     Note on Binary Tree Placement:
-    - If referral_code is provided and manual_placement=false (default), user is automatically added to referrer's binary tree
-    - Automatic placement: Prefers left side if available, otherwise right, or finds next available position
-    - If manual_placement=true, automatic placement is skipped - user can be placed later via /api/binary/nodes/place_user/
-    - Referrer can view pending users via /api/binary/nodes/pending_users/ and place them manually
+    - Users are NOT automatically placed in the binary tree when booking is created
+    - IMPORTANT: Placement APIs can ONLY be called AFTER user has at least one successful payment
+    - Referrer must place users AFTER payment completion, either:
+      1. Automatically via /api/binary/nodes/auto_place_pending/ (uses left-priority algorithm)
+      2. Manually via /api/binary/nodes/place_user/ (choose specific position)
+    - Placement Rules (when using auto_place_pending):
+      1. First 2 direct referrals: 1st user → LEFT, 2nd user → RIGHT
+      2. From 3rd referral onward: Follow LEFT-side chain (traverse left children to find left-most available position)
+      3. Referral-based override: If user joins using a specific parent's referral code (e.g., User B's code):
+         - Place in that parent's tree (not root)
+         - Check parent's LEFT first, then RIGHT if left is occupied
+      4. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side)
+         - If set to RIGHT: Same logic applies in mirror form (right-chain pattern)
+    - Referrer can view pending users via /api/binary/nodes/pending_users/
+    - Parents can choose left/right for their direct referrals via /api/binary/nodes/choose_side_for_direct_referral/
+    - Parents can swap or move their direct children via /api/binary/nodes/swap_direct_children/ and /api/binary/nodes/move_user/
     
     Note on Direct User Commission:
+    - Commission is paid when user is placed in binary tree (via placement APIs)
+    - Commission is ONLY paid if user has at least one successful payment
+    - Commission timing: Paid when placement happens, regardless of when payment was completed
     - When User A is added as a direct child of User B, User B receives direct user commission (configurable, default: ₹1000)
-    - Direct user commission is paid only for the first 3 direct children (configurable threshold)
-    - After 3 direct children are added, binary commission activates automatically
+    - Direct user commission is paid to ALL eligible ancestors (not just direct parent) if they have < 3 total descendants
+    - After 3 total descendants are added, binary commission activates automatically
     - 20% TDS is deducted from direct user commission (configurable percentage)
-    - Net amount (₹800 = ₹1000 - ₹200 TDS) is credited to referrer's wallet immediately upon user addition
+    - Net amount (₹800 = ₹1000 - ₹200 TDS) is credited to referrer's wallet immediately upon placement
     - TDS is deducted from referrer's oldest active booking remaining amount
     - Only distributors can receive commissions
     - Note: Direct user commissions are NOT restricted for non-Active Buyer distributors (can earn unlimited before binary activation)
@@ -3158,24 +3173,27 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Notes:
+    - IMPORTANT: User must have at least one successful payment before placement
+    - If user has no successful payment, placement fails with error message
     - Only the tree owner (referrer) can place users in their tree
     - Target user must have used referrer's referral code (checked via user.referred_by or booking.referred_by)
     - If user already has a node, it will be moved to the new position
     - If position is occupied and allow_replacement=false, returns error
     - Parent node must belong to referrer's tree
     - Automatically updates parent counts after placement
+    - Commission is automatically paid when placement succeeds (if user has successful payment)
+    - Response includes 'commission_paid' field indicating if commission was paid
 
 
-55. MOVE USER IN TREE
+55. MOVE DIRECT CHILD IN TREE
     Method: POST
     URL: /api/binary/nodes/move_user/
     Authentication: Required
-    Description: Move an existing user to a new position in the binary tree. Only the tree owner can move users in their tree.
+    Description: Move a direct child to a different side (left or right) under the same parent. Only allows moving direct children (not descendants). Only the tree owner can move their direct children.
     
     Request Body:
     {
       "node_id": 10,
-      "new_parent_node_id": 7,
       "new_side": "right"  // "left" or "right"
     }
     
@@ -3184,10 +3202,10 @@ Super User: EVAdmin && EVAdmin@123
       "id": 10,
       "user": 8,
       "user_email": "user8@example.com",
-      "parent": 7,
-      "parent_username": "user7@example.com",
+      "parent": 5,
+      "parent_username": "user5@example.com",
       "side": "right",
-      "level": 3,
+      "level": 2,
       "left_count": 0,
       "right_count": 0,
       "created_at": "2026-01-06T12:00:00Z",
@@ -3196,7 +3214,7 @@ Super User: EVAdmin && EVAdmin@123
     
     Error Response (400):
     {
-      "error": "node_id, new_parent_node_id, and new_side are required"
+      "error": "node_id and new_side are required"
     }
     OR
     {
@@ -3204,34 +3222,38 @@ Super User: EVAdmin && EVAdmin@123
     }
     OR
     {
-      "error": "Cannot move node to its own descendant (would create cycle)"
+      "error": "You can only move your direct children. This user is not a direct child."
     }
     OR
     {
-      "error": "Position right under parent node 7 is already occupied"
+      "error": "User is already on the right side"
+    }
+    OR
+    {
+      "error": "Right side is already occupied"
     }
     
     Error Response (403):
     {
       "error": "You can only move users in your own binary tree"
     }
-    OR
-    {
-      "error": "New parent must be in your binary tree"
-    }
     
     Error Response (404):
     {
       "error": "Node not found"
     }
+    OR
+    {
+      "error": "No binary node found for current user"
+    }
     
     Notes:
     - Only the tree owner can move users in their tree
-    - Node and new_parent must both belong to referrer's tree
-    - Prevents cycles (cannot move node to its own descendant)
-    - Preserves child nodes when moving (children move with parent)
-    - Automatically updates levels of all descendants
-    - Updates parent counts for both old and new parents
+    - Only allows moving DIRECT CHILDREN (users directly under current user's node)
+    - Cannot move descendants (only immediate children)
+    - New side must be available (not already occupied)
+    - Cannot move to the same side (must be different)
+    - Automatically updates parent's left_count and right_count
 
 
 56. LIST AVAILABLE POSITIONS
@@ -3249,6 +3271,9 @@ Super User: EVAdmin && EVAdmin@123
           "user_id": 1,
           "user_email": "user@example.com",
           "user_username": "user@example.com",
+          "user_full_name": "John Doe",
+          "referral_code": "REF00001",
+          "referral_code_used": null,
           "level": 0,
           "left_available": true,
           "right_available": false,
@@ -3260,6 +3285,9 @@ Super User: EVAdmin && EVAdmin@123
           "user_id": 5,
           "user_email": "user5@example.com",
           "user_username": "user5@example.com",
+          "user_full_name": "Jane Smith",
+          "referral_code": "REF00005",
+          "referral_code_used": "REF00001",
           "level": 1,
           "left_available": false,
           "right_available": true,
@@ -3276,8 +3304,22 @@ Super User: EVAdmin && EVAdmin@123
     
     Notes:
     - Returns all nodes in the tree that have at least one available slot (left or right)
-    - Helps UI show where users can be placed
+    - Each position includes basic user information: full name, email, and referral code
+    - Helps UI show where users can be placed with complete parent node information
     - Only tree owner can view available positions in their tree
+    - Fields included:
+      * node_id: Binary tree node ID (use this for parent_node_id when placing users)
+      * user_id: User ID of the node owner
+      * user_email: Email address of the node owner
+      * user_username: Username of the node owner
+      * user_full_name: Full name of the node owner (first_name + last_name)
+      * referral_code: Referral code of the node owner
+      * referral_code_used: Referral code that was used by this user when joining (null if none used)
+      * level: Depth level in the tree (0 = root)
+      * left_available: Boolean indicating if left child slot is available
+      * right_available: Boolean indicating if right child slot is available
+      * left_count: Total descendants on the left side
+      * right_count: Total descendants on the right side
 
 
 57. LIST PENDING USERS
@@ -3319,6 +3361,198 @@ Super User: EVAdmin && EVAdmin@123
     - Includes users who have a node but are not in referrer's tree
     - Excludes users who are already placed in referrer's tree
     - Helps referrer identify which users need to be placed manually
+
+
+57. AUTO PLACE PENDING USERS
+    Method: POST
+    URL: /api/binary/nodes/auto_place_pending/
+    Authentication: Required
+    Description: Automatically place pending users in the binary tree using the left-priority placement algorithm. Can place all pending users or a specific user. This is the recommended way to place users automatically after they create bookings with your referral code.
+    
+    Request Body (all optional):
+    {
+      "target_user_id": 8,  // Optional: Place specific user only. If omitted, places all pending users
+      "referring_user_id": 5  // Optional: Override referring user (uses actual referrer from booking/user by default)
+    }
+    
+    Response (200 OK):
+    {
+      "placed_count": 3,
+      "failed_count": 0,
+      "placed_users": [
+        {
+          "user_id": 8,
+          "user_email": "user8@example.com",
+          "user_full_name": "John Doe",
+          "node_id": 10,
+          "parent_node_id": 5,
+          "parent_email": "referrer@example.com",
+          "side": "left",
+          "level": 2
+        },
+        {
+          "user_id": 9,
+          "user_email": "user9@example.com",
+          "user_full_name": "Jane Smith",
+          "node_id": 11,
+          "parent_node_id": 5,
+          "parent_email": "referrer@example.com",
+          "side": "right",
+          "level": 2
+        }
+      ],
+      "failed_users": []
+    }
+    
+    Response when no pending users (200 OK):
+    {
+      "placed_count": 0,
+      "failed_count": 0,
+      "placed_users": [],
+      "failed_users": [],
+      "message": "No pending users found"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Invalid target_user_id"
+    }
+    
+    Error Response (404):
+    {
+      "error": "User 8 not found or did not use your referral code"
+    }
+    
+    Notes:
+    - IMPORTANT: User must have at least one successful payment before placement
+    - If user has no successful payment, placement fails with error message
+    - Automatically places pending users using the left-priority placement algorithm
+    - Placement Rules:
+      1. First 2 direct referrals: 1st user → LEFT, 2nd user → RIGHT
+      2. From 3rd referral onward: Follow LEFT-side chain (traverse left children to find left-most available position)
+      3. Referral-based override: If user used a specific parent's code, place in that parent's tree
+      4. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side)
+    - If no parameters provided: Places ALL pending users who used referrer's code (and have successful payment)
+    - If target_user_id provided: Places only that specific user (must have used referrer's code and have successful payment)
+    - Users already in referrer's tree are skipped (not placed again)
+    - Commission is automatically paid when placement succeeds (if user has successful payment)
+    - Recommended workflow:
+      1. User creates booking with referral code → No automatic placement
+      2. User makes payment → Payment must be completed (status='completed')
+      3. Referrer calls this API → Users are placed automatically using left-priority algorithm
+      4. Commission is paid immediately upon successful placement
+    - Returns both successfully placed users and failed placements (with error messages)
+    - Only tree owner can place users in their tree
+    - Response includes 'commission_paid' field indicating if commission was paid
+
+
+58. SWAP DIRECT CHILDREN
+    Method: POST
+    URL: /api/binary/nodes/swap_direct_children/
+    Authentication: Required
+    Description: Swap left and right direct children of current user's node. Only tree owner can swap their direct children. Preserves all descendant nodes (they move with their parent).
+    
+    Request Body: None (uses current user's node)
+    
+    Response (200 OK):
+    {
+      "id": 5,
+      "user": 1,
+      "user_email": "user1@example.com",
+      "parent": null,
+      "parent_username": null,
+      "side": null,
+      "level": 0,
+      "left_count": 8,
+      "right_count": 5,
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T12:15:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Both left and right children must exist to swap"
+    }
+    
+    Error Response (404):
+    {
+      "error": "No binary node found for current user"
+    }
+    
+    Notes:
+    - Swaps the side assignment of left and right direct children
+    - Both children must exist to perform swap
+    - All descendant nodes move with their parent (entire subtree swaps)
+    - Automatically updates parent's left_count and right_count (swapped)
+    - Only tree owner can swap their direct children
+
+
+58. CHOOSE SIDE FOR DIRECT REFERRAL
+    Method: POST
+    URL: /api/binary/nodes/choose_side_for_direct_referral/
+    Authentication: Required
+    Description: Pre-select side (left or right) for an upcoming direct referral. Parent can choose left/right for their direct referrals. Only works for users who haven't been placed yet or are not in referrer's tree.
+    
+    Request Body:
+    {
+      "target_user_id": 8,
+      "side": "left"  // "left" or "right"
+    }
+    
+    Response (201 Created):
+    {
+      "id": 10,
+      "user": 8,
+      "user_email": "user8@example.com",
+      "parent": 5,
+      "parent_username": "user5@example.com",
+      "side": "left",
+      "level": 2,
+      "left_count": 0,
+      "right_count": 0,
+      "created_at": "2026-01-06T12:00:00Z",
+      "updated_at": "2026-01-06T12:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "error": "target_user_id and side are required"
+    }
+    OR
+    {
+      "error": "side must be 'left' or 'right'"
+    }
+    OR
+    {
+      "error": "User is already placed in your tree"
+    }
+    OR
+    {
+      "error": "Left side is already occupied"
+    }
+    
+    Error Response (403):
+    {
+      "error": "This user did not use your referral code"
+    }
+    
+    Error Response (404):
+    {
+      "error": "Target user not found"
+    }
+    OR
+    {
+      "error": "No binary node found for current user"
+    }
+    
+    Notes:
+    - Parent can pre-select side for their direct referrals
+    - Target user must have used referrer's referral code
+    - Requested side must be available (not already occupied)
+    - Works for users who haven't been placed yet or are placed in another tree
+    - If user already has a node but is in another tree, will be moved to referrer's tree
+    - Automatically places user on the chosen side
+    - Automatically updates parent's left_count or right_count
 
 
 ================================================================================
@@ -3727,6 +3961,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_tds_percentage": "20.00",  // TDS percentage on ALL binary commissions (default: 20%)
      "binary_extra_deduction_percentage": "20.00",  // Extra deduction percentage on 6th+ pairs (default: 20%)
      "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000)
+     "binary_tree_default_placement_side": "left",  // Default placement side for binary tree: "left" or "right" (default: "left")
      "updated_at": "2026-01-14T09:00:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -3758,7 +3993,8 @@ Super User: EVAdmin && EVAdmin@123
      "binary_tds_threshold_pairs": 5,  // Number of pairs after activation before extra deduction starts (default: 5, min: 0)
      "binary_commission_tds_percentage": 20,  // TDS percentage on ALL binary commissions (default: 20%, range: 0-100)
      "binary_extra_deduction_percentage": 20,  // Extra deduction percentage on 6th+ pairs (default: 20%, range: 0-100)
-     "binary_daily_pair_limit": 10  // Maximum binary pairs per day after activation (default: 10, min: 1)
+     "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10, min: 1)
+     "binary_tree_default_placement_side": "left"  // Default placement side: "left" or "right" (default: "left")
    }
    
    Response (200 OK):
@@ -3772,6 +4008,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_tds_percentage": "20.00",
      "binary_extra_deduction_percentage": "20.00",
      "binary_daily_pair_limit": 10,
+     "binary_tree_default_placement_side": "left",
      "updated_at": "2026-01-14T09:15:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -3806,6 +4043,11 @@ Super User: EVAdmin && EVAdmin@123
    - binary_commission_tds_percentage: TDS percentage applied to ALL binary commissions - direct user and pairs (default: 20%, range: 0-100)
    - binary_extra_deduction_percentage: Extra deduction percentage for 6th+ pairs in addition to TDS (default: 20%, range: 0-100)
    - binary_daily_pair_limit: Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000 before deductions)
+   - binary_tree_default_placement_side: Default placement side for binary tree placement algorithm (default: "left", options: "left" or "right")
+     * Controls which side chain is followed after first 2 users are placed
+     * If "left": 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain
+     * If "right": 1st user → RIGHT, 2nd user → LEFT, 3rd+ → follow RIGHT chain
+     * See Binary Tree Placement notes in CREATE BOOKING endpoint for detailed placement rules
    - updated_by is automatically set to the current user making the update
    - Settings are stored as a singleton (only one instance exists)
    - Timeout is stored in minutes (converted from hours for backward compatibility)
@@ -3920,7 +4162,7 @@ Standard Error Format:
 12. Distributor Requirement: Only approved distributors can earn from binary pairs, direct user commissions, and referral bonuses
 13. Distributor Eligibility: User must have approved KYC to apply for distributor program (Active Buyer requirement removed)
 14. Distributor Application: Each user can submit only one distributor application; admin/staff approval required to become distributor
-15. Binary Tree Placement: Users are automatically added to referrer's binary tree when booking is created with referral_code (unless manual_placement=true)
+15. Binary Tree Placement: Users are NOT automatically placed in binary tree during booking creation. Placement APIs can ONLY be called AFTER user has successful payment. Referrers must place users AFTER payment via /api/binary/nodes/auto_place_pending/ (automatic) or /api/binary/nodes/place_user/ (manual). Commission is paid when placement happens (regardless of when payment was completed). Auto-placement uses left-priority algorithm: 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain. Referral-based override: If using specific parent's code, place in that parent's tree. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side). Parents can choose side for direct referrals and swap/move direct children via API endpoints.
 16. Manual Tree Placement: Tree owners can manually place/move users in their tree via placement APIs; only users who used referrer's code can be placed
 17. Commission Configuration: All binary commission amounts, thresholds, TDS settings, and daily limits are configurable via Platform Settings API
 18. Referral Commission Timing: Commission is only granted for bookings created AFTER the referrer becomes a distributor (no retroactive commissions)

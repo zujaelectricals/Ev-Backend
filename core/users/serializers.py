@@ -54,6 +54,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
     kyc_status = serializers.SerializerMethodField()
     nominee_exists = serializers.SerializerMethodField()
     referred_by = ReferredByUserSerializer(read_only=True, allow_null=True)
+    binary_commission_active = serializers.SerializerMethodField()
+    binary_pairs_matched = serializers.SerializerMethodField()
+    left_leg_count = serializers.SerializerMethodField()
+    right_leg_count = serializers.SerializerMethodField()
+    carry_forward_left = serializers.SerializerMethodField()
+    carry_forward_right = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -61,7 +67,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
                   'gender', 'date_of_birth', 'address_line1', 'address_line2',
                   'city', 'state', 'pincode', 'country',
                   'role', 'is_distributor', 'is_active_buyer', 'referral_code',
-                  'referred_by', 'kyc_status', 'nominee_exists', 'date_joined')
+                  'referred_by', 'kyc_status', 'nominee_exists', 'date_joined',
+                  'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
+                  'right_leg_count', 'carry_forward_left', 'carry_forward_right')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer',
                            'referral_code', 'referred_by', 'date_joined')
     
@@ -77,6 +85,52 @@ class UserProfileSerializer(serializers.ModelSerializer):
         """Check if nominee exists for the user"""
         # For OneToOneField reverse relationships, use hasattr which safely checks existence
         return hasattr(obj, 'nominee') and obj.nominee is not None
+    
+    def get_binary_commission_active(self, obj):
+        """Get binary_commission_activated status from BinaryNode"""
+        if hasattr(obj, 'binary_node') and obj.binary_node:
+            return obj.binary_node.binary_commission_activated
+        return False
+    
+    def get_binary_pairs_matched(self, obj):
+        """Count total binary pairs matched after activation"""
+        from core.binary.models import BinaryPair
+        return BinaryPair.objects.filter(
+            user=obj,
+            pair_number_after_activation__isnull=False
+        ).count()
+    
+    def get_left_leg_count(self, obj):
+        """Get left_count from BinaryNode"""
+        if hasattr(obj, 'binary_node') and obj.binary_node:
+            return obj.binary_node.left_count
+        return 0
+    
+    def get_right_leg_count(self, obj):
+        """Get right_count from BinaryNode"""
+        if hasattr(obj, 'binary_node') and obj.binary_node:
+            return obj.binary_node.right_count
+        return 0
+    
+    def get_carry_forward_left(self, obj):
+        """Get carry-forward count for left leg"""
+        from core.binary.models import BinaryCarryForward
+        active_carry = BinaryCarryForward.objects.filter(
+            user=obj,
+            side='left',
+            is_active=True
+        ).first()
+        return active_carry.remaining_count if active_carry else 0
+    
+    def get_carry_forward_right(self, obj):
+        """Get carry-forward count for right leg"""
+        from core.binary.models import BinaryCarryForward
+        active_carry = BinaryCarryForward.objects.filter(
+            user=obj,
+            side='right',
+            is_active=True
+        ).first()
+        return active_carry.remaining_count if active_carry else 0
 
 
 class KYCSerializer(serializers.ModelSerializer):

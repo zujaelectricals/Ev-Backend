@@ -18,6 +18,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     Recursive serializer for binary tree structure with child nodes
     Includes comprehensive member details for each node
     """
+    node_id = serializers.IntegerField(source='id', read_only=True)
     user_id = serializers.IntegerField(source='user.id', read_only=True)
     user_email = serializers.CharField(source='user.email', read_only=True)
     user_username = serializers.CharField(source='user.username', read_only=True)
@@ -39,6 +40,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     total_amount = serializers.SerializerMethodField()
     tds_current = serializers.SerializerMethodField()
     net_amount_total = serializers.SerializerMethodField()
+    binary_commission_activated = serializers.BooleanField(source='binary_commission_activated', read_only=True)
     left_child = serializers.SerializerMethodField()
     right_child = serializers.SerializerMethodField()
     left_side_members = serializers.SerializerMethodField()
@@ -47,13 +49,13 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     class Meta:
         model = BinaryNode
         fields = [
-            'id', 'user_id', 'user_email', 'user_username', 'user_full_name',
+            'node_id', 'user_id', 'user_email', 'user_username', 'user_full_name',
             'user_mobile', 'user_first_name', 'user_last_name', 'user_city', 'user_state',
             'is_distributor', 'is_active_buyer', 'referral_code', 'date_joined',
             'wallet_balance', 'total_bookings', 'total_binary_pairs', 'total_earnings',
             'total_referrals', 'total_amount', 'tds_current', 'net_amount_total',
             'parent', 'side', 'level', 'left_count', 'right_count',
-            'left_child', 'right_child', 'left_side_members', 'right_side_members',
+            'binary_commission_activated', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
             'created_at', 'updated_at'
         ]
         read_only_fields = ('user', 'created_at', 'updated_at')
@@ -218,16 +220,25 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         
         try:
             # Optimize query with select_related
+            # Use .first() instead of .get() to handle cases where multiple nodes exist (data integrity issue)
             left_child = BinaryNode.objects.select_related(
                 'user', 'user__wallet', 'parent', 'parent__user'
-            ).get(parent=obj, side='left')
+            ).filter(parent=obj, side='left').first()
+            
+            if not left_child:
+                return None
+            
             serializer = BinaryTreeNodeSerializer(
                 left_child,
                 max_depth=self.max_depth,
                 current_depth=self.current_depth + 1
             )
             return serializer.data
-        except BinaryNode.DoesNotExist:
+        except Exception as e:
+            # Log error but don't fail the entire response
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error getting left child for node {obj.id}: {str(e)}")
             return None
     
     def get_right_child(self, obj):
@@ -237,16 +248,25 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         
         try:
             # Optimize query with select_related
+            # Use .first() instead of .get() to handle cases where multiple nodes exist (data integrity issue)
             right_child = BinaryNode.objects.select_related(
                 'user', 'user__wallet', 'parent', 'parent__user'
-            ).get(parent=obj, side='right')
+            ).filter(parent=obj, side='right').first()
+            
+            if not right_child:
+                return None
+            
             serializer = BinaryTreeNodeSerializer(
                 right_child,
                 max_depth=self.max_depth,
                 current_depth=self.current_depth + 1
             )
             return serializer.data
-        except BinaryNode.DoesNotExist:
+        except Exception as e:
+            # Log error but don't fail the entire response
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error getting right child for node {obj.id}: {str(e)}")
             return None
     
     def _get_all_descendants(self, node, side, max_depth, current_depth=0, exclude_direct_children=False):
@@ -268,7 +288,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             if not exclude_direct_children or current_depth > 0:
                 # Create a simplified serializer for list view (without nested children to avoid duplication)
                 child_data = {
-                    'id': child.id,
+                    'node_id': child.id,
                     'user_id': child.user.id,
                     'user_email': child.user.email,
                     'user_username': child.user.username,

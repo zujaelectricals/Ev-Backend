@@ -107,8 +107,8 @@ class UserViewSet(viewsets.ModelViewSet):
     def profile(self, request):
         """Get current user's profile"""
         # Refresh user from database to ensure all fields are loaded
-        # Use select_related for ForeignKey (referred_by)
-        user = User.objects.select_related('referred_by').get(pk=request.user.pk)
+        # Use select_related for ForeignKey (referred_by) and OneToOneField (binary_node)
+        user = User.objects.select_related('referred_by', 'binary_node').get(pk=request.user.pk)
         # The serializer will handle OneToOneField reverse relationships (kyc, nominee) safely
         serializer = UserProfileSerializer(user)
         return Response(serializer.data)

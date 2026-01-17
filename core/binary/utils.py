@@ -8,15 +8,33 @@ from core.settings.models import PlatformSettings
 
 
 def create_binary_node(user, parent=None, side=None):
-    """Create binary node for user"""
-    node, created = BinaryNode.objects.get_or_create(
-        user=user,
-        defaults={
-            'parent': parent,
-            'side': side,
-            'level': parent.level + 1 if parent else 0,
-        }
-    )
+    """
+    Create binary node for user
+    
+    Note: The UniqueConstraint on (parent, side) prevents duplicate nodes.
+    If a duplicate is attempted, IntegrityError will be raised.
+    """
+    # Check if node already exists for this user
+    existing_node = BinaryNode.objects.filter(user=user).first()
+    if existing_node:
+        # If node exists but parent/side is different, update it
+        if existing_node.parent != parent or existing_node.side != side:
+            existing_node.parent = parent
+            existing_node.side = side
+            existing_node.level = parent.level + 1 if parent else 0
+            existing_node.save(update_fields=['parent', 'side', 'level'])
+            node = existing_node
+        else:
+            # Node already exists with same parent/side
+            node = existing_node
+    else:
+        # Create new node
+        node = BinaryNode.objects.create(
+            user=user,
+            parent=parent,
+            side=side,
+            level=parent.level + 1 if parent else 0,
+        )
     
     if parent:
         parent.update_counts()
@@ -27,20 +45,81 @@ def create_binary_node(user, parent=None, side=None):
     return node
 
 
-def process_direct_user_commission(referrer, new_user):
+def get_all_ancestors(user_node):
     """
-    Process direct user commission when a new user is added as direct child
-    Only pays commission if referrer has less than activation_count direct children
+    Get all ancestor nodes by traversing up the binary tree
     
     Args:
-        referrer: User who referred the new user
+        user_node: BinaryNode to start from
+    
+    Returns:
+        list: List of all ancestor BinaryNode objects (parent, grandparent, etc.)
+              Empty list if user_node has no parent (root node)
+    """
+    ancestors = []
+    current = user_node.parent
+    
+    while current:
+        ancestors.append(current)
+        current = current.parent
+    
+    return ancestors
+
+
+def get_total_descendants_count(node):
+    """
+    Get total descendants count for a node (left_count + right_count)
+    
+    Args:
+        node: BinaryNode to get count for
+    
+    Returns:
+        int: Total number of descendants (all levels) in the tree
+    """
+    return node.left_count + node.right_count
+
+
+def has_successful_payment(user):
+    """
+    Check if user has at least one successful payment (completed payment)
+    
+    Args:
+        user: User to check
+    
+    Returns:
+        bool: True if user has at least one completed payment, False otherwise
+    """
+    from core.booking.models import Payment
+    return Payment.objects.filter(
+        user=user,
+        status='completed'
+    ).exists()
+
+
+def process_direct_user_commission(referrer, new_user):
+    """
+    Process referral bonus (DIRECT_USER_COMMISSION) when a new user is added to the binary tree
+    Pays ₹1000 commission to ALL ancestors (not just direct parent) if they have < 3 total descendants
+    Binary commission activates when any ancestor has 3+ total descendants
+    
+    IMPORTANT RULES:
+    - Commission is only paid if user has at least one successful payment
+    - Commission (referral bonus) MUST STOP completely after binary_commission_activated = True
+    - After activation, earnings come ONLY from binary pair matching
+    
+    Args:
+        referrer: User who referred the new user (may not be direct parent)
         new_user: User who was just added to the tree
     
     Returns:
-        bool: True if commission was paid, False otherwise
+        bool: True if at least one commission was paid, False otherwise
     """
+    # Check if user has successful payment - commission only paid if payment is completed
+    if not has_successful_payment(new_user):
+        return False
+    
     try:
-        referrer_node = BinaryNode.objects.get(user=referrer)
+        new_user_node = BinaryNode.objects.get(user=new_user)
     except BinaryNode.DoesNotExist:
         return False
     
@@ -50,55 +129,121 @@ def process_direct_user_commission(referrer, new_user):
     commission_amount = platform_settings.direct_user_commission_amount
     tds_percentage = platform_settings.binary_commission_tds_percentage
     
-    # Check if referrer has less than activation_count direct children
-    # Only pay if this is a direct child (parent is referrer_node)
-    new_user_node = BinaryNode.objects.filter(user=new_user, parent=referrer_node).first()
-    if not new_user_node:
+    # Get all ancestors by traversing up the tree
+    ancestors = get_all_ancestors(new_user_node)
+    
+    if not ancestors:
+        # No ancestors (root node), no commission to pay
         return False
     
-    # Check count BEFORE this user was added (current count - 1)
-    # Since direct_children_count was already updated in create_binary_node,
-    # we need to check if the count BEFORE adding was less than activation_count
-    count_before_addition = referrer_node.direct_children_count - 1
+    from core.wallet.models import WalletTransaction
     
-    # Check if we should pay commission (before activation)
-    if count_before_addition < activation_count:
-        # Calculate TDS (always applied on all direct user commissions)
-        tds_amount = commission_amount * (tds_percentage / Decimal('100'))
-        net_amount = commission_amount - tds_amount
-        
-        # Pay commission (net amount after TDS)
-        try:
-            add_wallet_balance(
-                user=referrer,
-                amount=float(net_amount),
-                transaction_type='DIRECT_USER_COMMISSION',
-                description=f"Direct user commission for {new_user.username} (₹{commission_amount} - ₹{tds_amount} TDS = ₹{net_amount})",
-                reference_id=new_user.id,
-                reference_type='user'
-            )
-            
-            # Deduct TDS from booking balance
-            deduct_from_booking_balance(
-                user=referrer,
-                deduction_amount=tds_amount,
-                deduction_type='TDS_DEDUCTION',
-                description=f"TDS ({tds_percentage}%) on direct user commission for {new_user.username}"
-            )
-            
-            # Check if this addition activates binary commission
-            if referrer_node.direct_children_count >= activation_count:
-                referrer_node.binary_commission_activated = True
-                referrer_node.save(update_fields=['binary_commission_activated'])
-            
-            return True
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error processing direct user commission: {e}")
-            return False
+    commissions_paid = False
     
-    return False
+    # Process commission for each ancestor
+    # Use transaction to ensure atomicity and prevent race conditions
+    with transaction.atomic():
+        for ancestor_node in ancestors:
+            # Lock the row to prevent concurrent modifications
+            # This ensures we get the latest binary_commission_activated flag
+            locked_node = BinaryNode.objects.select_for_update().get(id=ancestor_node.id)
+            ancestor_user = locked_node.user
+            
+            # EXPLICIT CHECK: If binary commission is already activated, skip ALL commission processing
+            # Referral bonus (DIRECT_USER_COMMISSION) MUST STOP completely after activation
+            if locked_node.binary_commission_activated:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"Commission blocked for {ancestor_user.username}: "
+                    f"Binary commission already activated. Referral bonus stopped."
+                )
+                continue  # Skip this ancestor completely - no commission payment
+            
+            # Calculate total descendants (all levels, not just direct children)
+            total_descendants = get_total_descendants_count(locked_node)
+            
+            # Count before this user was added (since counts were updated when user was added)
+            count_before_addition = total_descendants - 1
+            
+            # Additional safeguard: If total_descendants already >= activation_count, skip payment
+            # This prevents any edge cases where flag might not be set yet
+            if total_descendants >= activation_count:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"Commission blocked for {ancestor_user.username}: "
+                    f"Total descendants ({total_descendants}) >= activation count ({activation_count}). "
+                    f"Referral bonus stopped."
+                )
+                continue  # Skip commission payment
+            
+            # Check if commission should be paid (before activation)
+            # IMPORTANT: Once binary commission is activated, no more direct user commissions are paid
+            # Only pairs will generate commission after activation
+            if count_before_addition < activation_count:
+                # Check if commission already paid for this user by this ancestor (prevent duplicates)
+                commission_already_paid = WalletTransaction.objects.filter(
+                    user=ancestor_user,
+                    transaction_type='DIRECT_USER_COMMISSION',
+                    reference_id=new_user.id,
+                    reference_type='user'
+                ).exists()
+                
+                if not commission_already_paid:
+                    # Final safety check: Re-check flag with locked node (already locked above)
+                    # This prevents race conditions when multiple users are processed simultaneously
+                    # Also re-check total descendants to ensure we haven't crossed threshold
+                    if locked_node.binary_commission_activated or total_descendants >= activation_count:
+                        # Binary commission already activated or threshold reached, skip payment
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.info(
+                            f"Commission blocked for {ancestor_user.username} (final check): "
+                            f"Activated={locked_node.binary_commission_activated}, "
+                            f"Total descendants={total_descendants}, Activation count={activation_count}"
+                        )
+                        continue
+                    
+                    # Calculate TDS (always applied on all direct user commissions)
+                    tds_amount = commission_amount * (tds_percentage / Decimal('100'))
+                    net_amount = commission_amount - tds_amount
+                    
+                    # Pay commission (net amount after TDS)
+                    try:
+                        add_wallet_balance(
+                            user=ancestor_user,
+                            amount=float(net_amount),
+                            transaction_type='DIRECT_USER_COMMISSION',
+                            description=f"User commission for {new_user.username} (₹{commission_amount} - ₹{tds_amount} TDS = ₹{net_amount})",
+                            reference_id=new_user.id,
+                            reference_type='user'
+                        )
+                        
+                        # Deduct TDS from booking balance
+                        deduct_from_booking_balance(
+                            user=ancestor_user,
+                            deduction_amount=tds_amount,
+                            deduction_type='TDS_DEDUCTION',
+                            description=f"TDS ({tds_percentage}%) on user commission for {new_user.username}"
+                        )
+                        
+                        commissions_paid = True
+                    except Exception as e:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(
+                            f"Error processing user commission for ancestor {ancestor_user.username} "
+                            f"for new user {new_user.username}: {e}"
+                        )
+            
+            # Check if this addition activates binary commission for this ancestor
+            # Activation based on total descendants (not just direct children)
+            if total_descendants >= activation_count and not locked_node.binary_commission_activated:
+                locked_node.binary_commission_activated = True
+                locked_node.save(update_fields=['binary_commission_activated'])
+    
+    return commissions_paid
 
 
 def deduct_from_booking_balance(user, deduction_amount, deduction_type='TDS_DEDUCTION', description=''):
@@ -181,24 +326,103 @@ def deduct_from_booking_balance(user, deduction_amount, deduction_type='TDS_DEDU
     return True
 
 
-def add_to_binary_tree(user, referrer, side):
+def handle_referral_based_placement(user, referring_user, referrer_node):
     """
-    Add user to binary tree under referrer
-    Processes direct user commission if applicable
+    Handle placement when user joins using a specific parent's referral code (Rule 3)
+    
+    If referring_user is a specific parent (not root):
+    - Check referrer's left child first (if available → place on LEFT)
+    - If left occupied, check right child (if available → place on RIGHT)
+    - If both occupied, continue with standard algorithm
+    
+    Args:
+        user: User to place
+        referring_user: User who issued the referral code used (may be specific parent)
+        referrer_node: BinaryNode of the referring_user
+    
+    Returns:
+        BinaryNode: Created node or None if placement fails
+    """
+    # Check which sides are available (not just count total children)
+    left_child_exists = BinaryNode.objects.filter(parent=referrer_node, side='left').exists()
+    right_child_exists = BinaryNode.objects.filter(parent=referrer_node, side='right').exists()
+    
+    # Rule 1: If left is empty → place on LEFT
+    if not left_child_exists:
+        return create_binary_node(user, parent=referrer_node, side='left')
+    
+    # Rule 2: If right is empty → place on RIGHT
+    elif not right_child_exists:
+        return create_binary_node(user, parent=referrer_node, side='right')
+    
+    # Rule 3: Both slots full → Continue with standard algorithm
+    # This will be handled by the main placement logic
+    return None
+
+
+def add_to_binary_tree(user, referrer, side=None, referring_user=None):
+    """
+    Add user to binary tree under referrer with smart placement
+    
+    Placement rules:
+    1. First 2 users: LEFT then RIGHT
+    2. From 3rd onward: Follow left-chain (or configured default side)
+    3. Referral override: If using specific parent's code, place in that parent's tree
+    
+    Args:
+        user: User to place
+        referrer: User who owns the tree (root referrer)
+        side: Optional explicit side ('left' or 'right') - if provided, used directly
+        referring_user: User who issued the referral code used (for referral-based placement)
+    
+    Returns:
+        BinaryNode: Created node or None if placement fails
     """
     if not referrer:
         return None
     
     referrer_node, _ = BinaryNode.objects.get_or_create(user=referrer)
     
-    # Check if side is available
-    if side == 'left' and referrer_node.left_count == 0:
-        node = create_binary_node(user, parent=referrer_node, side='left')
-    elif side == 'right' and referrer_node.right_count == 0:
-        node = create_binary_node(user, parent=referrer_node, side='right')
-    else:
-        # Find next available position in the tree
-        node = find_next_available_position(user, referrer_node)
+    # If explicit side is provided, use it (user-controlled positioning)
+    if side and side in ['left', 'right']:
+        # Check database directly (not cached count) to avoid race conditions
+        existing_on_side = BinaryNode.objects.filter(parent=referrer_node, side=side).exists()
+        if not existing_on_side:
+            try:
+                return create_binary_node(user, parent=referrer_node, side=side)
+            except Exception as e:
+                # Handle UniqueConstraint violation (race condition)
+                # If constraint violation, the side was occupied by another request
+                # Fall through to automatic placement
+                from django.db import IntegrityError
+                if isinstance(e, IntegrityError) or 'unique_parent_side' in str(e):
+                    pass  # Continue with automatic placement
+                else:
+                    raise
+        # Side requested but not available, continue with automatic placement
+    
+    # Rule 3: Referral-based placement (specific parent referral)
+    if referring_user and referring_user != referrer:
+        # Check if referring_user is in referrer's tree
+        try:
+            referring_node = BinaryNode.objects.get(user=referring_user)
+            # Check if referring_node is in referrer's tree
+            if is_node_in_tree(referring_node, referrer):
+                # Try referral-based placement in referring_user's tree
+                referral_node = handle_referral_based_placement(user, referring_user, referring_node)
+                if referral_node:
+                    return referral_node
+                # Both slots full, continue with standard placement from root
+        except BinaryNode.DoesNotExist:
+            pass  # referring_user doesn't have a node, continue with standard placement
+    
+    # Standard placement: Use left-priority algorithm with settings preference
+    # Get default placement side from settings
+    platform_settings = PlatformSettings.get_settings()
+    preferred_side = platform_settings.binary_tree_default_placement_side or 'left'
+    
+    # Use the side-priority algorithm
+    node = find_next_available_position_by_side(user, referrer_node, preferred_side)
     
     # Note: Direct user commission is now paid only when payment is confirmed
     # See payment_completed task in core.booking.tasks
@@ -208,28 +432,63 @@ def add_to_binary_tree(user, referrer, side):
 
 def find_next_available_position(user, start_node):
     """
-    Find next available position in binary tree (level-order insertion)
+    Find next available position using left-priority algorithm (legacy function)
+    This function is kept for backward compatibility but calls the new algorithm
     """
-    from collections import deque
+    # Get default placement side from settings
+    platform_settings = PlatformSettings.get_settings()
+    preferred_side = platform_settings.binary_tree_default_placement_side or 'left'
+    return find_next_available_position_by_side(user, start_node, preferred_side)
+
+
+def find_next_available_position_by_side(user, start_node, preferred_side='left'):
+    """
+    Find next available position in binary tree using side-priority algorithm
     
-    queue = deque([start_node])
+    Rules:
+    1. First user → preferred_side (default: LEFT)
+    2. Second user → opposite_side (default: RIGHT)
+    3. From 3rd onward → Follow preferred_side chain (default: left chain)
     
-    while queue:
-        current = queue.popleft()
+    Args:
+        user: User to place
+        start_node: BinaryNode to start placement from
+        preferred_side: 'left' or 'right' (default: 'left')
+    
+    Returns:
+        BinaryNode: Created node or None if placement fails
+    """
+    # Check which sides are actually available (not just count total children)
+    left_child_exists = BinaryNode.objects.filter(parent=start_node, side='left').exists()
+    right_child_exists = BinaryNode.objects.filter(parent=start_node, side='right').exists()
+    
+    # Rule 1: If preferred_side is empty → place on preferred_side
+    if preferred_side == 'left' and not left_child_exists:
+        return create_binary_node(user, parent=start_node, side='left')
+    elif preferred_side == 'right' and not right_child_exists:
+        return create_binary_node(user, parent=start_node, side='right')
+    
+    # Rule 2: If opposite_side is empty → place on opposite_side
+    opposite_side = 'right' if preferred_side == 'left' else 'left'
+    if opposite_side == 'left' and not left_child_exists:
+        return create_binary_node(user, parent=start_node, side='left')
+    elif opposite_side == 'right' and not right_child_exists:
+        return create_binary_node(user, parent=start_node, side='right')
+    
+    # Rule 3: Both slots full → Follow preferred_side chain
+    current = start_node
+    while current:
+        child_on_side = BinaryNode.objects.filter(
+            parent=current,
+            side=preferred_side
+        ).first()
         
-        # Check left child
-        left_child = BinaryNode.objects.filter(parent=current, side='left').first()
-        if not left_child:
-            return create_binary_node(user, parent=current, side='left')
+        if not child_on_side:
+            # Found available position
+            return create_binary_node(user, parent=current, side=preferred_side)
         
-        # Check right child
-        right_child = BinaryNode.objects.filter(parent=current, side='right').first()
-        if not right_child:
-            return create_binary_node(user, parent=current, side='right')
-        
-        # Add children to queue
-        queue.append(left_child)
-        queue.append(right_child)
+        # Continue down the chain
+        current = child_on_side
     
     return None
 
@@ -277,23 +536,41 @@ def get_daily_pairs_count(user, date=None):
 def get_remaining_unmatched_counts(node, pairs_today):
     """
     Calculate remaining unmatched members on each side after pairs used today
+    Uses actual BinaryPair records to count matched users
     
     Args:
         node: BinaryNode to calculate for
-        pairs_today: Number of pairs created today
+        pairs_today: Number of pairs created today (for reference, but we use actual data)
     
     Returns:
         tuple: (left_remaining, right_remaining)
     """
-    # Calculate how many members used from each side
-    # For simplicity, assume equal distribution (10 pairs = 10 from left + 10 from right)
-    # In practice, pairs are matched 1:1 from left and right
-    members_used_per_side = pairs_today
+    # Get all pairs created today for this user
+    today = timezone.now().date()
+    pairs_today_list = BinaryPair.objects.filter(
+        user=node.user,
+        pair_number_after_activation__isnull=False,
+        pair_date=today
+    )
     
-    left_remaining = max(0, node.left_count - members_used_per_side)
-    right_remaining = max(0, node.right_count - members_used_per_side)
+    # Count actual users matched from each side today
+    left_users_matched = set()
+    right_users_matched = set()
+    for pair in pairs_today_list:
+        if pair.left_user:
+            left_users_matched.add(pair.left_user.id)
+        if pair.right_user:
+            right_users_matched.add(pair.right_user.id)
     
-    return left_remaining, right_remaining
+    # Get all descendant nodes on each side
+    left_descendants = get_all_descendant_nodes(node, 'left')
+    right_descendants = get_all_descendant_nodes(node, 'right')
+    
+    # Count unmatched on each side (users not in matched sets)
+    left_unmatched_count = len([n for n in left_descendants if n.user.id not in left_users_matched])
+    right_unmatched_count = len([n for n in right_descendants if n.user.id not in right_users_matched])
+    
+    return left_unmatched_count, right_unmatched_count
 
 
 def get_long_short_legs(left_remaining, right_remaining):
@@ -342,6 +619,73 @@ def get_active_carry_forward(user, short_side, date=None):
     ).order_by('carried_forward_date', 'created_at').first()
 
 
+def get_all_descendant_nodes(node, side):
+    """
+    Get all descendant BinaryNode objects on a specific side recursively
+    
+    Args:
+        node: BinaryNode to start from
+        side: 'left' or 'right'
+    
+    Returns:
+        list: List of all descendant BinaryNode objects on the specified side
+    """
+    descendants = []
+    # Get direct children on this side
+    direct_children = BinaryNode.objects.filter(parent=node, side=side).select_related('user')
+    descendants.extend(direct_children)
+    
+    # Recursively get descendants of each direct child
+    for child in direct_children:
+        descendants.extend(get_all_descendant_nodes(child, 'left'))
+        descendants.extend(get_all_descendant_nodes(child, 'right'))
+    
+    return descendants
+
+
+def get_unmatched_users_for_pairing(node):
+    """
+    Get one unmatched user from left side and one from right side
+    STRICT RULE: Pair = 1 left-leg member + 1 right-leg member
+    Two members on same leg (LL or RR) → NOT a pair
+    
+    Uses BinaryPair records to determine which users are already matched
+    
+    Args:
+        node: BinaryNode to get unmatched users for
+    
+    Returns:
+        tuple: (left_node, right_node) or (None, None) if no pair possible
+    """
+    # 1. Get all BinaryPair records for this node's user
+    pairs = BinaryPair.objects.filter(user=node.user)
+    
+    # 2. Extract all left_user and right_user IDs that have been matched
+    matched_user_ids = set()
+    for pair in pairs:
+        if pair.left_user:
+            matched_user_ids.add(pair.left_user.id)
+        if pair.right_user:
+            matched_user_ids.add(pair.right_user.id)
+    
+    # 3. Get all descendant nodes on LEFT side (where side='left' relative to this node)
+    left_descendants = get_all_descendant_nodes(node, 'left')
+    
+    # 4. Get all descendant nodes on RIGHT side (where side='right' relative to this node)
+    right_descendants = get_all_descendant_nodes(node, 'right')
+    
+    # 5. Filter out nodes whose users are already in matched users list
+    left_unmatched = [n for n in left_descendants if n.user.id not in matched_user_ids]
+    right_unmatched = [n for n in right_descendants if n.user.id not in matched_user_ids]
+    
+    # 6. Return first unmatched node from LEFT and first unmatched node from RIGHT
+    # 7. If either side has no unmatched users, return (None, None)
+    left_node = left_unmatched[0] if left_unmatched else None
+    right_node = right_unmatched[0] if right_unmatched else None
+    
+    return (left_node, right_node)
+
+
 def carry_forward_long_leg(user, date, long_side, long_count):
     """
     Create carry-forward record for long leg members
@@ -382,10 +726,12 @@ def check_and_create_pair(user):
         return None
     
     # Check if binary commission is activated
+    # STRICT RULE: Pair matching is BLOCKED before activation
     if not node.binary_commission_activated:
         return None
     
     # Check if we have both left and right
+    # STRICT RULE: Pair = 1 left-leg member + 1 right-leg member (must have both)
     if node.left_count == 0 or node.right_count == 0:
         return None
     
@@ -465,6 +811,17 @@ def check_and_create_pair(user):
         if pair_number_after_activation > tds_threshold:
             extra_deduction = commission_amount * (extra_deduction_percentage / Decimal('100'))
             net_amount = net_amount - extra_deduction
+    
+    # Get unmatched users for pairing
+    # STRICT RULE: Must have one from left AND one from right (no same-leg pairing)
+    # get_unmatched_users_for_pairing ensures left_node is from left subtree and right_node is from right subtree
+    left_node, right_node = get_unmatched_users_for_pairing(node)
+    
+    # Strict validation: If either is None, no pair possible - must have BOTH left AND right
+    # This enforces the rule: Pair = 1 left-leg member + 1 right-leg member
+    # Two members on same leg (LL or RR) → NOT a pair
+    if left_node is None or right_node is None:
+        return None
     
     # Create binary pair
     with transaction.atomic():

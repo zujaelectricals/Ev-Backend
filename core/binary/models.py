@@ -31,6 +31,13 @@ class BinaryNode(models.Model):
         db_table = 'binary_nodes'
         verbose_name = 'Binary Node'
         verbose_name_plural = 'Binary Nodes'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['parent', 'side'],
+                condition=models.Q(parent__isnull=False),
+                name='unique_parent_side'
+            )
+        ]
     
     def __str__(self):
         return f"Binary Node - {self.user.username} ({self.side})"

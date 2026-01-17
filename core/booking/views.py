@@ -8,7 +8,6 @@ from django.utils import timezone
 from decimal import Decimal
 from core.users.models import User
 from core.inventory.utils import create_reservation
-from core.binary.utils import add_to_binary_tree
 from .models import Booking, Payment
 from .serializers import BookingSerializer, PaymentSerializer
 
@@ -69,35 +68,9 @@ class BookingViewSet(viewsets.ModelViewSet):
             self.request.user.referred_by = referring_user
             self.request.user.save(update_fields=['referred_by'])
         
-        # Add user to binary tree of referrer when booking is created with referral code
-        # Skip automatic placement if manual_placement flag is set
-        if referring_user and not manual_placement:
-            # Add user to binary tree - only if they don't already have a node
-            try:
-                from core.binary.models import BinaryNode
-                # Check if user already has a binary node (avoid duplicates)
-                if not BinaryNode.objects.filter(user=self.request.user).exists():
-                    # Determine preferred side: prefer left if available, otherwise right
-                    # The add_to_binary_tree function will handle automatic placement
-                    referrer_node, _ = BinaryNode.objects.get_or_create(user=referring_user)
-                    preferred_side = None
-                    # Prefer left side if available, otherwise right
-                    if referrer_node.left_count == 0:
-                        preferred_side = 'left'
-                    elif referrer_node.right_count == 0:
-                        preferred_side = 'right'
-                    # If both sides have children, add_to_binary_tree will find next available position
-                    
-                    binary_node = add_to_binary_tree(
-                        user=self.request.user,
-                        referrer=referring_user,
-                        side=preferred_side
-                    )
-            except Exception as e:
-                # Log error but don't fail the booking creation
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(f"Failed to add user {self.request.user.id} to binary tree of referrer {referring_user.id}: {str(e)}")
+        # Note: Binary tree placement is NOT automatic during booking creation
+        # Users must be placed manually via /api/binary/nodes/place_user/ 
+        # or automatically via /api/binary/nodes/auto_place_pending/
         
         # Create stock reservation for the booking
         try:
