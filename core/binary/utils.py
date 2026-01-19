@@ -41,6 +41,13 @@ def create_binary_node(user, parent=None, side=None):
         # Update direct_children_count for parent (only direct children, not all descendants)
         parent.direct_children_count = BinaryNode.objects.filter(parent=parent).count()
         parent.save(update_fields=['direct_children_count'])
+        
+        # Update counts for all ancestors recursively
+        # This ensures ancestor counts are accurate for activation checks
+        current = parent.parent
+        while current:
+            current.update_counts()
+            current = current.parent
     
     return node
 
@@ -68,7 +75,8 @@ def get_all_ancestors(user_node):
 
 def get_total_descendants_count(node):
     """
-    Get total descendants count for a node (left_count + right_count)
+    Get total descendants count for a node (recursively calculated, not from stored counts)
+    This ensures accurate counts even if stored left_count/right_count are stale
     
     Args:
         node: BinaryNode to get count for
@@ -76,7 +84,11 @@ def get_total_descendants_count(node):
     Returns:
         int: Total number of descendants (all levels) in the tree
     """
-    return node.left_count + node.right_count
+    # Use the recursive method from the model to get accurate counts
+    # This counts all descendants, not just direct children
+    left_count = node.get_all_descendants_count('left')
+    right_count = node.get_all_descendants_count('right')
+    return left_count + right_count
 
 
 def has_successful_payment(user):
@@ -160,27 +172,22 @@ def process_direct_user_commission(referrer, new_user):
                 )
                 continue  # Skip this ancestor completely - no commission payment
             
-            # Calculate total descendants (all levels, not just direct children)
+            # Calculate total descendants using recursive counting FIRST (before updating stored counts)
+            # This gives us the accurate count including the new user that was just added
             total_descendants = get_total_descendants_count(locked_node)
             
-            # Count before this user was added (since counts were updated when user was added)
+            # Count before this user was added (subtract 1 because new_user is already in the tree)
             count_before_addition = total_descendants - 1
             
-            # Additional safeguard: If total_descendants already >= activation_count, skip payment
-            # This prevents any edge cases where flag might not be set yet
-            if total_descendants >= activation_count:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.info(
-                    f"Commission blocked for {ancestor_user.username}: "
-                    f"Total descendants ({total_descendants}) >= activation count ({activation_count}). "
-                    f"Referral bonus stopped."
-                )
-                continue  # Skip commission payment
+            # Update stored counts AFTER calculation to keep them in sync for future operations
+            # This is important when users are added deep in the tree
+            locked_node.update_counts()
+            locked_node.refresh_from_db()
             
             # Check if commission should be paid (before activation)
             # IMPORTANT: Once binary commission is activated, no more direct user commissions are paid
             # Only pairs will generate commission after activation
+            # Commission is paid if count_before_addition < activation_count (i.e., before reaching 3)
             if count_before_addition < activation_count:
                 # Check if commission already paid for this user by this ancestor (prevent duplicates)
                 commission_already_paid = WalletTransaction.objects.filter(
@@ -193,15 +200,16 @@ def process_direct_user_commission(referrer, new_user):
                 if not commission_already_paid:
                     # Final safety check: Re-check flag with locked node (already locked above)
                     # This prevents race conditions when multiple users are processed simultaneously
-                    # Also re-check total descendants to ensure we haven't crossed threshold
-                    if locked_node.binary_commission_activated or total_descendants >= activation_count:
-                        # Binary commission already activated or threshold reached, skip payment
+                    # IMPORTANT: We allow payment if count_before_addition < activation_count
+                    # This means the 3rd user (count_before_addition=2, total_descendants=3) will get commission
+                    # Activation happens AFTER payment in the code below
+                    if locked_node.binary_commission_activated:
+                        # Binary commission already activated, skip payment
                         import logging
                         logger = logging.getLogger(__name__)
                         logger.info(
                             f"Commission blocked for {ancestor_user.username} (final check): "
-                            f"Activated={locked_node.binary_commission_activated}, "
-                            f"Total descendants={total_descendants}, Activation count={activation_count}"
+                            f"Binary commission already activated"
                         )
                         continue
                     
@@ -241,20 +249,23 @@ def process_direct_user_commission(referrer, new_user):
             # Activation based on total descendants (not just direct children)
             if total_descendants >= activation_count and not locked_node.binary_commission_activated:
                 locked_node.binary_commission_activated = True
-                locked_node.save(update_fields=['binary_commission_activated'])
+                # Use new_user_node's created_at to ensure the 3rd member (D) is included in pairing
+                # This ensures D.created_at == activation_timestamp, so D is included with >= comparison
+                locked_node.activation_timestamp = new_user_node.created_at
+                locked_node.save(update_fields=['binary_commission_activated', 'activation_timestamp'])
     
     return commissions_paid
 
 
-def deduct_from_booking_balance(user, deduction_amount, deduction_type='TDS_DEDUCTION', description=''):
+def deduct_from_booking_balance(user, deduction_amount, deduction_type='EXTRA_DEDUCTION', description=''):
     """
     Deduct amount from user's oldest active booking with remaining amount
-    Handles both TDS and extra deduction for 6th+ pairs
+    Only used for EXTRA_DEDUCTION (6th+ pairs) - TDS is NOT deducted from booking balance
     
     Args:
         user: User whose payment should be deducted
         deduction_amount: Amount to deduct (Decimal)
-        deduction_type: 'TDS_DEDUCTION' or 'EXTRA_DEDUCTION'
+        deduction_type: 'EXTRA_DEDUCTION' (TDS_DEDUCTION is no longer used for binary pairs)
         description: Description for transaction
     
     Returns:
@@ -498,17 +509,22 @@ def get_binary_pairs_after_activation_count(user):
     Count total binary pair commissions earned after binary commission activation
     Only counts pairs that were actually paid (not blocked)
     
+    IMPORTANT: Counts pairs with status 'matched' OR 'processed' to prevent race conditions.
+    Pairs are created with status 'matched' and later updated to 'processed' by Celery task.
+    If we only count 'processed', pairs still in 'matched' status won't be counted, allowing
+    more pairs to be created than allowed.
+    
     Args:
         user: User to count pairs for
     
     Returns:
-        int: Number of binary pairs that were paid after activation
+        int: Number of binary pairs that were paid (or will be paid) after activation
     """
     return BinaryPair.objects.filter(
         user=user,
         pair_number_after_activation__isnull=False,
         commission_blocked=False,
-        status='processed'  # Only count pairs that were processed (paid)
+        status__in=['matched', 'processed']  # Count both matched and processed pairs to prevent race conditions
     ).count()
 
 
@@ -612,10 +628,13 @@ def get_active_carry_forward(user, short_side, date=None):
     # Get active carry-forward where opposite side was carried forward
     # If short_side is 'left', we need carry-forward from 'right' (long leg)
     # If short_side is 'right', we need carry-forward from 'left' (long leg)
+    # Note: remaining_count is a property, so we filter by actual fields: initial_member_count > matched_count
+    from django.db.models import F
     return BinaryCarryForward.objects.filter(
         user=user,
-        is_active=True,
-        remaining_count__gt=0
+        is_active=True
+    ).filter(
+        initial_member_count__gt=F('matched_count')
     ).order_by('carried_forward_date', 'created_at').first()
 
 
@@ -651,12 +670,27 @@ def get_unmatched_users_for_pairing(node):
     
     Uses BinaryPair records to determine which users are already matched
     
+    IMPORTANT: Only includes members created at or after activation (excludes pre-activation members)
+    - Members created before activation (1st and 2nd) are excluded
+    - Member that triggered activation (3rd) is included
+    - Members created after activation are included
+    
     Args:
         node: BinaryNode to get unmatched users for
     
     Returns:
         tuple: (left_node, right_node) or (None, None) if no pair possible
     """
+    # Check if binary commission is activated
+    if not node.binary_commission_activated:
+        return (None, None)
+    
+    # Get activation timestamp
+    activation_time = node.activation_timestamp
+    if not activation_time:
+        # If no activation timestamp, return None (shouldn't happen if activated)
+        return (None, None)
+    
     # 1. Get all BinaryPair records for this node's user
     pairs = BinaryPair.objects.filter(user=node.user)
     
@@ -674,14 +708,22 @@ def get_unmatched_users_for_pairing(node):
     # 4. Get all descendant nodes on RIGHT side (where side='right' relative to this node)
     right_descendants = get_all_descendant_nodes(node, 'right')
     
-    # 5. Filter out nodes whose users are already in matched users list
-    left_unmatched = [n for n in left_descendants if n.user.id not in matched_user_ids]
-    right_unmatched = [n for n in right_descendants if n.user.id not in matched_user_ids]
+    # 5. Filter: Only include nodes created at or after activation
+    # Exclude nodes that existed before activation (B, C in the example)
+    # Include D (3rd member that triggered activation) and all subsequent members
+    left_post_activation = [
+        n for n in left_descendants 
+        if n.created_at >= activation_time and n.user.id not in matched_user_ids
+    ]
+    right_post_activation = [
+        n for n in right_descendants 
+        if n.created_at >= activation_time and n.user.id not in matched_user_ids
+    ]
     
     # 6. Return first unmatched node from LEFT and first unmatched node from RIGHT
     # 7. If either side has no unmatched users, return (None, None)
-    left_node = left_unmatched[0] if left_unmatched else None
-    right_node = right_unmatched[0] if right_unmatched else None
+    left_node = left_post_activation[0] if left_post_activation else None
+    right_node = right_post_activation[0] if right_post_activation else None
     
     return (left_node, right_node)
 
@@ -725,18 +767,45 @@ def check_and_create_pair(user):
     except BinaryNode.DoesNotExist:
         return None
     
+    # Get settings
+    platform_settings = PlatformSettings.get_settings()
+    activation_count = platform_settings.binary_commission_activation_count
+    
+    # Update stored counts first to ensure accuracy
+    node.update_counts()
+    node.refresh_from_db()
+    
+    # Calculate total descendants using recursive counting
+    total_descendants = get_total_descendants_count(node)
+    
+    # Retroactive activation: If user has 3+ descendants but isn't activated, activate now
+    # This handles cases where activation didn't trigger when users were added (e.g., before recursive counting fix)
+    if total_descendants >= activation_count and not node.binary_commission_activated:
+        # Find the 3rd member (the one that should have triggered activation)
+        # Get all descendants sorted by creation date
+        all_descendants = []
+        all_descendants.extend(get_all_descendant_nodes(node, 'left'))
+        all_descendants.extend(get_all_descendant_nodes(node, 'right'))
+        all_descendants.sort(key=lambda n: n.created_at)
+        
+        # The 3rd member (index 2) should be the activation trigger
+        if len(all_descendants) >= activation_count:
+            third_member_node = all_descendants[activation_count - 1]  # Index 2 for 3rd member
+            node.binary_commission_activated = True
+            node.activation_timestamp = third_member_node.created_at
+            node.save(update_fields=['binary_commission_activated', 'activation_timestamp'])
+    
     # Check if binary commission is activated
     # STRICT RULE: Pair matching is BLOCKED before activation
     if not node.binary_commission_activated:
         return None
     
-    # Check if we have both left and right
+    # Check if we have both left and right using recursive counting (not stored counts)
     # STRICT RULE: Pair = 1 left-leg member + 1 right-leg member (must have both)
-    if node.left_count == 0 or node.right_count == 0:
+    left_count = node.get_all_descendants_count('left')
+    right_count = node.get_all_descendants_count('right')
+    if left_count == 0 or right_count == 0:
         return None
-    
-    # Get settings
-    platform_settings = PlatformSettings.get_settings()
     commission_amount = platform_settings.binary_pair_commission_amount
     tds_threshold = platform_settings.binary_tds_threshold_pairs
     tds_percentage = platform_settings.binary_commission_tds_percentage
@@ -866,18 +935,11 @@ def check_and_create_pair(user):
             net_amount=net_amount if not commission_blocked else Decimal('0')  # Net amount after TDS and extra deduction (0 if blocked)
         )
         
-        # Only deduct TDS and extra deduction if commission is not blocked
+        # Only deduct extra deduction from booking balance if commission is not blocked
+        # TDS is NOT deducted from booking balance - it only reduces the net amount credited to wallet
+        # Only extra deductions (for 6th+ pairs) are deducted from booking balance
         if not commission_blocked:
-            # Deduct TDS from booking balance (always applied on all pairs)
-            if tds_amount > 0:
-                deduct_from_booking_balance(
-                    user=user,
-                    deduction_amount=tds_amount,
-                    deduction_type='TDS_DEDUCTION',
-                    description=f"TDS ({tds_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})"
-                )
-            
-            # Deduct extra amount from booking balance (for 6th+ pairs)
+            # Deduct extra amount from booking balance (for 6th+ pairs only)
             if extra_deduction > 0:
                 deduct_from_booking_balance(
                     user=user,
@@ -887,8 +949,13 @@ def check_and_create_pair(user):
                 )
             
             # Trigger wallet update via Celery (will credit net amount)
+            # Use on_commit to ensure task is queued only after transaction commits
+            # This prevents "pair not found" errors if transaction rolls back
             from core.binary.tasks import pair_matched
-            pair_matched.delay(pair.id)
+            from django.db import transaction as db_transaction
+            
+            # Queue task after transaction commits to ensure pair exists in database
+            db_transaction.on_commit(lambda: pair_matched.delay(pair.id))
         else:
             # Log that commission was blocked
             import logging

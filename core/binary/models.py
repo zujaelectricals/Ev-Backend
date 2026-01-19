@@ -22,6 +22,11 @@ class BinaryNode(models.Model):
     
     # Binary Commission Tracking
     binary_commission_activated = models.BooleanField(default=False)  # Track if binary commission is activated
+    activation_timestamp = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when binary commission was activated for this user"
+    )
     direct_children_count = models.IntegerField(default=0)  # Count of direct children (left + right)
     
     created_at = models.DateTimeField(auto_now_add=True)

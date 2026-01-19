@@ -40,7 +40,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     total_amount = serializers.SerializerMethodField()
     tds_current = serializers.SerializerMethodField()
     net_amount_total = serializers.SerializerMethodField()
-    binary_commission_activated = serializers.BooleanField(source='binary_commission_activated', read_only=True)
+    binary_commission_activated = serializers.BooleanField(read_only=True)
+    activation_timestamp = serializers.DateTimeField(read_only=True)
     left_child = serializers.SerializerMethodField()
     right_child = serializers.SerializerMethodField()
     left_side_members = serializers.SerializerMethodField()
@@ -55,7 +56,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             'wallet_balance', 'total_bookings', 'total_binary_pairs', 'total_earnings',
             'total_referrals', 'total_amount', 'tds_current', 'net_amount_total',
             'parent', 'side', 'level', 'left_count', 'right_count',
-            'binary_commission_activated', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
+            'binary_commission_activated', 'activation_timestamp', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
             'created_at', 'updated_at'
         ]
         read_only_fields = ('user', 'created_at', 'updated_at')
@@ -147,27 +148,27 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 total=Sum('amount')
             )['total'] or Decimal('0')
             
-            # Sum direct user commissions (these are net amounts, need to calculate gross)
-            # Direct user commissions are stored as net amounts after TDS
-            direct_commissions = WalletTransaction.objects.filter(
+            # Sum direct user commissions (net amounts)
+            direct_commissions_net = WalletTransaction.objects.filter(
                 user=obj.user,
                 transaction_type='DIRECT_USER_COMMISSION'
             ).aggregate(
                 total=Sum('amount')
             )['total'] or Decimal('0')
             
-            # Direct user commissions in wallet are net amounts (after TDS)
-            # To get gross, we need to reverse calculate: net / (1 - tds_percentage)
-            from core.settings.models import PlatformSettings
-            platform_settings = PlatformSettings.get_settings()
-            tds_percentage = platform_settings.binary_commission_tds_percentage / Decimal('100')
+            # Sum TDS deducted for direct user commissions only
+            # Filter by description to exclude binary pair commission TDS
+            # TDS_DEDUCTION amounts are negative, so we get absolute value
+            tds_for_direct_commissions = WalletTransaction.objects.filter(
+                user=obj.user,
+                transaction_type='TDS_DEDUCTION',
+                description__icontains='on user commission'  # Distinguishes from binary pair TDS
+            ).aggregate(
+                total=Sum('amount')
+            )['total'] or Decimal('0')
             
-            # Calculate gross amount from net: net = gross * (1 - tds_percentage)
-            # So: gross = net / (1 - tds_percentage)
-            if direct_commissions > 0 and tds_percentage < 1:
-                direct_commissions_gross = direct_commissions / (Decimal('1') - tds_percentage)
-            else:
-                direct_commissions_gross = direct_commissions
+            # Calculate gross: net + TDS (TDS is negative, so we subtract it)
+            direct_commissions_gross = direct_commissions_net - tds_for_direct_commissions
             
             total = binary_total + direct_commissions_gross
             return str(total)
@@ -359,7 +360,6 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         """Helper method to get total amount (gross) from all binary earnings and direct user commissions"""
         if user:
             from core.wallet.models import WalletTransaction
-            from core.settings.models import PlatformSettings
             from decimal import Decimal
             
             # Sum binary pair earnings (gross amount)
@@ -367,22 +367,25 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 total=Sum('amount')
             )['total'] or Decimal('0')
             
-            # Sum direct user commissions (net amounts, need to calculate gross)
-            direct_commissions = WalletTransaction.objects.filter(
+            # Sum direct user commissions (net amounts)
+            direct_commissions_net = WalletTransaction.objects.filter(
                 user=user,
                 transaction_type='DIRECT_USER_COMMISSION'
             ).aggregate(
                 total=Sum('amount')
             )['total'] or Decimal('0')
             
-            # Calculate gross from net
-            platform_settings = PlatformSettings.get_settings()
-            tds_percentage = platform_settings.binary_commission_tds_percentage / Decimal('100')
+            # Sum TDS deducted for direct user commissions only
+            tds_for_direct_commissions = WalletTransaction.objects.filter(
+                user=user,
+                transaction_type='TDS_DEDUCTION',
+                description__icontains='on user commission'
+            ).aggregate(
+                total=Sum('amount')
+            )['total'] or Decimal('0')
             
-            if direct_commissions > 0 and tds_percentage < 1:
-                direct_commissions_gross = direct_commissions / (Decimal('1') - tds_percentage)
-            else:
-                direct_commissions_gross = direct_commissions
+            # Calculate gross: net + TDS (TDS is negative, so we subtract it)
+            direct_commissions_gross = direct_commissions_net - tds_for_direct_commissions
             
             total = binary_total + direct_commissions_gross
             return str(total)
@@ -425,14 +428,23 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         return "0.00"
     
     def _get_net_amount_total(self, user):
-        """Helper method to get total net amount from all binary earnings and direct user commissions"""
+        """
+        Helper method to get total net amount from all binary earnings and direct user commissions
+        IMPORTANT: Only counts pairs that have been successfully processed (credited to wallet)
+        This ensures total_earnings matches wallet_balance by only counting amounts that were
+        actually credited to the wallet via WalletTransaction records.
+        """
         if user:
             from core.wallet.models import WalletTransaction
             from decimal import Decimal
             
-            # Sum binary pair net amounts
-            binary_net = BinaryEarning.objects.filter(user=user).aggregate(
-                total=Sum('net_amount')
+            # Sum binary pair commissions from wallet transactions (only successfully processed pairs)
+            # This ensures we only count pairs that were actually credited to wallet
+            binary_net = WalletTransaction.objects.filter(
+                user=user,
+                transaction_type='BINARY_PAIR_COMMISSION'
+            ).aggregate(
+                total=Sum('amount')
             )['total'] or Decimal('0')
             
             # Sum direct user commissions (these are already net amounts after TDS)

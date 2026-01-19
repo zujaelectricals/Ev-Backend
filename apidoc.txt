@@ -2550,6 +2550,7 @@ Super User: EVAdmin && EVAdmin@123
       "left_count": 5,
       "right_count": 3,
       "binary_commission_activated": true,  // Whether binary commission is activated
+      "activation_timestamp": "2026-01-06T12:00:00Z",  // Timestamp when binary commission was activated
       "direct_children_count": 3,  // Count of direct children (left + right)
       "created_at": "2026-01-06T12:00:00Z"
     }
@@ -2560,9 +2561,11 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Notes:
-    - binary_commission_activated: True if user has reached the activation threshold (default: 3 direct children)
+    - binary_commission_activated: True if user has reached the activation threshold (default: 3 total descendants)
+    - activation_timestamp: Timestamp when binary commission was activated (used to determine pairing eligibility)
     - direct_children_count: Number of direct children (nodes where parent = this node)
-    - Binary commission activates when direct_children_count >= activation_count (configurable via settings)
+    - Binary commission activates when total descendants >= activation_count (configurable via settings)
+    - Pair Matching Eligibility: Only members created at or after activation_timestamp are eligible for pairing
 
 
 49. LIST BINARY NODES
@@ -2616,7 +2619,14 @@ Super User: EVAdmin && EVAdmin@123
     
     Notes:
     - Maximum 10 pairs per DAY per user (configurable daily limit)
-    - Binary commission must be activated (user must have 3+ direct children)
+    - Binary commission must be activated (user must have 3+ total descendants)
+    - Pair Matching Eligibility: Only members created at or after activation are eligible for pairing
+      * Pre-activation members (1st and 2nd members) are EXCLUDED from pairing
+      * Member that triggered activation (3rd member) is INCLUDED in pairing
+      * All members added after activation are INCLUDED in pairing
+      * Example: If User A has B (1st), C (2nd), D (3rd - triggers activation), E (4th):
+        - B and C are excluded from pairing
+        - D and E can be paired (not B and C)
     - Commission amount is configurable via Platform Settings (default: ₹2000)
     - 20% TDS is applied on ALL pair commissions (1st pair onwards, configurable percentage)
     - Extra 20% deduction applies from 6th pair onwards (configurable threshold and percentage)
@@ -2667,6 +2677,8 @@ Super User: EVAdmin && EVAdmin@123
     - extra_deduction_applied: Amount of extra deduction applied (for 6th+ pairs)
     - 20% TDS is applied on ALL pair commissions (1st pair onwards)
     - Extra 20% deduction applies from 6th pair onwards (configurable threshold)
+    - Pair Matching Eligibility: Only members created at or after activation are eligible for pairing
+      * Pre-activation members (1st and 2nd) are excluded, 3rd member (activation trigger) and all subsequent members are included
 
 
 52. LIST BINARY EARNINGS
@@ -2693,7 +2705,11 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Business Rules:
-    - Binary commission only activates after user has 3 direct children (configurable threshold)
+    - Binary commission only activates after user has 3 total descendants (configurable threshold)
+    - Pair Matching Eligibility: Only members created at or after activation are eligible for pairing
+      * Pre-activation members (1st and 2nd members) are EXCLUDED from pairing
+      * Member that triggered activation (3rd member) is INCLUDED in pairing
+      * All members added after activation are INCLUDED in pairing
     - Commission amount is configurable via Platform Settings (default: ₹2000 per pair)
     - 20% TDS is applied on ALL binary pair commissions (1st pair onwards, configurable percentage)
     - Extra 20% deduction applies from 6th pair onwards (configurable threshold, default: 5 pairs)
@@ -2740,6 +2756,8 @@ Super User: EVAdmin && EVAdmin@123
       "level": 0,
       "left_count": 5,
       "right_count": 3,
+      "binary_commission_activated": true,
+      "activation_timestamp": "2026-01-06T12:00:00Z",
       "left_side_members": [
         {
           "id": 2,
@@ -3101,8 +3119,11 @@ Super User: EVAdmin && EVAdmin@123
       * Financial: wallet_balance, total_earnings
       * Activity: total_bookings, total_binary_pairs
       * Tree Position: parent, side, level, left_count, right_count
+      * Binary Commission: binary_commission_activated, activation_timestamp (timestamp when activation occurred)
       * Children: left_child, right_child (recursive structure)
       * Side Members: left_side_members, right_side_members (flat lists of all members on each side)
+    - Pair Matching Eligibility: Only members created at or after activation_timestamp are eligible for pairing
+      * Pre-activation members (1st and 2nd) are excluded, 3rd member (activation trigger) and all subsequent members are included
     - left_side_members: Array containing all members on the left side with full details (all levels)
     - right_side_members: Array containing all members on the right side with full details (all levels)
     - left_child/right_child: Recursive tree structure showing parent-child relationships
@@ -4137,6 +4158,13 @@ Standard Error Format:
    - Tree counting: All direct and indirect referrals (entire subtree) are counted for commission calculation
 5. Binary Pair Commission: ₹2000 per pair after activation (configurable via settings)
    - Only pairs created after activation count towards commission
+   - Pair Matching Eligibility: Only members created at or after activation are eligible for pairing
+     * Pre-activation members (1st and 2nd members) are EXCLUDED from pairing
+     * Member that triggered activation (3rd member) is INCLUDED in pairing
+     * All members added after activation are INCLUDED in pairing
+     * Example: User A has B (1st), C (2nd), D (3rd - triggers activation), E (4th):
+       - B and C are excluded from pairing
+       - D and E can be paired (not B and C)
    - Maximum 10 pairs per DAY per user (configurable daily limit, default: 10 pairs = ₹20,000)
    - Daily limit resets at midnight (00:00 server time)
    - 20% TDS is applied on ALL pair commissions (1st pair onwards, configurable percentage)

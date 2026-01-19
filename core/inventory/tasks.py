@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def release_expired_reservations():
     """
     Periodic task to automatically release expired stock reservations
-    Runs every 10 minutes (configured in Celery beat schedule)
+    Runs every 2 minutes (configured in Celery beat schedule)
     
     Finds all reservations where:
     - status = 'reserved'

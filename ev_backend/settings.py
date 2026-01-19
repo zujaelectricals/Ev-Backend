@@ -204,7 +204,14 @@ from celery.schedules import crontab
 CELERY_BEAT_SCHEDULE = {
     'release-expired-reservations': {
         'task': 'core.inventory.tasks.release_expired_reservations',
-        'schedule': crontab(minute='*/10'),  # Every 10 minutes
+        'schedule': crontab(minute='*/2'),  # Every 2 minutes - ideal for production
+        # Balances timely releases (even for short 2-5 min timeouts) with resource efficiency
+        # For longer timeouts (hours/days), this frequency is still efficient
+    },
+    'fix-missing-wallet-transactions': {
+        'task': 'core.binary.tasks.fix_missing_wallet_transactions',
+        'schedule': crontab(minute='*/2'),  # Every 15 minutes - safety net for failed tasks
+        # Catches any pairs that failed processing and fixes wallet_balance mismatches
     },
 }
 
