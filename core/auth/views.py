@@ -9,7 +9,8 @@ from django.contrib.auth import get_user_model
 from .serializers import (
     SendOTPSerializer, VerifyOTPSerializer, RefreshTokenSerializer,
     SignupSerializer, VerifySignupOTPSerializer,
-    CreateAdminSerializer, CreateStaffSerializer
+    CreateAdminSerializer, CreateStaffSerializer,
+    SendAdminOTPSerializer, VerifyAdminOTPSerializer
 )
 from .throttles import OTPRateThrottle, OTPIdentifierThrottle
 
@@ -98,6 +99,7 @@ def verify_otp_login(request):
     """
     Verify OTP and login user (returns JWT tokens)
     Rate limited to 5 requests per minute per IP and per identifier
+    Only for existing users with role='user'
     """
     serializer = VerifyOTPSerializer(data=request.data)
     if serializer.is_valid():
@@ -107,6 +109,50 @@ def verify_otp_login(request):
             'username': result['user'].username,
             'email': result['user'].email,
             'mobile': result['user'].mobile,
+            'role': result['user'].role,
+            'is_active_buyer': result['user'].is_active_buyer,
+            'is_distributor': result['user'].is_distributor,
+        }
+        return Response({
+            'user': user_data,
+            'tokens': result['tokens']
+        }, status=status.HTTP_200_OK)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([OTPRateThrottle, OTPIdentifierThrottle])
+def send_admin_otp(request):
+    """
+    Send OTP to admin/staff users only
+    Rate limited to 5 requests per minute per IP and per identifier
+    """
+    serializer = SendAdminOTPSerializer(data=request.data)
+    if serializer.is_valid():
+        result = serializer.save()
+        return Response(result, status=status.HTTP_200_OK)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([OTPRateThrottle, OTPIdentifierThrottle])
+def verify_admin_otp_login(request):
+    """
+    Verify OTP and login admin/staff users (returns JWT tokens)
+    Rate limited to 5 requests per minute per IP and per identifier
+    Only for existing users with role='admin' or 'staff'
+    """
+    serializer = VerifyAdminOTPSerializer(data=request.data)
+    if serializer.is_valid():
+        result = serializer.save()
+        user_data = {
+            'id': result['user'].id,
+            'username': result['user'].username,
+            'email': result['user'].email,
+            'mobile': result['user'].mobile,
+            'role': result['user'].role,
             'is_active_buyer': result['user'].is_active_buyer,
             'is_distributor': result['user'].is_distributor,
         }
@@ -166,6 +212,7 @@ def verify_signup_otp(request):
             'mobile': result['user'].mobile,
             'first_name': result['user'].first_name,
             'last_name': result['user'].last_name,
+            'role': result['user'].role,
             'is_active_buyer': result['user'].is_active_buyer,
             'is_distributor': result['user'].is_distributor,
         }

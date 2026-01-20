@@ -34,7 +34,7 @@ class SendOTPSerializer(serializers.Serializer):
         identifier = validated_data['identifier']
         otp_type = validated_data['otp_type']
         
-        # Check if user exists and has both email and mobile registered
+        # Check if user exists
         user = None
         try:
             if otp_type == 'email':
@@ -42,10 +42,24 @@ class SendOTPSerializer(serializers.Serializer):
             else:
                 user = User.objects.get(mobile=identifier)
         except User.DoesNotExist:
-            user = None
+            raise serializers.ValidationError(
+                "User not found. Please use /api/auth/signup/ endpoint to register first."
+            )
+        
+        # Check if user is admin or staff - they should use admin endpoints
+        if user.role in ['admin', 'staff']:
+            raise serializers.ValidationError(
+                "Admin/Staff users must use /api/auth/send-admin-otp/ endpoint"
+            )
+        
+        # Only proceed if user exists and has role='user'
+        if user.role != 'user':
+            raise serializers.ValidationError(
+                "User not found. Please use /api/auth/signup/ endpoint to register first."
+            )
         
         # If user exists and has both email and mobile, send OTP to both
-        if user and user.email and user.mobile:
+        if user.email and user.mobile:
             # Generate single OTP code for both channels
             otp_code = generate_otp(settings.OTP_LENGTH)
             
@@ -58,7 +72,7 @@ class SendOTPSerializer(serializers.Serializer):
                 'sent_to': ['email', 'mobile']
             }
         else:
-            # User doesn't exist or doesn't have both channels - send to requested channel only
+            # Send to requested channel only
             if otp_type == 'email':
                 send_email_otp(identifier)
                 return {'message': f'OTP sent to {identifier}'}
@@ -71,7 +85,6 @@ class VerifyOTPSerializer(serializers.Serializer):
     identifier = serializers.CharField(required=True)
     otp_code = serializers.CharField(required=True, max_length=10)
     otp_type = serializers.ChoiceField(choices=['email', 'mobile'], required=True)
-    referral_code = serializers.CharField(required=False, allow_blank=True)
     
     def validate(self, attrs):
         identifier = attrs['identifier']
@@ -86,161 +99,143 @@ class VerifyOTPSerializer(serializers.Serializer):
     def create(self, validated_data):
         identifier = validated_data['identifier']
         otp_type = validated_data['otp_type']
-        referral_code = validated_data.get('referral_code')
         
-        # Get or create user with proper error handling
+        # Get existing user only (no auto-creation)
         user = None
-        created = False
+        try:
+            if otp_type == 'email':
+                user = User.objects.get(email=identifier)
+            else:
+                user = User.objects.get(mobile=identifier)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(
+                "User not found. Please use /api/auth/signup/ endpoint to register first."
+            )
+        
+        # Check if user is admin or staff - they should use admin endpoints
+        if user.role in ['admin', 'staff']:
+            raise serializers.ValidationError(
+                "Admin/Staff users must use /api/auth/verify-admin-otp/ endpoint"
+            )
+        
+        # Only proceed if user exists and has role='user'
+        if user.role != 'user':
+            raise serializers.ValidationError(
+                "User not found. Please use /api/auth/signup/ endpoint to register first."
+            )
+        
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(user)
+        
+        return {
+            'user': user,
+            'tokens': {
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+            }
+        }
+
+
+class SendAdminOTPSerializer(serializers.Serializer):
+    """Serializer for sending OTP to admin/staff users only"""
+    identifier = serializers.CharField(required=True)
+    otp_type = serializers.ChoiceField(choices=['email', 'mobile'], required=True)
+    
+    def validate(self, attrs):
+        identifier = attrs['identifier']
+        otp_type = attrs['otp_type']
         
         if otp_type == 'email':
-            # First try to get user by email
-            try:
+            if '@' not in identifier:
+                raise serializers.ValidationError("Invalid email format")
+        elif otp_type == 'mobile':
+            if not identifier.isdigit() or len(identifier) < 10:
+                raise serializers.ValidationError("Invalid mobile number")
+        
+        return attrs
+    
+    def create(self, validated_data):
+        identifier = validated_data['identifier']
+        otp_type = validated_data['otp_type']
+        
+        # Check if user exists
+        user = None
+        try:
+            if otp_type == 'email':
                 user = User.objects.get(email=identifier)
-            except User.DoesNotExist:
-                # If not found by email, try by username
-                try:
-                    user = User.objects.get(username=identifier)
-                    # Update email if it's different and not already taken
-                    if user.email != identifier:
-                        # Check if email is already taken by another user
-                        if not User.objects.filter(email=identifier).exclude(pk=user.pk).exists():
-                            user.email = identifier
-                            user.save(update_fields=['email'])
-                except User.DoesNotExist:
-                    # Create user with retry logic - try to create directly and handle conflicts
-                    username = identifier
-                    counter = 1
-                    max_retries = 20
-                    
-                    for attempt in range(max_retries):
-                        try:
-                            # Try to create user directly - let database handle uniqueness
-                            user = User.objects.create(
-                                username=username,
-                                email=identifier
-                            )
-                            created = True
-                            break
-                        except IntegrityError as e:
-                            error_msg = str(e).lower()
-                            # Check if it's a username conflict
-                            if 'username' in error_msg or 'unique constraint' in error_msg:
-                                # Try next available username
-                                counter += 1
-                                username = f"{identifier}_{counter}"
-                                if attempt == max_retries - 1:
-                                    # Last attempt failed, try one more with timestamp
-                                    username = f"{identifier}_{int(time.time())}"
-                                    try:
-                                        user = User.objects.create(
-                                            username=username,
-                                            email=identifier
-                                        )
-                                        created = True
-                                        break
-                                    except IntegrityError:
-                                        raise serializers.ValidationError(
-                                            "Unable to create user account. Please contact support."
-                                        )
-                                continue
-                            # If it's an email conflict, user might exist - try to get it
-                            elif 'email' in error_msg:
-                                try:
-                                    user = User.objects.get(email=identifier)
-                                    break
-                                except User.DoesNotExist:
-                                    raise serializers.ValidationError(
-                                        "Email is already registered with a different account."
-                                    )
-                            else:
-                                # Some other integrity error
-                                raise serializers.ValidationError(
-                                    f"Unable to create user account: {str(e)}"
-                                )
-                    
-                    if not created and user is None:
-                        raise serializers.ValidationError("Unable to create user. Please try again.")
-        else:
-            # First try to get user by mobile
-            try:
+            else:
                 user = User.objects.get(mobile=identifier)
-            except User.DoesNotExist:
-                # If not found by mobile, try by username
-                try:
-                    user = User.objects.get(username=identifier)
-                    # Update mobile if it's different and not already taken
-                    if user.mobile != identifier:
-                        # Check if mobile is already taken by another user
-                        if not User.objects.filter(mobile=identifier).exclude(pk=user.pk).exists():
-                            user.mobile = identifier
-                            user.save(update_fields=['mobile'])
-                except User.DoesNotExist:
-                    # Create user with retry logic - try to create directly and handle conflicts
-                    username = identifier
-                    counter = 1
-                    max_retries = 20
-                    
-                    for attempt in range(max_retries):
-                        try:
-                            # Try to create user directly - let database handle uniqueness
-                            user = User.objects.create(
-                                username=username,
-                                mobile=identifier
-                            )
-                            created = True
-                            break
-                        except IntegrityError as e:
-                            error_msg = str(e).lower()
-                            # Check if it's a username conflict
-                            if 'username' in error_msg or 'unique constraint' in error_msg:
-                                # Try next available username
-                                counter += 1
-                                username = f"{identifier}_{counter}"
-                                if attempt == max_retries - 1:
-                                    # Last attempt failed, try one more with timestamp
-                                    username = f"{identifier}_{int(time.time())}"
-                                    try:
-                                        user = User.objects.create(
-                                            username=username,
-                                            mobile=identifier
-                                        )
-                                        created = True
-                                        break
-                                    except IntegrityError:
-                                        raise serializers.ValidationError(
-                                            "Unable to create user account. Please contact support."
-                                        )
-                                continue
-                            # If it's a mobile conflict, user might exist - try to get it
-                            elif 'mobile' in error_msg:
-                                try:
-                                    user = User.objects.get(mobile=identifier)
-                                    break
-                                except User.DoesNotExist:
-                                    raise serializers.ValidationError(
-                                        "Mobile number is already registered with a different account."
-                                    )
-                            else:
-                                # Some other integrity error
-                                raise serializers.ValidationError(
-                                    f"Unable to create user account: {str(e)}"
-                                )
-                    
-                    if not created and user is None:
-                        raise serializers.ValidationError("Unable to create user. Please try again.")
+        except User.DoesNotExist:
+            raise serializers.ValidationError(
+                "User does not have admin/staff privileges"
+            )
         
-        # Handle referral
-        if referral_code and created:
-            try:
-                referrer = User.objects.get(referral_code=referral_code)
-                user.referred_by = referrer
-                user.save(update_fields=['referred_by'])
-            except User.DoesNotExist:
-                pass
+        # Validate user has admin or staff role
+        if user.role not in ['admin', 'staff']:
+            raise serializers.ValidationError(
+                "User does not have admin/staff privileges"
+            )
         
-        # Generate referral code if new user
-        if created and not user.referral_code:
-            generate_referral_code(user)
+        # If user exists and has both email and mobile, send OTP to both
+        if user.email and user.mobile:
+            # Generate single OTP code for both channels
+            otp_code = generate_otp(settings.OTP_LENGTH)
+            
+            # Send to both channels with the same OTP
+            send_email_otp(user.email, otp_code)
+            send_mobile_otp(user.mobile, otp_code)
+            
+            return {
+                'message': f'OTP sent to both email ({user.email}) and mobile ({user.mobile})',
+                'sent_to': ['email', 'mobile']
+            }
+        else:
+            # Send to requested channel only
+            if otp_type == 'email':
+                send_email_otp(identifier)
+                return {'message': f'OTP sent to {identifier}'}
+            else:
+                send_mobile_otp(identifier)
+                return {'message': f'OTP sent to {identifier}'}
+
+
+class VerifyAdminOTPSerializer(serializers.Serializer):
+    """Serializer for verifying OTP and logging in admin/staff users only"""
+    identifier = serializers.CharField(required=True)
+    otp_code = serializers.CharField(required=True, max_length=10)
+    otp_type = serializers.ChoiceField(choices=['email', 'mobile'], required=True)
+    
+    def validate(self, attrs):
+        identifier = attrs['identifier']
+        otp_code = attrs['otp_code']
+        otp_type = attrs['otp_type']
+        
+        if not verify_otp(identifier, otp_code, otp_type):
+            raise serializers.ValidationError("Invalid or expired OTP")
+        
+        return attrs
+    
+    def create(self, validated_data):
+        identifier = validated_data['identifier']
+        otp_type = validated_data['otp_type']
+        
+        # Get existing user only (no auto-creation)
+        user = None
+        try:
+            if otp_type == 'email':
+                user = User.objects.get(email=identifier)
+            else:
+                user = User.objects.get(mobile=identifier)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(
+                "User not found or does not have admin/staff privileges"
+            )
+        
+        # Validate user has admin or staff role
+        if user.role not in ['admin', 'staff']:
+            raise serializers.ValidationError(
+                "User not found or does not have admin/staff privileges"
+            )
         
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)

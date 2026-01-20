@@ -87,6 +87,13 @@ class VehicleSerializer(serializers.ModelSerializer):
         min_value=0,
         help_text='Initial stock quantity for this vehicle. Applies to each variant created. Defaults to 0 if not provided.'
     )
+    battery_pricing = serializers.DictField(
+        child=serializers.DecimalField(max_digits=10, decimal_places=2),
+        required=False,
+        write_only=True,
+        allow_empty=True,
+        help_text='Dictionary mapping battery variant names to prices (e.g., {"40kWh": 65000, "75kWh": 75000}). If not provided, all variants use the base price field.'
+    )
     stock_quantity = serializers.IntegerField(
         required=False,
         write_only=True,
@@ -106,7 +113,7 @@ class VehicleSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'name', 'model_code', 'vehicle_color', 'battery_variant',
             'price', 'status', 'description', 'features', 'specifications',
-            'images', 'image_ids', 'color_images', 'primary_image_url', 'initial_quantity', 'stock_quantity',
+            'images', 'image_ids', 'color_images', 'primary_image_url', 'initial_quantity', 'battery_pricing', 'stock_quantity',
             'stock_total_quantity', 'stock_available_quantity', 'stock_reserved_quantity',
             'created_at', 'updated_at'
         )
@@ -394,6 +401,54 @@ class VehicleSerializer(serializers.ModelSerializer):
                     'battery_variant': 'At least one battery variant is required.'
                 })
         
+        # Validate battery_pricing if provided
+        battery_pricing = data.get('battery_pricing')
+        base_price = data.get('price')
+        battery_variants = data.get('battery_variant', [])
+        if not isinstance(battery_variants, list):
+            battery_variants = []
+        
+        if battery_pricing is not None:
+            # Check that all keys in battery_pricing exist in battery_variant array
+            invalid_keys = []
+            for battery_key in battery_pricing.keys():
+                if battery_key not in battery_variants:
+                    invalid_keys.append(battery_key)
+            
+            if invalid_keys:
+                raise serializers.ValidationError({
+                    'battery_pricing': f'Battery variants {invalid_keys} in battery_pricing are not in battery_variant array.'
+                })
+            
+            # Validate all prices are non-negative
+            invalid_prices = []
+            for battery_key, price in battery_pricing.items():
+                try:
+                    price_decimal = float(price)
+                    if price_decimal < 0:
+                        invalid_prices.append(battery_key)
+                except (ValueError, TypeError):
+                    invalid_prices.append(battery_key)
+            
+            if invalid_prices:
+                raise serializers.ValidationError({
+                    'battery_pricing': f'Invalid prices for battery variants {invalid_prices}. Prices must be non-negative numbers.'
+                })
+            
+            # If battery_pricing is provided but doesn't cover all batteries, base_price is required as fallback
+            if self.instance is None:  # Only for create operations
+                missing_batteries = [b for b in battery_variants if b not in battery_pricing]
+                if missing_batteries and base_price is None:
+                    raise serializers.ValidationError({
+                        'price': f'Base price is required as fallback for battery variants {missing_batteries} that are not in battery_pricing.'
+                    })
+        
+        # If battery_pricing is not provided, base_price is required for all variants
+        if self.instance is None and battery_pricing is None and base_price is None:
+            raise serializers.ValidationError({
+                'price': 'Price is required when battery_pricing is not provided.'
+            })
+        
         return data
     
     def create(self, validated_data):
@@ -403,6 +458,8 @@ class VehicleSerializer(serializers.ModelSerializer):
         image_ids = validated_data.pop('image_ids', [])
         color_images = validated_data.pop('color_images', {})
         initial_quantity = validated_data.pop('initial_quantity', 0)
+        battery_pricing = validated_data.pop('battery_pricing', None)
+        base_price = validated_data.get('price')
         
         # Ensure features and specifications have default values if None
         if 'features' not in validated_data or validated_data.get('features') is None:
@@ -419,6 +476,13 @@ class VehicleSerializer(serializers.ModelSerializer):
         # Get colors and battery variants
         colors = validated_data.pop('vehicle_color', ["white"])
         batteries = validated_data.pop('battery_variant', [])
+        
+        # Helper function to get price for a battery variant
+        def get_price_for_battery(battery):
+            """Get price for a specific battery variant"""
+            if battery_pricing and battery in battery_pricing:
+                return battery_pricing[battery]
+            return base_price
         
         # Validate we have at least one color and one battery
         if not colors or len(colors) == 0:
@@ -481,6 +545,8 @@ class VehicleSerializer(serializers.ModelSerializer):
                         vehicle_data = validated_data.copy()
                         vehicle_data['vehicle_color'] = [color]  # Single color per vehicle
                         vehicle_data['battery_variant'] = [battery]  # Single battery per vehicle
+                        # Set price based on battery_pricing or use base price
+                        vehicle_data['price'] = get_price_for_battery(battery)
                         
                         vehicle = Vehicle.objects.create(**vehicle_data)
                         created_vehicles.append(vehicle)
@@ -525,6 +591,8 @@ class VehicleSerializer(serializers.ModelSerializer):
                     vehicle_data = validated_data.copy()
                     vehicle_data['vehicle_color'] = colors  # Keep all colors
                     vehicle_data['battery_variant'] = [battery]  # Single battery per vehicle
+                    # Set price based on battery_pricing or use base price
+                    vehicle_data['price'] = get_price_for_battery(battery)
                     
                     vehicle = Vehicle.objects.create(**vehicle_data)
                     created_vehicles.append(vehicle)
@@ -924,15 +992,31 @@ class VehicleGroupedSerializer(serializers.Serializer):
 
 
 class VehicleStockSerializer(serializers.ModelSerializer):
-    """Serializer for VehicleStock"""
+    """Serializer for VehicleStock with enriched vehicle details"""
     vehicle_name = serializers.CharField(source='vehicle.name', read_only=True)
     vehicle_model_code = serializers.CharField(source='vehicle.model_code', read_only=True)
     reserved_quantity = serializers.SerializerMethodField()
+    
+    # Vehicle details
+    vehicle_colors = serializers.SerializerMethodField()
+    battery_variants = serializers.SerializerMethodField()
+    features = serializers.SerializerMethodField()
+    specifications = serializers.SerializerMethodField()
+    description = serializers.CharField(source='vehicle.description', read_only=True)
+    price = serializers.DecimalField(source='vehicle.price', max_digits=10, decimal_places=2, read_only=True)
+    status = serializers.CharField(source='vehicle.status', read_only=True)
+    primary_image_url = serializers.SerializerMethodField()
+    images = serializers.SerializerMethodField()
+    other_variants = serializers.SerializerMethodField()
     
     class Meta:
         model = VehicleStock
         fields = (
             'id', 'vehicle', 'vehicle_name', 'vehicle_model_code',
+            'vehicle_colors', 'battery_variants', 'features', 'specifications',
+            'description', 'price', 'status',
+            'primary_image_url', 'images',
+            'other_variants',
             'total_quantity', 'available_quantity', 'reserved_quantity',
             'created_at', 'updated_at'
         )
@@ -943,6 +1027,119 @@ class VehicleStockSerializer(serializers.ModelSerializer):
         reserved = obj.total_quantity - obj.available_quantity
         # Return 0 if calculation results in negative (data inconsistency)
         return max(0, reserved)
+    
+    def get_vehicle_colors(self, obj):
+        """Get vehicle colors as an array"""
+        if hasattr(obj, 'vehicle') and obj.vehicle:
+            colors = obj.vehicle.vehicle_color
+            if isinstance(colors, list):
+                return colors
+            return []
+        return []
+    
+    def get_battery_variants(self, obj):
+        """Get battery variants as an array"""
+        if hasattr(obj, 'vehicle') and obj.vehicle:
+            batteries = obj.vehicle.battery_variant
+            if isinstance(batteries, list):
+                return batteries
+            return []
+        return []
+    
+    def get_features(self, obj):
+        """Get vehicle features as an array"""
+        if hasattr(obj, 'vehicle') and obj.vehicle:
+            features = obj.vehicle.features
+            if isinstance(features, list):
+                return features
+            return []
+        return []
+    
+    def get_specifications(self, obj):
+        """Get vehicle specifications as a dictionary"""
+        if hasattr(obj, 'vehicle') and obj.vehicle:
+            specs = obj.vehicle.specifications
+            if isinstance(specs, dict):
+                return specs
+            return {}
+        return {}
+    
+    def get_primary_image_url(self, obj):
+        """Return URL of primary image if exists"""
+        if hasattr(obj, 'vehicle') and obj.vehicle:
+            primary_image = obj.vehicle.images.filter(is_primary=True).first()
+            if primary_image:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(primary_image.image.url)
+                return primary_image.image.url
+            # If no primary, return first image
+            first_image = obj.vehicle.images.first()
+            if first_image:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(first_image.image.url)
+                return first_image.image.url
+        return None
+    
+    def get_images(self, obj):
+        """Return all images for this vehicle"""
+        if not hasattr(obj, 'vehicle') or not obj.vehicle:
+            return []
+        
+        # Access images through the relationship
+        try:
+            if hasattr(obj.vehicle, '_prefetched_objects_cache') and 'images' in obj.vehicle._prefetched_objects_cache:
+                images = obj.vehicle._prefetched_objects_cache['images']
+            else:
+                # Query images directly
+                images = list(obj.vehicle.images.all().order_by('order', '-is_primary', 'created_at'))
+        except Exception:
+            # Fallback if relationship access fails
+            images = []
+        
+        request = self.context.get('request')
+        result = []
+        for img in images:
+            if img and hasattr(img, 'image') and img.image:  # Only include images that have a file
+                try:
+                    image_url = img.image.url
+                    if request:
+                        image_url = request.build_absolute_uri(image_url)
+                    result.append({
+                        'id': img.id,
+                        'image_url': image_url,
+                        'is_primary': img.is_primary,
+                        'alt_text': img.alt_text or '',
+                        'order': img.order
+                    })
+                except Exception:
+                    # Skip images that can't be serialized
+                    continue
+        return result
+    
+    def get_other_variants(self, obj):
+        """Get all other variants of the same vehicle name"""
+        if not hasattr(obj, 'vehicle') or not obj.vehicle:
+            return []
+        
+        vehicle_name = obj.vehicle.name
+        current_vehicle_id = obj.vehicle.id
+        
+        # Get all other vehicles with the same name, excluding current vehicle
+        other_vehicles = Vehicle.objects.filter(
+            name=vehicle_name
+        ).exclude(
+            id=current_vehicle_id
+        ).prefetch_related('images', 'stock').order_by('-created_at')
+        
+        # Serialize using VehicleVariantSerializer
+        variant_serializer = VehicleVariantSerializer(
+            other_vehicles, 
+            many=True, 
+            context=self.context
+        )
+        return variant_serializer.data
     
     def validate_total_quantity(self, value):
         """Validate total_quantity"""

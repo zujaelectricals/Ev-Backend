@@ -9,11 +9,11 @@ Authentication: JWT Bearer Token (except where noted)
                             AUTHENTICATION APIs
 ================================================================================
 Super User: EVAdmin && EVAdmin@123
-1. SEND OTP
+1. SEND OTP (Regular Users Only)
    Method: POST
    URL: /api/auth/send-otp/
    Authentication: Not Required
-   Description: Send OTP to user's email or mobile number
+   Description: Send OTP to existing user's email or mobile number. Only works for registered users with role='user'. New users must use /api/auth/signup/ endpoint first. Admin/Staff users must use /api/auth/send-admin-otp/ endpoint.
    
    Request Body:
    {
@@ -28,25 +28,37 @@ Super User: EVAdmin && EVAdmin@123
    
    Error Response (400):
    {
+     "non_field_errors": ["User not found. Please use /api/auth/signup/ endpoint to register first."]
+   }
+   OR
+   {
+     "non_field_errors": ["Admin/Staff users must use /api/auth/send-admin-otp/ endpoint"]
+   }
+   OR
+   {
      "identifier": ["Invalid email format"],
      "otp_type": ["Invalid choice"]
    }
    
+   Notes:
+   - Only works for existing registered users with role='user'
+   - New users must register via /api/auth/signup/ endpoint first
+   - Admin/Staff users must use /api/auth/send-admin-otp/ endpoint
+   
    Rate Limit: 5 requests per minute per IP
 
 
-2. VERIFY OTP & LOGIN
+2. VERIFY OTP & LOGIN (Regular Users Only)
    Method: POST
    URL: /api/auth/verify-otp/
    Authentication: Not Required
-   Description: Verify OTP and login user. Returns JWT tokens.
+   Description: Verify OTP and login existing user. Returns JWT tokens. Only works for registered users with role='user'. New users must use /api/auth/signup/ and /api/auth/verify-signup-otp/ endpoints first. Admin/Staff users must use /api/auth/verify-admin-otp/ endpoint.
    
    Request Body:
    {
      "identifier": "user@example.com",
      "otp_code": "123456",
-     "otp_type": "email",
-     "referral_code": "REF12345"  // Optional
+     "otp_type": "email"  // "email" or "mobile"
    }
    
    Response (200 OK):
@@ -56,6 +68,7 @@ Super User: EVAdmin && EVAdmin@123
        "username": "user@example.com",
        "email": "user@example.com",
        "mobile": null,
+       "role": "user",
        "is_active_buyer": false,
        "is_distributor": false
      },
@@ -69,6 +82,103 @@ Super User: EVAdmin && EVAdmin@123
    {
      "non_field_errors": ["Invalid or expired OTP"]
    }
+   OR
+   {
+     "non_field_errors": ["User not found. Please use /api/auth/signup/ endpoint to register first."]
+   }
+   OR
+   {
+     "non_field_errors": ["Admin/Staff users must use /api/auth/verify-admin-otp/ endpoint"]
+   }
+   
+   Notes:
+   - Only works for existing registered users with role='user'
+   - New users must register via /api/auth/signup/ and /api/auth/verify-signup-otp/ endpoints first
+   - Admin/Staff users must use /api/auth/verify-admin-otp/ endpoint
+   - No auto-creation of user accounts - users must register first
+   
+   Rate Limit: 5 requests per minute per IP
+
+
+2A. SEND ADMIN/STAFF OTP
+   Method: POST
+   URL: /api/auth/send-admin-otp/
+   Authentication: Not Required
+   Description: Send OTP to admin/staff user's email or mobile number. Only works for existing admin/staff users (role='admin' or 'staff'). Regular users must use /api/auth/send-otp/ endpoint.
+   
+   Request Body:
+   {
+     "identifier": "admin@example.com",  // Email or mobile number
+     "otp_type": "email"                  // "email" or "mobile"
+   }
+   
+   Response (200 OK):
+   {
+     "message": "OTP sent to admin@example.com"
+   }
+   
+   Error Response (400):
+   {
+     "non_field_errors": ["User not found or does not have admin/staff privileges"]
+   }
+   OR
+   {
+     "identifier": ["Invalid email format"],
+     "otp_type": ["Invalid choice"]
+   }
+   
+   Notes:
+   - Only works for existing admin/staff users (role='admin' or 'staff')
+   - Regular users must use /api/auth/send-otp/ endpoint
+   - Admin/Staff accounts must be created via /api/auth/create-admin/ or /api/auth/create-staff/ endpoints
+   
+   Rate Limit: 5 requests per minute per IP
+
+
+2B. VERIFY ADMIN/STAFF OTP & LOGIN
+   Method: POST
+   URL: /api/auth/verify-admin-otp/
+   Authentication: Not Required
+   Description: Verify OTP and login admin/staff user. Returns JWT tokens. Only works for existing admin/staff users (role='admin' or 'staff'). Regular users must use /api/auth/verify-otp/ endpoint.
+   
+   Request Body:
+   {
+     "identifier": "admin@example.com",
+     "otp_code": "123456",
+     "otp_type": "email"  // "email" or "mobile"
+   }
+   
+   Response (200 OK):
+   {
+     "user": {
+       "id": 2,
+       "username": "admin@example.com",
+       "email": "admin@example.com",
+       "mobile": "9876543211",
+       "role": "admin",  // "admin" or "staff"
+       "is_active_buyer": false,
+       "is_distributor": false
+     },
+     "tokens": {
+       "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+       "access": "eyJ0eXAiOiJKV1QiLCJhbGc..."
+     }
+   }
+   
+   Error Response (400):
+   {
+     "non_field_errors": ["Invalid or expired OTP"]
+   }
+   OR
+   {
+     "non_field_errors": ["User not found or does not have admin/staff privileges"]
+   }
+   
+   Notes:
+   - Only works for existing admin/staff users (role='admin' or 'staff')
+   - Regular users must use /api/auth/verify-otp/ endpoint
+   - Admin/Staff accounts must be created via /api/auth/create-admin/ or /api/auth/create-staff/ endpoints
+   - No auto-creation of user accounts
    
    Rate Limit: 5 requests per minute per IP
 
@@ -167,6 +277,7 @@ Super User: EVAdmin && EVAdmin@123
        "mobile": "9876543210",
        "first_name": "John",
        "last_name": "Doe",
+       "role": "user",
        "is_active_buyer": false,
        "is_distributor": false
      },
@@ -1901,7 +2012,11 @@ Super User: EVAdmin && EVAdmin@123
       "name": "EV Model X",
       "vehicle_color": ["white", "red", "blue"],  // Array of colors
       "battery_variant": ["40kWh", "60kWh"],  // Array of battery variants
-      "price": 50000,
+      "price": 50000,  // Base price - used for all variants if battery_pricing not provided
+      "battery_pricing": {  // Optional: Dictionary mapping battery variant names to prices
+        "40kWh": 50000,
+        "60kWh": 60000
+      },
       "status": "available",
       "description": "Premium electric vehicle",
       "features": ["USB Charging Port", "Parking Mode", "Reverse Gear"],
@@ -1924,7 +2039,13 @@ Super User: EVAdmin && EVAdmin@123
     - model_code: (auto-generated, read-only) Automatically generated model code in format EV-{COLOR}-{BATTERY}-{RANDOM} (e.g., EV-WHT-40K-A9F3X2). Do not include in request.
     - vehicle_color: (required) Array of vehicle colors (e.g., ["white", "red", "blue"])
     - battery_variant: (required) Array of battery variants (e.g., ["40kWh", "60kWh"])
-    - price: (required) Vehicle price (applies to all created vehicles)
+    - price: (required) Base vehicle price - used for all variants if battery_pricing not provided, or as fallback for battery variants not in battery_pricing
+    - battery_pricing: (optional) Dictionary mapping battery variant names to prices (e.g., {"40kWh": 50000, "60kWh": 60000})
+      - If provided, each battery variant uses its specified price
+      - If a battery variant is not in battery_pricing, it uses the base price field
+      - All keys in battery_pricing must exist in battery_variant array
+      - All prices must be non-negative numbers
+      - If not provided, all variants use the base price field value
     - status: (optional, default: "available") Status: "available", "out_of_stock", "discontinued"
     - description: (optional) Vehicle description (applies to all created vehicles)
     - features: (optional) Array of feature strings - unlimited items (applies to all created vehicles)
@@ -1943,6 +2064,13 @@ Super User: EVAdmin && EVAdmin@123
       - If not provided, VehicleStock is still created with quantity 0
     
     Notes:
+    - Pricing Behavior:
+      - If battery_pricing is provided: Each battery variant uses its specified price from battery_pricing
+      - If battery_pricing is not provided: All variants use the base price field value
+      - If battery_pricing is provided but missing some battery variants: Missing variants fall back to base price
+      - Example: battery_variant=["40kWh", "60kWh"], battery_pricing={"40kWh": 50000} → 40kWh uses ₹50000, 60kWh uses base price
+      - All keys in battery_pricing must match battery variant names in battery_variant array
+      - Prices in battery_pricing must be non-negative numbers (zero allowed for promotional pricing)
     - If color_images provided: Creates one vehicle per color-battery combination (e.g., 3 colors × 2 batteries = 6 vehicles)
       - Each vehicle has a single color and single battery variant
       - Images are linked to vehicles based on color mapping in color_images
@@ -1979,7 +2107,7 @@ Super User: EVAdmin && EVAdmin@123
         "model_code": "EV-WHT-40K-A9F3X2",  // Color: white, Battery: 40kWh (when color_images provided)
         "vehicle_color": ["white"],  // Single color per vehicle when color_images provided
         "battery_variant": ["40kWh"],  // Single battery per vehicle
-        "price": "50000.00",
+        "price": "50000.00",  // Price from battery_pricing or base price
         "status": "available",
         "description": "Premium electric vehicle",
         "features": [
@@ -2027,7 +2155,7 @@ Super User: EVAdmin && EVAdmin@123
         "model_code": "EV-WHT-60K-B7C4Y1",  // Color: white, Battery: 60kWh (when color_images provided)
         "vehicle_color": ["white"],  // Single color per vehicle when color_images provided
         "battery_variant": ["60kWh"],  // Single battery per vehicle
-        "price": "50000.00",
+        "price": "60000.00",  // Price from battery_pricing or base price
         "status": "available",
         "description": "Premium electric vehicle",
         "features": [
@@ -2058,7 +2186,7 @@ Super User: EVAdmin && EVAdmin@123
         "model_code": "EV-RED-40K-C8D5Z2",  // Red, 40kWh
         "vehicle_color": ["red"],
         "battery_variant": ["40kWh"],
-        "price": "50000.00",
+        "price": "50000.00",  // Price from battery_pricing or base price
         "status": "available",
         "description": "Premium electric vehicle",
         "features": [
@@ -2086,7 +2214,9 @@ Super User: EVAdmin && EVAdmin@123
     Error Response (400):
     {
       "name": ["This field is required."],
-      "image_ids": ["Image IDs [5, 6] do not exist or are already linked to a vehicle. Please upload images first using /api/inventory/images/upload/"]
+      "image_ids": ["Image IDs [5, 6] do not exist or are already linked to a vehicle. Please upload images first using /api/inventory/images/upload/"],
+      "battery_pricing": ["Battery variants ['80kWh'] in battery_pricing are not in battery_variant array."],
+      "price": ["Price is required when battery_pricing is not provided."]
     }
     
     Error Response (403):
@@ -4131,7 +4261,7 @@ Standard Error Format:
                          RATE LIMITING
 ================================================================================
 
-- OTP Endpoints (/api/auth/send-otp/, /api/auth/verify-otp/): 
+- OTP Endpoints (/api/auth/send-otp/, /api/auth/verify-otp/, /api/auth/send-admin-otp/, /api/auth/verify-admin-otp/): 
   5 requests per minute per IP
 
 - Booking Endpoints (/api/booking/): 

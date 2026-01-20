@@ -2,7 +2,7 @@ from rest_framework import viewsets, status, parsers
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, BasePermission
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, NotFound
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
 from django.db import connection
@@ -417,7 +417,7 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """Filter stocks based on query params"""
-        queryset = VehicleStock.objects.all().select_related('vehicle')
+        queryset = VehicleStock.objects.all().select_related('vehicle').prefetch_related('vehicle__images')
         
         # Filter by vehicle ID
         vehicle_id = self.request.query_params.get('vehicle_id')
@@ -453,6 +453,34 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
         
         return queryset.order_by('-updated_at')
     
+    def get_object(self):
+        """
+        Override to support lookup by both VehicleStock ID and Vehicle ID.
+        If the ID matches a Vehicle ID, return that vehicle's stock.
+        Otherwise, try to find a VehicleStock with that ID.
+        """
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_value = self.kwargs[lookup_url_kwarg]
+        
+        # First, try to find by Vehicle ID
+        try:
+            vehicle = Vehicle.objects.prefetch_related('images').get(id=lookup_value)
+            # Get or create stock for this vehicle
+            stock = get_or_create_vehicle_stock(vehicle)
+            return stock
+        except Vehicle.DoesNotExist:
+            pass
+        except (ValueError, TypeError):
+            # Invalid ID format, continue to try VehicleStock lookup
+            pass
+        
+        # If not found by Vehicle ID, try VehicleStock ID
+        try:
+            return super().get_object()
+        except VehicleStock.DoesNotExist:
+            # Raise 404 with a helpful message
+            raise NotFound("Vehicle stock not found. The ID may be a Vehicle ID that doesn't have stock, or an invalid VehicleStock ID.")
+    
     def perform_create(self, serializer):
         """Create stock - only admin/superuser allowed"""
         if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
@@ -471,6 +499,27 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only admin users can delete stock records.")
         instance.delete()
     
+    @action(detail=False, methods=['get'], url_path='by-vehicle/(?P<vehicle_id>[^/.]+)')
+    def get_by_vehicle(self, request, vehicle_id=None):
+        """
+        Get stock for a specific vehicle by vehicle ID
+        GET /api/inventory/stock/by-vehicle/{vehicle_id}/
+        """
+        try:
+            vehicle = Vehicle.objects.prefetch_related('images').get(id=vehicle_id)
+        except Vehicle.DoesNotExist:
+            return Response(
+                {'error': 'Vehicle not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get or create stock
+        stock = get_or_create_vehicle_stock(vehicle)
+        
+        # Serialize and return
+        serializer = self.get_serializer(stock, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
     @action(detail=False, methods=['post'], url_path='by-vehicle/(?P<vehicle_id>[^/.]+)')
     def update_by_vehicle(self, request, vehicle_id=None):
         """
@@ -481,7 +530,7 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only admin users can update stock.")
         
         try:
-            vehicle = Vehicle.objects.get(id=vehicle_id)
+            vehicle = Vehicle.objects.prefetch_related('images').get(id=vehicle_id)
         except Vehicle.DoesNotExist:
             return Response(
                 {'error': 'Vehicle not found'},
@@ -492,7 +541,7 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
         stock = get_or_create_vehicle_stock(vehicle)
         
         # Update stock
-        serializer = self.get_serializer(stock, data=request.data, partial=True)
+        serializer = self.get_serializer(stock, data=request.data, partial=True, context={'request': request})
         serializer.is_valid(raise_exception=True)
         serializer.save()
         
