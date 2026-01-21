@@ -620,3 +620,130 @@ class CreateStaffSerializer(serializers.Serializer):
             'message': 'Staff created successfully. Staff can login using /api/auth/send-otp/ endpoint.'
         }
 
+
+class SendUniversalOTPSerializer(serializers.Serializer):
+    """Serializer for sending OTP to any existing user (all roles)"""
+    identifier = serializers.CharField(required=True)
+    otp_type = serializers.ChoiceField(choices=['email', 'mobile'], required=True)
+    
+    def validate(self, attrs):
+        identifier = attrs['identifier']
+        otp_type = attrs['otp_type']
+        
+        if otp_type == 'email':
+            if '@' not in identifier:
+                raise serializers.ValidationError("Invalid email format")
+        elif otp_type == 'mobile':
+            if not identifier.isdigit() or len(identifier) < 10:
+                raise serializers.ValidationError("Invalid mobile number")
+        
+        return attrs
+    
+    def create(self, validated_data):
+        identifier = validated_data['identifier']
+        otp_type = validated_data['otp_type']
+        
+        # Check if user exists (any role)
+        user = None
+        try:
+            if otp_type == 'email':
+                user = User.objects.get(email=identifier)
+            else:
+                user = User.objects.get(mobile=identifier)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(
+                "User not found. Only existing users can request OTP."
+            )
+        
+        # If user exists and has both email and mobile, send OTP to both
+        if user.email and user.mobile:
+            # Generate single OTP code for both channels
+            otp_code = generate_otp(settings.OTP_LENGTH)
+            
+            # Send to both channels with the same OTP
+            send_email_otp(user.email, otp_code)
+            send_mobile_otp(user.mobile, otp_code)
+            
+            return {
+                'message': f'OTP sent to both email ({user.email}) and mobile ({user.mobile})',
+                'sent_to': ['email', 'mobile']
+            }
+        else:
+            # Send to requested channel only
+            if otp_type == 'email':
+                send_email_otp(identifier)
+                return {'message': f'OTP sent to {identifier}'}
+            else:
+                send_mobile_otp(identifier)
+                return {'message': f'OTP sent to {identifier}'}
+
+
+class VerifyUniversalOTPSerializer(serializers.Serializer):
+    """Serializer for verifying OTP for any existing user (all roles) - verification only, no login"""
+    identifier = serializers.CharField(required=True)
+    otp_code = serializers.CharField(required=True, max_length=10)
+    otp_type = serializers.ChoiceField(choices=['email', 'mobile'], required=True)
+    
+    def validate(self, attrs):
+        identifier = attrs['identifier']
+        otp_code = attrs['otp_code']
+        otp_type = attrs['otp_type']
+        
+        # Check if user exists (any role)
+        user = None
+        try:
+            if otp_type == 'email':
+                user = User.objects.get(email=identifier)
+            else:
+                user = User.objects.get(mobile=identifier)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(
+                "User not found. Only existing users can verify OTP."
+            )
+        
+        # If user has both email and mobile, verify OTP from either channel
+        # Since same OTP is sent to both, we check both but only need one to match
+        if user.email and user.mobile:
+            email_valid = verify_otp(user.email, otp_code, 'email')
+            mobile_valid = verify_otp(user.mobile, otp_code, 'mobile')
+            
+            if not email_valid and not mobile_valid:
+                raise serializers.ValidationError("Invalid or expired OTP")
+            
+            # If one channel's OTP was valid but the other wasn't, mark the other as used too
+            # This ensures both OTP records are properly marked as used
+            if email_valid and not mobile_valid:
+                # Email OTP was valid, mark mobile OTP as used if it exists
+                from core.auth.models import OTP
+                mobile_otp_obj = OTP.objects.filter(
+                    identifier=user.mobile,
+                    otp_type='mobile',
+                    otp_code=otp_code,
+                    is_used=False
+                ).first()
+                if mobile_otp_obj:
+                    mobile_otp_obj.mark_as_used()
+            elif mobile_valid and not email_valid:
+                # Mobile OTP was valid, mark email OTP as used if it exists
+                from core.auth.models import OTP
+                email_otp_obj = OTP.objects.filter(
+                    identifier=user.email,
+                    otp_type='email',
+                    otp_code=otp_code,
+                    is_used=False
+                ).first()
+                if email_otp_obj:
+                    email_otp_obj.mark_as_used()
+        else:
+            # User has only one channel, verify OTP from that channel
+            if not verify_otp(identifier, otp_code, otp_type):
+                raise serializers.ValidationError("Invalid or expired OTP")
+        
+        return attrs
+    
+    def create(self, validated_data):
+        """Verify OTP and return success message (no JWT tokens)"""
+        return {
+            'message': 'OTP verified successfully'
+        }
+

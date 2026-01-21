@@ -60,6 +60,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     right_leg_count = serializers.SerializerMethodField()
     carry_forward_left = serializers.SerializerMethodField()
     carry_forward_right = serializers.SerializerMethodField()
+    is_distributor_terms_and_conditions_accepted = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -69,7 +70,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
                   'role', 'is_distributor', 'is_active_buyer', 'referral_code',
                   'referred_by', 'kyc_status', 'nominee_exists', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
-                  'right_leg_count', 'carry_forward_left', 'carry_forward_right')
+                  'right_leg_count', 'carry_forward_left', 'carry_forward_right',
+                  'is_distributor_terms_and_conditions_accepted')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer',
                            'referral_code', 'referred_by', 'date_joined')
     
@@ -131,6 +133,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
             is_active=True
         ).first()
         return active_carry.remaining_count if active_carry else 0
+    
+    def get_is_distributor_terms_and_conditions_accepted(self, obj):
+        """Get terms and conditions acceptance status from DistributorApplication"""
+        if hasattr(obj, 'distributor_application') and obj.distributor_application is not None:
+            return obj.distributor_application.is_distributor_terms_and_conditions_accepted
+        return None
 
 
 class KYCSerializer(serializers.ModelSerializer):
@@ -187,6 +195,7 @@ class DistributorApplicationSerializer(serializers.ModelSerializer):
     user_username = serializers.CharField(source='user.username', read_only=True)
     user_full_name = serializers.SerializerMethodField()
     reviewed_by = ReviewedByUserSerializer(read_only=True, allow_null=True)
+    is_distributor_terms_and_conditions_accepted = serializers.BooleanField(required=False)
     
     class Meta:
         model = DistributorApplication
@@ -195,6 +204,12 @@ class DistributorApplicationSerializer(serializers.ModelSerializer):
     
     def get_user_full_name(self, obj):
         return obj.user.get_full_name()
+    
+    def validate_is_distributor_terms_and_conditions_accepted(self, value):
+        """Validate that terms and conditions must be accepted"""
+        if not value:
+            raise serializers.ValidationError('You cannot Proceed without Accepting Terms and Conditions')
+        return value
     
     def validate(self, data):
         """Validate eligibility before allowing application"""
@@ -212,11 +227,19 @@ class DistributorApplicationSerializer(serializers.ModelSerializer):
                 'non_field_errors': ['Application already exists. You can only submit one distributor application.']
             })
         
+        # Validate terms and conditions acceptance - must be explicitly True
+        terms_accepted = data.get('is_distributor_terms_and_conditions_accepted', False)
+        if not terms_accepted:
+            raise serializers.ValidationError({
+                'is_distributor_terms_and_conditions_accepted': ['You cannot Proceed without Accepting Terms and Conditions']
+            })
+        
         return data
     
     def create(self, validated_data):
-        """Create distributor application for the current user"""
+        """Create distributor application for the current user (automatically approved)"""
         user = self.context['request'].user
         validated_data['user'] = user
+        # Status will be set to 'approved' in the view
         return super().create(validated_data)
 

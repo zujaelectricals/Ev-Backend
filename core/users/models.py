@@ -236,6 +236,9 @@ class DistributorApplication(models.Model):
     reference_contact = models.CharField(max_length=50, blank=True, null=True)
     reference_relationship = models.CharField(max_length=100, blank=True, null=True)
     
+    # Terms and Conditions
+    is_distributor_terms_and_conditions_accepted = models.BooleanField(default=False)
+    
     # Supporting Documents
     business_license = models.FileField(upload_to='distributor/business_license/', null=True, blank=True)
     tax_documents = models.FileField(upload_to='distributor/tax_documents/', null=True, blank=True)

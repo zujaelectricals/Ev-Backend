@@ -24,8 +24,18 @@ class BookingViewSet(viewsets.ModelViewSet):
         user = self.request.user
         queryset = Booking.objects.select_related('user', 'vehicle_model', 'referred_by')
         if user.is_superuser or user.role == 'admin':
-            return queryset.all()
-        return queryset.filter(user=user)
+            queryset = queryset.all()
+        else:
+            queryset = queryset.filter(user=user)
+        
+        # Filter by status parameter
+        status_param = self.request.query_params.get('status', None)
+        if status_param:
+            # Strip whitespace for consistent filtering
+            status_param = status_param.strip()
+            queryset = queryset.filter(status=status_param)
+        
+        return queryset
     
     def perform_create(self, serializer):
         # Capture IP address

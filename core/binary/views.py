@@ -73,7 +73,53 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
     
     @action(detail=False, methods=['get'])
     def tree_structure(self, request):
-        """Get full binary tree structure with all children"""
+        """Get full binary tree structure with all children and pending users"""
+        # Get pending users (this works even if referrer has no binary node)
+        referrer = request.user
+        
+        # Get users who have referred_by = referrer
+        from core.users.models import User
+        referred_users = User.objects.filter(referred_by=referrer)
+        
+        # Also check bookings with referrer's code
+        from core.booking.models import Booking
+        booking_users = User.objects.filter(
+            bookings__referred_by=referrer
+        )
+        
+        # Combine both sets
+        all_referred_users = (referred_users | booking_users).distinct()
+        
+        pending_users = []
+        for user in all_referred_users:
+            try:
+                user_node = BinaryNode.objects.get(user=user)
+                # Check if user is in referrer's tree
+                is_in_tree = self._is_tree_owner(referrer, user_node)
+                if not is_in_tree:
+                    pending_users.append({
+                        'user_id': user.id,
+                        'user_email': user.email,
+                        'user_username': user.username,
+                        'user_full_name': user.get_full_name(),
+                        'has_node': True,
+                        'node_id': user_node.id,
+                        'in_tree': False
+                    })
+                # If in tree, don't include (already placed)
+            except BinaryNode.DoesNotExist:
+                # User doesn't have a node yet
+                pending_users.append({
+                    'user_id': user.id,
+                    'user_email': user.email,
+                    'user_username': user.username,
+                    'user_full_name': user.get_full_name(),
+                    'has_node': False,
+                    'node_id': None,
+                    'in_tree': False
+                })
+        
+        # Try to get binary node and tree structure
         try:
             # Optimize query with select_related for user and wallet
             node = BinaryNode.objects.select_related(
@@ -86,15 +132,21 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 max_depth=max_depth,
                 current_depth=0
             )
-            return Response(serializer.data)
+            
+            # Include pending_users in the response
+            response_data = serializer.data
+            response_data['pending_users'] = pending_users
+            
+            return Response(response_data)
         except BinaryNode.DoesNotExist:
-            return Response(
-                {'message': 'No binary node found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            # No binary node found, but still return pending users
+            return Response({
+                'message': 'No binary node found',
+                'pending_users': pending_users
+            }, status=status.HTTP_200_OK)
         except ValueError:
             return Response(
-                {'error': 'Invalid max_depth parameter'},
+                {'error': 'Invalid max_depth parameter', 'pending_users': pending_users},
                 status=status.HTTP_400_BAD_REQUEST
             )
     

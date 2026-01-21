@@ -340,8 +340,43 @@ class NomineeViewSet(viewsets.ModelViewSet):
             return Nominee.objects.all()
         return Nominee.objects.filter(user=user)
     
+    def create(self, request, *args, **kwargs):
+        """Create or update nominee. If nominee exists for user, update it instead of creating duplicate."""
+        user = request.user
+        nominee = Nominee.objects.filter(user=user).first()
+        
+        if nominee:
+            # Nominee exists, update it
+            serializer = self.get_serializer(nominee, data=request.data, partial=False)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        else:
+            # Nominee doesn't exist, create it
+            return super().create(request, *args, **kwargs)
+    
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=['put', 'patch'], permission_classes=[IsAuthenticated])
+    def update_nominee(self, request):
+        """Update current user's nominee information (create if doesn't exist)"""
+        user = request.user
+        nominee, created = Nominee.objects.get_or_create(user=user)
+        
+        # Use partial=True for PATCH, False for PUT
+        partial = request.method == 'PATCH'
+        serializer = NomineeSerializer(nominee, data=request.data, partial=partial)
+        
+        if serializer.is_valid():
+            serializer.save()
+            # Refresh from database to ensure all fields are loaded
+            nominee.refresh_from_db()
+            # Return updated data with fresh serializer instance
+            serializer = NomineeSerializer(nominee)
+            status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            return Response(serializer.data, status=status_code)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAdminUser], url_path='update-kyc-status')
     def update_kyc_status(self, request, pk=None):
@@ -426,7 +461,7 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
     
     def create(self, request, *args, **kwargs):
-        """Create distributor application with eligibility validation"""
+        """Create distributor application with automatic approval"""
         user = request.user
         
         # Check eligibility (Active Buyer requirement removed - only KYC needed)
@@ -444,12 +479,26 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(user=user)
+        
+        # Create the application
+        application = serializer.save(user=user)
+        
+        # Automatically approve the application
+        application.status = 'approved'
+        application.reviewed_at = timezone.now()
+        application.save(update_fields=['status', 'reviewed_at'])
+        
+        # Set user as distributor immediately
+        user.is_distributor = True
+        user.save(update_fields=['is_distributor'])
+        
+        # Refresh serializer to include updated status
+        serializer = self.get_serializer(application)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     
     @action(detail=True, methods=['post'], permission_classes=[IsAdminUser], url_path='update-status')
     def update_status(self, request, pk=None):
-        """Update distributor application status - approve or reject (Admin/Staff only)"""
+        """Update distributor application status - reject or re-approve (Admin/Staff only). Applications are automatically approved upon creation."""
         application = self.get_object()
         new_status = request.data.get('status')
         
@@ -492,9 +541,14 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
             application.rejection_reason = request.data.get('reason', '')
             application.save()
             
+            # Remove distributor status when application is rejected
+            user = application.user
+            user.is_distributor = False
+            user.save(update_fields=['is_distributor'])
+            
             return Response({
                 'status': 'rejected',
-                'message': 'Application rejected.'
+                'message': f'Application rejected. User {user.username} is no longer a distributor.'
             })
     
     @action(detail=False, methods=['get'])

@@ -4,6 +4,7 @@ from .views import (
     signup, verify_signup_otp,
     create_admin, create_staff,
     send_admin_otp, verify_admin_otp_login,
+    send_universal_otp, verify_universal_otp,
     CustomTokenRefreshView
 )
 
@@ -12,6 +13,8 @@ urlpatterns = [
     path('verify-otp/', verify_otp_login, name='verify-otp'),
     path('send-admin-otp/', send_admin_otp, name='send-admin-otp'),
     path('verify-admin-otp/', verify_admin_otp_login, name='verify-admin-otp'),
+    path('send-universal-otp/', send_universal_otp, name='send-universal-otp'),
+    path('verify-universal-otp/', verify_universal_otp, name='verify-universal-otp'),
     path('refresh/', CustomTokenRefreshView.as_view(), name='token-refresh'),
     path('logout/', logout, name='logout'),
     path('signup/', signup, name='signup'),

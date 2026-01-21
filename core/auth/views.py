@@ -10,7 +10,8 @@ from .serializers import (
     SendOTPSerializer, VerifyOTPSerializer, RefreshTokenSerializer,
     SignupSerializer, VerifySignupOTPSerializer,
     CreateAdminSerializer, CreateStaffSerializer,
-    SendAdminOTPSerializer, VerifyAdminOTPSerializer
+    SendAdminOTPSerializer, VerifyAdminOTPSerializer,
+    SendUniversalOTPSerializer, VerifyUniversalOTPSerializer
 )
 from .throttles import OTPRateThrottle, OTPIdentifierThrottle
 
@@ -54,12 +55,30 @@ class CustomTokenRefreshView(TokenRefreshView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Blacklist the old refresh token
-            old_token.blacklist()
+            # Check if token is already blacklisted before attempting to blacklist
+            # The RefreshToken constructor should catch this, but we handle it explicitly
+            try:
+                # Blacklist the old refresh token
+                old_token.blacklist()
+            except TokenError as e:
+                # Token might already be blacklisted
+                error_msg = str(e)
+                if 'blacklisted' in error_msg.lower():
+                    return Response(
+                        {'detail': 'This refresh token has already been used. Please login again to get a new token.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                raise  # Re-raise if it's a different TokenError
             
         except TokenError as e:
+            error_msg = str(e)
+            if 'blacklisted' in error_msg.lower():
+                return Response(
+                    {'detail': 'This refresh token has already been used. Please login again to get a new token.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             return Response(
-                {'detail': str(e)},
+                {'detail': f'Invalid token: {error_msg}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
@@ -270,5 +289,36 @@ def create_staff(request):
             'user': user_data,
             'message': result['message']
         }, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([OTPRateThrottle, OTPIdentifierThrottle])
+def send_universal_otp(request):
+    """
+    Send OTP to any existing user (all roles: admin, staff, user)
+    Rate limited to 5 requests per minute per IP and per identifier
+    """
+    serializer = SendUniversalOTPSerializer(data=request.data)
+    if serializer.is_valid():
+        result = serializer.save()
+        return Response(result, status=status.HTTP_200_OK)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([OTPRateThrottle, OTPIdentifierThrottle])
+def verify_universal_otp(request):
+    """
+    Verify OTP for any existing user (all roles: admin, staff, user)
+    Rate limited to 5 requests per minute per IP and per identifier
+    Returns success/failure only - does not issue JWT tokens
+    """
+    serializer = VerifyUniversalOTPSerializer(data=request.data)
+    if serializer.is_valid():
+        result = serializer.save()
+        return Response(result, status=status.HTTP_200_OK)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

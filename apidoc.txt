@@ -183,6 +183,96 @@ Super User: EVAdmin && EVAdmin@123
    Rate Limit: 5 requests per minute per IP
 
 
+2C. SEND UNIVERSAL OTP (All Users)
+   Method: POST
+   URL: /api/auth/send-universal-otp/
+   Authentication: Not Required
+   Description: Send OTP to any existing user's email or mobile number. Works for all existing users regardless of role (admin, staff, or user). Only works for existing registered users - new users must use /api/auth/signup/ endpoint first.
+   
+   Request Body:
+   {
+     "identifier": "user@example.com",  // Email or mobile number
+     "otp_type": "email"                 // "email" or "mobile"
+   }
+   
+   Response (200 OK) - When user has both email and mobile:
+   {
+     "message": "OTP sent to both email (user@example.com) and mobile (9876543210)",
+     "sent_to": ["email", "mobile"]
+   }
+   
+   Response (200 OK) - When user has only one channel:
+   {
+     "message": "OTP sent to user@example.com"
+   }
+   
+   Error Response (400):
+   {
+     "non_field_errors": ["User not found. Only existing users can request OTP."]
+   }
+   OR
+   {
+     "identifier": ["Invalid email format"],
+     "otp_type": ["Invalid choice"]
+   }
+   
+   Notes:
+   - Works for all existing users (admin, staff, and regular users)
+   - Only works for existing registered users - new users must register via /api/auth/signup/ endpoint first
+   - If user has both email and mobile: Sends the same OTP code to both channels automatically
+   - If user has only one channel: Sends OTP to that channel only
+   - The same OTP code works for verification from either email or mobile (if user has both)
+   - This endpoint is for OTP verification only - does not log in the user
+   - To login after verification, use /api/auth/verify-otp/ or /api/auth/verify-admin-otp/ endpoints
+   
+   Rate Limit: 5 requests per minute per IP
+
+
+2D. VERIFY UNIVERSAL OTP (All Users)
+   Method: POST
+   URL: /api/auth/verify-universal-otp/
+   Authentication: Not Required
+   Description: Verify OTP for any existing user. Works for all existing users regardless of role (admin, staff, or user). Only verifies the OTP and returns success/failure - does not issue JWT tokens or log in the user. For login functionality, use /api/auth/verify-otp/ or /api/auth/verify-admin-otp/ endpoints.
+   
+   Request Body:
+   {
+     "identifier": "user@example.com",
+     "otp_code": "123456",
+     "otp_type": "email"  // "email" or "mobile"
+   }
+   
+   Response (200 OK):
+   {
+     "message": "OTP verified successfully"
+   }
+   
+   Error Response (400):
+   {
+     "non_field_errors": ["Invalid or expired OTP"]
+   }
+   OR
+   {
+     "non_field_errors": ["User not found. Only existing users can verify OTP."]
+   }
+   OR
+   {
+     "identifier": ["Invalid email format"],
+     "otp_type": ["Invalid choice"]
+   }
+   
+   Notes:
+   - Works for all existing users (admin, staff, and regular users)
+   - Only works for existing registered users - new users must register via /api/auth/signup/ endpoint first
+   - If user has both email and mobile: The same OTP code can be verified from either email or mobile channel
+   - If user has only one channel: OTP must be verified from that specific channel
+   - Only verifies the OTP - does NOT issue JWT tokens or log in the user
+   - For login functionality, use /api/auth/verify-otp/ (regular users) or /api/auth/verify-admin-otp/ (admin/staff) endpoints
+   - This endpoint is useful for OTP verification scenarios where login is not required (e.g., password reset, email verification, etc.)
+   - No auto-creation of user accounts - users must register first
+   
+   Rate Limit: 5 requests per minute per IP
+
+
 3. REFRESH TOKEN
    Method: POST
    URL: /api/auth/refresh/
@@ -430,6 +520,7 @@ Super User: EVAdmin && EVAdmin@123
      "referred_by": null,
      "kyc_status": "approved",
      "nominee_exists": true,
+     "is_distributor_terms_and_conditions_accepted": true,
      "date_joined": "2026-01-06T12:00:00Z"
    }
 
@@ -898,12 +989,18 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/users/distributor-application/
     Authentication: Required
-    Description: Submit distributor application form. User must be an Active Buyer (total paid ≥ ₹5000) and have approved KYC.
+    Description: Submit distributor application form. Application is automatically approved upon creation, and user becomes a distributor immediately. User must have approved KYC to apply.
     
     Eligibility Requirements:
     - User must have approved KYC (kyc.status = 'approved')
     - User can only submit one application
     - Note: Active Buyer requirement removed - only KYC verification needed
+    
+    Automatic Approval:
+    - Application is automatically approved upon successful creation (status = 'approved')
+    - User.is_distributor is automatically set to True
+    - No admin/staff approval required
+    - User can immediately start earning from binary pairs and referrals
     
     Request Body (multipart/form-data):
     {
@@ -916,6 +1013,7 @@ Super User: EVAdmin && EVAdmin@123
       "reference_name": "John Smith",                // Optional
       "reference_contact": "+919876543210",          // Optional
       "reference_relationship": "Business Partner",  // Optional
+      "is_distributor_terms_and_conditions_accepted": true,  // Required - Must be true
       "business_license": <file>,                     // Optional - Business license document
       "tax_documents": <file>                         // Optional - Tax documents
     }
@@ -927,7 +1025,7 @@ Super User: EVAdmin && EVAdmin@123
       "user_email": "user@example.com",
       "user_username": "user@example.com",
       "user_full_name": "John Doe",
-      "status": "pending",
+      "status": "approved",  // Automatically approved upon creation
       "company_name": "ABC Distributors Pvt Ltd",
       "business_registration_number": "REG123456",
       "tax_id": "TAX789012",
@@ -937,13 +1035,20 @@ Super User: EVAdmin && EVAdmin@123
       "reference_name": "John Smith",
       "reference_contact": "+919876543210",
       "reference_relationship": "Business Partner",
+      "is_distributor_terms_and_conditions_accepted": true,
       "business_license": "http://localhost:8000/media/distributor/business_license/license_1.pdf",
       "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
       "submitted_at": "2026-01-14T10:00:00Z",
-      "reviewed_at": null,
-      "reviewed_by": null,
+      "reviewed_at": "2026-01-14T10:00:00Z",  // Set automatically upon creation
+      "reviewed_by": null,  // No reviewer since auto-approved
       "rejection_reason": ""
     }
+    
+    Notes:
+    - Application is automatically approved upon creation
+    - User.is_distributor is automatically set to True
+    - User can immediately start earning from binary pairs and referrals
+    - No admin/staff approval required
     
     Error Response (400 Bad Request):
     {
@@ -955,6 +1060,12 @@ Super User: EVAdmin && EVAdmin@123
     {
       "non_field_errors": [
         "Application already exists. You can only submit one distributor application."
+      ]
+    }
+    OR
+    {
+      "is_distributor_terms_and_conditions_accepted": [
+        "You cannot Proceed without Accepting Terms and Conditions"
       ]
     }
 
@@ -972,11 +1083,12 @@ Super User: EVAdmin && EVAdmin@123
       "user_email": "user@example.com",
       "user_username": "user@example.com",
       "user_full_name": "John Doe",
-      "status": "pending",  // "pending", "approved", "rejected"
+      "status": "approved",  // "approved" (auto-approved) or "rejected" (if admin rejected)
       "company_name": "ABC Distributors Pvt Ltd",
+      "is_distributor_terms_and_conditions_accepted": true,
       "submitted_at": "2026-01-14T10:00:00Z",
-      "reviewed_at": null,
-      "reviewed_by": null,
+      "reviewed_at": "2026-01-14T10:00:00Z",  // Set automatically upon creation
+      "reviewed_by": null,  // null for auto-approved applications
       "rejection_reason": ""
     }
     
@@ -1014,6 +1126,7 @@ Super User: EVAdmin && EVAdmin@123
       "reference_name": "John Smith",
       "reference_contact": "+919876543210",
       "reference_relationship": "Business Partner",
+      "is_distributor_terms_and_conditions_accepted": true,
       "business_license": "http://localhost:8000/media/distributor/business_license/license_1.pdf",
       "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
       "submitted_at": "2026-01-14T10:00:00Z",
@@ -1032,7 +1145,7 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/users/distributor-application/{id}/update-status/
     Authentication: Required (Admin, Staff, or Superuser)
-    Description: Approve or reject distributor application. Sets application.status to 'approved' or 'rejected'. Upon approval, sets user.is_distributor = True.
+    Description: Reject or re-approve distributor application. Applications are automatically approved upon creation, but admin/staff can reject them if needed. Setting status to 'approved' sets user.is_distributor = True. Setting status to 'rejected' sets user.is_distributor = False.
     
     Permission Requirements:
     - Superuser (is_superuser=True)
@@ -1045,11 +1158,12 @@ Super User: EVAdmin && EVAdmin@123
       "reason": "Insufficient business experience"  // Optional, only used when status is "rejected"
     }
     
-    Example Request (Approve):
+    Example Request (Re-approve):
     POST /api/users/distributor-application/1/update-status/
     {
       "status": "approved"
     }
+    Note: Applications are automatically approved upon creation. This endpoint is mainly for re-approving previously rejected applications.
     
     Example Request (Reject):
     POST /api/users/distributor-application/1/update-status/
@@ -1057,6 +1171,7 @@ Super User: EVAdmin && EVAdmin@123
       "status": "rejected",
       "reason": "Insufficient business experience"
     }
+    Note: Rejecting an application will set user.is_distributor = False, removing distributor privileges.
     
     Response (200 OK) - When Approved:
     {
@@ -1086,8 +1201,11 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Notes:
-    - Upon approval, user.is_distributor is automatically set to True
-    - User can now earn from binary pairs and referrals after approval
+    - Applications are automatically approved upon creation (via CREATE endpoint)
+    - This endpoint is primarily for rejecting applications or re-approving previously rejected ones
+    - Upon approval (or re-approval), user.is_distributor is automatically set to True
+    - Upon rejection, user.is_distributor is automatically set to False
+    - User can earn from binary pairs and referrals only when is_distributor = True
     - Only one application per user is allowed
     - Normal users cannot update application status
     - Reason field is optional and only used when status is "rejected"
@@ -4261,7 +4379,7 @@ Standard Error Format:
                          RATE LIMITING
 ================================================================================
 
-- OTP Endpoints (/api/auth/send-otp/, /api/auth/verify-otp/, /api/auth/send-admin-otp/, /api/auth/verify-admin-otp/): 
+- OTP Endpoints (/api/auth/send-otp/, /api/auth/verify-otp/, /api/auth/send-admin-otp/, /api/auth/verify-admin-otp/, /api/auth/send-universal-otp/, /api/auth/verify-universal-otp/): 
   5 requests per minute per IP
 
 - Booking Endpoints (/api/booking/): 
@@ -4319,7 +4437,7 @@ Standard Error Format:
 11. Reservation Timeout: Configurable via Platform Settings API (stored in minutes, null = never expires)
 12. Distributor Requirement: Only approved distributors can earn from binary pairs, direct user commissions, and referral bonuses
 13. Distributor Eligibility: User must have approved KYC to apply for distributor program (Active Buyer requirement removed)
-14. Distributor Application: Each user can submit only one distributor application; admin/staff approval required to become distributor
+14. Distributor Application: Each user can submit only one distributor application; application is automatically approved upon creation and user becomes distributor immediately (no admin/staff approval required). Admin/staff can still reject applications if needed via update-status endpoint.
 15. Binary Tree Placement: Users are NOT automatically placed in binary tree during booking creation. Placement APIs can ONLY be called AFTER user has successful payment. Referrers must place users AFTER payment via /api/binary/nodes/auto_place_pending/ (automatic) or /api/binary/nodes/place_user/ (manual). Commission is paid when placement happens (regardless of when payment was completed). Auto-placement uses left-priority algorithm: 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain. Referral-based override: If using specific parent's code, place in that parent's tree. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side). Parents can choose side for direct referrals and swap/move direct children via API endpoints.
 16. Manual Tree Placement: Tree owners can manually place/move users in their tree via placement APIs; only users who used referrer's code can be placed
 17. Commission Configuration: All binary commission amounts, thresholds, TDS settings, and daily limits are configurable via Platform Settings API
