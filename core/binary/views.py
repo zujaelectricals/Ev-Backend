@@ -125,12 +125,61 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             node = BinaryNode.objects.select_related(
                 'user', 'user__wallet', 'parent', 'parent__user'
             ).get(user=request.user)
-            max_depth = int(request.query_params.get('max_depth', 5))
+            
+            # Parse query parameters with defaults
+            try:
+                max_depth = int(request.query_params.get('max_depth', 5))
+            except (ValueError, TypeError):
+                max_depth = 5
+            
+            try:
+                min_depth = int(request.query_params.get('min_depth', 0))
+            except (ValueError, TypeError):
+                min_depth = 0
+            
+            # Parse side filter (left, right, both)
+            side_filter = request.query_params.get('side', 'both').lower()
+            if side_filter not in ['left', 'right', 'both']:
+                side_filter = 'both'
+            
+            # Parse pagination parameters (optional - if not provided, returns all members for backward compatibility)
+            page = request.query_params.get('page')
+            page_size = request.query_params.get('page_size')
+            
+            if page:
+                try:
+                    page = int(page)
+                except (ValueError, TypeError):
+                    page = None
+            
+            if page_size:
+                try:
+                    page_size = int(page_size)
+                    # Enforce max page_size of 100
+                    if page_size > 100:
+                        page_size = 100
+                    if page_size < 1:
+                        page_size = None
+                except (ValueError, TypeError):
+                    page_size = None
+            
+            # Validate depth parameters
+            if min_depth < 0:
+                min_depth = 0
+            if max_depth < 1:
+                max_depth = 5
+            if min_depth > max_depth:
+                min_depth = 0
             
             serializer = BinaryTreeNodeSerializer(
                 node,
                 max_depth=max_depth,
-                current_depth=0
+                min_depth=min_depth,
+                current_depth=0,
+                side_filter=side_filter,
+                page=page,
+                page_size=page_size,
+                request=request
             )
             
             # Include pending_users in the response
@@ -144,9 +193,9 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 'message': 'No binary node found',
                 'pending_users': pending_users
             }, status=status.HTTP_200_OK)
-        except ValueError:
+        except ValueError as e:
             return Response(
-                {'error': 'Invalid max_depth parameter', 'pending_users': pending_users},
+                {'error': f'Invalid parameter: {str(e)}', 'pending_users': pending_users},
                 status=status.HTTP_400_BAD_REQUEST
             )
     

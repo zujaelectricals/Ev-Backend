@@ -717,10 +717,34 @@ Super User: EVAdmin && EVAdmin@123
     URL: /api/users/normal/
     Authentication: Required (Superuser, Admin, or Staff)
     Description: List all normal users. Superuser, admin, and staff can access this endpoint.
+    Supports filtering by is_distributor, date_joined, search (name), and ordering.
     
     Query Parameters:
     - page: Page number (default: 1)
     - page_size: Items per page (default: 20)
+    - is_distributor: Filter by distributor status (true/false)
+      - is_distributor=true: Return only distributors
+      - is_distributor=false: Return only non-distributors
+      - If not provided: Return all normal users
+    - date_joined_from: Filter users joined on or after this date (format: YYYY-MM-DD)
+      Example: date_joined_from=2024-01-01
+    - date_joined_to: Filter users joined on or before this date (format: YYYY-MM-DD)
+      Example: date_joined_to=2024-12-31
+    - search: Search users by name (case-insensitive partial match)
+      Searches across: first_name, last_name, username, and email fields
+      Example: search=john (matches "John", "john@example.com", "john_doe", etc.)
+    - ordering: Order results by field (default: id)
+      Allowed values: id, -id, date_joined, -date_joined, username, -username, email, -email, first_name, -first_name, last_name, -last_name
+      Example: ordering=-date_joined (newest first)
+    
+    Examples:
+    - Get all distributors: /api/users/normal/?is_distributor=true
+    - Get non-distributors: /api/users/normal/?is_distributor=false
+    - Get users joined in 2024: /api/users/normal/?date_joined_from=2024-01-01&date_joined_to=2024-12-31
+    - Get distributors joined after 2024-01-01: /api/users/normal/?is_distributor=true&date_joined_from=2024-01-01
+    - Search for users by name: /api/users/normal/?search=john
+    - Search distributors by name: /api/users/normal/?is_distributor=true&search=john
+    - Get users ordered by join date (newest first): /api/users/normal/?ordering=-date_joined
     
     Response (200 OK):
     {
@@ -737,6 +761,8 @@ Super User: EVAdmin && EVAdmin@123
           "first_name": "John",
           "last_name": "Doe",
           "is_active_buyer": true,
+          "is_distributor": false,
+          "date_joined": "2024-01-15T10:30:00Z",
           ...
         }
       ]
@@ -2974,10 +3000,32 @@ Super User: EVAdmin && EVAdmin@123
     Method: GET
     URL: /api/binary/nodes/tree_structure/
     Authentication: Required
-    Description: Get full binary tree structure with all children (recursive tree view)
+    Description: Get full binary tree structure with all children (recursive tree view). Supports pagination and filtering by side.
     
     Query Parameters:
+    - side: Filter by side ("left", "right", "both") - default: "both"
+      * "left": Returns only left side members and left_child (excludes right_side_members and right_child)
+      * "right": Returns only right side members and right_child (excludes left_side_members and left_child)
+      * "both": Returns both sides (default behavior)
+    - page: Page number for side members pagination (default: 1, optional)
+      * If not provided, returns all members (backward compatibility)
+      * Only applies to left_side_members and right_side_members arrays
+    - page_size: Items per page for side members (default: 20, max: 100, optional)
+      * If not provided, returns all members (backward compatibility)
+      * Only applies to left_side_members and right_side_members arrays
+    - min_depth: Minimum depth to include (default: 0, optional)
+      * Filters members based on their depth level in the tree
     - max_depth: Maximum depth to traverse (default: 5, optional)
+      * Limits how deep the tree is traversed (prevents excessive recursion)
+    
+    Example Requests:
+    GET /api/binary/nodes/tree_structure/
+    GET /api/binary/nodes/tree_structure/?side=left
+    GET /api/binary/nodes/tree_structure/?side=right
+    GET /api/binary/nodes/tree_structure/?page=1&page_size=20
+    GET /api/binary/nodes/tree_structure/?side=left&page=1&page_size=10
+    GET /api/binary/nodes/tree_structure/?min_depth=1&max_depth=3
+    GET /api/binary/nodes/tree_structure/?side=left&page=2&page_size=20&max_depth=5
     
     Response (200 OK):
     {
@@ -3006,172 +3054,84 @@ Super User: EVAdmin && EVAdmin@123
       "right_count": 3,
       "binary_commission_activated": true,
       "activation_timestamp": "2026-01-06T12:00:00Z",
-      "left_side_members": [
-        {
-          "id": 2,
-          "user_id": 2,
-          "user_email": "user2@example.com",
-          "user_username": "user2@example.com",
-          "user_full_name": "Jane Smith",
-          "user_mobile": "+919876543211",
-          "user_first_name": "Jane",
-          "user_last_name": "Smith",
-          "user_city": "Delhi",
-          "user_state": "Delhi",
-          "is_distributor": false,
-          "is_active_buyer": true,
-          "referral_code": "REF00002",
-          "date_joined": "2026-01-07T10:00:00Z",
-          "wallet_balance": "5000.00",
-          "total_bookings": 2,
-          "total_binary_pairs": 3,
-          "total_earnings": "8000.00",
-          "parent": 1,
-          "side": "left",
-          "level": 1,
-          "left_count": 2,
-          "right_count": 1,
-          "created_at": "2026-01-07T10:00:00Z",
-          "updated_at": "2026-01-07T10:00:00Z"
-        },
-        {
-          "id": 4,
-          "user_id": 4,
-          "user_email": "user4@example.com",
-          "user_username": "user4@example.com",
-          "user_full_name": "Alice Brown",
-          "user_mobile": "+919876543212",
-          "user_first_name": "Alice",
-          "user_last_name": "Brown",
-          "user_city": "Bangalore",
-          "user_state": "Karnataka",
-          "is_distributor": false,
-          "is_active_buyer": false,
-          "referral_code": "REF00004",
-          "date_joined": "2026-01-08T14:00:00Z",
-          "wallet_balance": "0.00",
-          "total_bookings": 0,
-          "total_binary_pairs": 0,
-          "total_earnings": "0.00",
-          "parent": 2,
-          "side": "left",
-          "level": 2,
-          "left_count": 0,
-          "right_count": 0,
-          "created_at": "2026-01-08T14:00:00Z",
-          "updated_at": "2026-01-08T14:00:00Z"
-        },
-        {
-          "id": 5,
-          "user_id": 5,
-          "user_email": "user5@example.com",
-          "user_username": "user5@example.com",
-          "user_full_name": "Charlie Wilson",
-          "user_mobile": "+919876543213",
-          "user_first_name": "Charlie",
-          "user_last_name": "Wilson",
-          "user_city": "Chennai",
-          "user_state": "Tamil Nadu",
-          "is_distributor": false,
-          "is_active_buyer": false,
-          "referral_code": "REF00005",
-          "date_joined": "2026-01-09T09:00:00Z",
-          "wallet_balance": "0.00",
-          "total_bookings": 0,
-          "total_binary_pairs": 0,
-          "total_earnings": "0.00",
-          "parent": 2,
-          "side": "right",
-          "level": 2,
-          "left_count": 0,
-          "right_count": 0,
-          "created_at": "2026-01-09T09:00:00Z",
-          "updated_at": "2026-01-09T09:00:00Z"
-        }
-      ],
-      "right_side_members": [
-        {
-          "id": 3,
-          "user_id": 3,
-          "user_email": "user3@example.com",
-          "user_username": "user3@example.com",
-          "user_full_name": "Bob Johnson",
-          "user_mobile": "+919876543214",
-          "user_first_name": "Bob",
-          "user_last_name": "Johnson",
-          "user_city": "Pune",
-          "user_state": "Maharashtra",
-          "is_distributor": false,
-          "is_active_buyer": true,
-          "referral_code": "REF00003",
-          "date_joined": "2026-01-07T15:00:00Z",
-          "wallet_balance": "3000.00",
-          "total_bookings": 1,
-          "total_binary_pairs": 2,
-          "total_earnings": "5000.00",
-          "parent": 1,
-          "side": "right",
-          "level": 1,
-          "left_count": 1,
-          "right_count": 2,
-          "created_at": "2026-01-07T15:00:00Z",
-          "updated_at": "2026-01-07T15:00:00Z"
-        },
-        {
-          "id": 6,
-          "user_id": 6,
-          "user_email": "user6@example.com",
-          "user_username": "user6@example.com",
-          "user_full_name": "David Lee",
-          "user_mobile": "+919876543215",
-          "user_first_name": "David",
-          "user_last_name": "Lee",
-          "user_city": "Hyderabad",
-          "user_state": "Telangana",
-          "is_distributor": false,
-          "is_active_buyer": false,
-          "referral_code": "REF00006",
-          "date_joined": "2026-01-10T11:00:00Z",
-          "wallet_balance": "0.00",
-          "total_bookings": 0,
-          "total_binary_pairs": 0,
-          "total_earnings": "0.00",
-          "parent": 3,
-          "side": "left",
-          "level": 2,
-          "left_count": 0,
-          "right_count": 0,
-          "created_at": "2026-01-10T11:00:00Z",
-          "updated_at": "2026-01-10T11:00:00Z"
-        },
-        {
-          "id": 7,
-          "user_id": 7,
-          "user_email": "user7@example.com",
-          "user_username": "user7@example.com",
-          "user_full_name": "Emma Davis",
-          "user_mobile": "+919876543216",
-          "user_first_name": "Emma",
-          "user_last_name": "Davis",
-          "user_city": "Kolkata",
-          "user_state": "West Bengal",
-          "is_distributor": false,
-          "is_active_buyer": false,
-          "referral_code": "REF00007",
-          "date_joined": "2026-01-11T08:00:00Z",
-          "wallet_balance": "0.00",
-          "total_bookings": 0,
-          "total_binary_pairs": 0,
-          "total_earnings": "0.00",
-          "parent": 3,
-          "side": "right",
-          "level": 2,
-          "left_count": 0,
-          "right_count": 0,
-          "created_at": "2026-01-11T08:00:00Z",
-          "updated_at": "2026-01-11T08:00:00Z"
-        }
-      ],
+      "left_side_members": {
+        "count": 50,
+        "page": 1,
+        "page_size": 20,
+        "total_pages": 3,
+        "next": "http://localhost:8000/api/binary/nodes/tree_structure/?side=both&page=2&page_size=20",
+        "previous": null,
+        "results": [
+          {
+            "node_id": 4,
+            "user_id": 4,
+            "user_email": "user4@example.com",
+            "user_username": "user4@example.com",
+            "user_full_name": "Alice Brown",
+            "user_mobile": "+919876543212",
+            "user_first_name": "Alice",
+            "user_last_name": "Brown",
+            "user_city": "Bangalore",
+            "user_state": "Karnataka",
+            "is_distributor": false,
+            "is_active_buyer": false,
+            "referral_code": "REF00004",
+            "date_joined": "2026-01-08T14:00:00Z",
+            "wallet_balance": "0.00",
+            "total_bookings": 0,
+            "total_binary_pairs": 0,
+            "total_earnings": "0.00",
+            "parent": 2,
+            "side": "left",
+            "level": 2,
+            "left_count": 0,
+            "right_count": 0,
+            "created_at": "2026-01-08T14:00:00Z",
+            "updated_at": "2026-01-08T14:00:00Z"
+          }
+          // ... more members (up to page_size)
+        ]
+      },
+      // Note: If side="left", right_side_members will be null
+      // Note: If pagination not requested, left_side_members and right_side_members return as arrays (backward compatibility)
+      "right_side_members": {
+        "count": 30,
+        "page": 1,
+        "page_size": 20,
+        "total_pages": 2,
+        "next": "http://localhost:8000/api/binary/nodes/tree_structure/?side=both&page=2&page_size=20",
+        "previous": null,
+        "results": [
+          {
+            "node_id": 6,
+            "user_id": 6,
+            "user_email": "user6@example.com",
+            "user_username": "user6@example.com",
+            "user_full_name": "David Lee",
+            "user_mobile": "+919876543215",
+            "user_first_name": "David",
+            "user_last_name": "Lee",
+            "user_city": "Hyderabad",
+            "user_state": "Telangana",
+            "is_distributor": false,
+            "is_active_buyer": false,
+            "referral_code": "REF00006",
+            "date_joined": "2026-01-10T11:00:00Z",
+            "wallet_balance": "0.00",
+            "total_bookings": 0,
+            "total_binary_pairs": 0,
+            "total_earnings": "0.00",
+            "parent": 3,
+            "side": "left",
+            "level": 2,
+            "left_count": 0,
+            "right_count": 0,
+            "created_at": "2026-01-10T11:00:00Z",
+            "updated_at": "2026-01-10T11:00:00Z"
+          }
+          // ... more members (up to page_size)
+        ]
+      },
       "left_child": {
         "id": 2,
         "user_id": 2,
@@ -3356,8 +3316,44 @@ Super User: EVAdmin && EVAdmin@123
       "error": "Invalid max_depth parameter"
     }
     
+    Response when filtering by left side only (side=left):
+    {
+      // ... root node fields ...
+      "left_child": { ... },  // Included
+      "right_child": null,     // Excluded when side="left"
+      "left_side_members": { ... },  // Paginated structure
+      "right_side_members": null,    // Excluded when side="left"
+      "pending_users": [ ... ]
+    }
+    
+    Response when filtering by right side only (side=right):
+    {
+      // ... root node fields ...
+      "left_child": null,      // Excluded when side="right"
+      "right_child": { ... },  // Included
+      "left_side_members": null,     // Excluded when side="right"
+      "right_side_members": { ... }, // Paginated structure
+      "pending_users": [ ... ]
+    }
+    
+    Response without pagination (backward compatibility):
+    {
+      // ... root node fields ...
+      "left_side_members": [ ... ],  // Array (not paginated)
+      "right_side_members": [ ... ], // Array (not paginated)
+      "pending_users": [ ... ]
+    }
+    
     Notes:
     - Returns recursive tree structure with all child nodes
+    - Root node is always included regardless of filters
+    - Direct children (left_child, right_child) are conditionally included based on side filter
+    - Side filtering: When side="left", right_side_members and right_child are excluded (set to null)
+    - Side filtering: When side="right", left_side_members and left_child are excluded (set to null)
+    - Pagination: Only applies to left_side_members and right_side_members arrays
+    - Pagination: If page and page_size are not provided, returns all members as arrays (backward compatibility)
+    - Pagination: When pagination is requested, side_members return as objects with count, page, page_size, total_pages, next, previous, and results
+    - Depth filtering: min_depth and max_depth filter members based on their level in the tree
     - max_depth parameter limits how deep the tree is traversed (prevents excessive recursion)
     - Only tree owner can view their own tree structure
     - Each node includes comprehensive member details:
@@ -3369,16 +3365,17 @@ Super User: EVAdmin && EVAdmin@123
       * Tree Position: parent, side, level, left_count, right_count
       * Binary Commission: binary_commission_activated, activation_timestamp (timestamp when activation occurred)
       * Children: left_child, right_child (recursive structure)
-      * Side Members: left_side_members, right_side_members (flat lists of all members on each side)
+      * Side Members: left_side_members, right_side_members (paginated or flat lists of all members on each side)
     - Pair Matching Eligibility: Only members created at or after activation_timestamp are eligible for pairing
       * Pre-activation members (1st and 2nd) are excluded, 3rd member (activation trigger) and all subsequent members are included
-    - left_side_members: Array containing all members on the left side with full details (all levels)
-    - right_side_members: Array containing all members on the right side with full details (all levels)
-    - left_child/right_child: Recursive tree structure showing parent-child relationships
-    - left_side_members/right_side_members: Flat lists showing all members on each side for easy access
-    - All member details are included for each node in the tree (both left and right sides)
+    - left_side_members: Paginated object or array containing all members on the left side with full details (all levels)
+    - right_side_members: Paginated object or array containing all members on the right side with full details (all levels)
+    - left_child/right_child: Recursive tree structure showing parent-child relationships (conditionally included based on side filter)
+    - left_side_members/right_side_members: Paginated objects or flat lists showing all members on each side for easy access
+    - All member details are included for each node in the tree (both left and right sides, unless filtered)
     - Wallet balance and earnings are returned as strings with 2 decimal places
     - If user doesn't have a wallet, balance and earnings default to "0.00"
+    - Backward Compatibility: Existing API calls without new parameters work exactly as before (returns all members as arrays)
 
 
 54. MANUALLY PLACE USER IN TREE
@@ -4209,11 +4206,371 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
+84. DISTRIBUTOR DASHBOARD (Distributors Only)
+    Method: GET
+    URL: /api/reports/distributor-dashboard/
+    Authentication: Required (Distributors only)
+    Description: Get comprehensive distributor dashboard with team performance, growth trends, sales activity, and commission data. Only accessible to users with is_distributor=True.
+    
+    Response (200 OK):
+    {
+      "top_performers": [
+        {
+          "name": "Amalnath C K",
+          "referrals": 3,
+          "team": "RSA"
+        },
+        {
+          "name": "Nizamol V K",
+          "referrals": 3,
+          "team": "RSB"
+        },
+        {
+          "name": "Anupriya Raj",
+          "referrals": 2,
+          "team": "RSA"
+        },
+        {
+          "name": "Rubina mol k",
+          "referrals": 1,
+          "team": "RSA"
+        },
+        {
+          "name": "Anamika Soman",
+          "referrals": 0,
+          "team": "RSA"
+        }
+      ],
+      "team_growth_trend": {
+        "months": ["Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+        "counts": [0, 0, 2, 4, 6, 8]
+      },
+      "team_distribution": {
+        "rsa_percentage": 63,
+        "rsb_percentage": 38,
+        "rsa_count": 5,
+        "rsb_count": 3
+      },
+      "recent_sales_activity": [
+        {
+          "date": "21 Jan 2026",
+          "left_pv": "5000.00",
+          "right_pv": "5000.00",
+          "matched_pv": "5000.00",
+          "commission": "2000.00",
+          "net_amount": "1800.00",
+          "status": "matched"
+        },
+        {
+          "date": "20 Jan 2026",
+          "left_pv": "5000.00",
+          "right_pv": "5000.00",
+          "matched_pv": "5000.00",
+          "commission": "2000.00",
+          "net_amount": "1800.00",
+          "status": "matched"
+        },
+        {
+          "date": "19 Jan 2026",
+          "left_pv": "5000.00",
+          "right_pv": "5000.00",
+          "matched_pv": "5000.00",
+          "commission": "2000.00",
+          "net_amount": "1800.00",
+          "status": "matched"
+        }
+      ],
+      "commission_trend": {
+        "months": ["Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+        "amounts": [9000.0, 9000.0, 9000.0, 9000.0, 9000.0, 9000.0]
+      }
+    }
+    
+    Error Response (403 Forbidden):
+    {
+      "detail": "This endpoint is only available for distributors."
+    }
+    
+    Error Response (404 Not Found):
+    {
+      "error": "Binary node not found. Please ensure you have a binary tree structure."
+    }
+    
+    Notes:
+    - Only users with is_distributor=True can access this endpoint
+    - Returns comprehensive analytics for distributors including:
+      * Top Performers: Top 5 team members with highest referrals (sorted by referral count)
+      * Team Growth Trend: Monthly team member growth for last 6 calendar months
+      * Team Distribution: RSA (left) vs RSB (right) distribution as percentages and counts
+      * Recent Sales Activity: Last 20 binary pairs with Left PV, Right PV, Matched PV, Commission, Net Amount, and Status
+      * Commission Trend: Monthly commission earnings (net_amount) for last 6 calendar months
+    - Top Performers:
+      * Includes all team members in distributor's binary tree (all descendants)
+      * Counts total referrals for each member (direct referrals + booking referrals)
+      * Team assignment: RSA for left side, RSB for right side
+      * Returns top 5 performers sorted by referral count (descending)
+    - Team Growth Trend:
+      * Groups team members by month of creation (using BinaryNode created_at)
+      * Returns data for last 6 calendar months
+      * Handles year rollover correctly
+    - Team Distribution:
+      * Calculates RSA (left) vs RSB (right) percentages from BinaryNode counts
+      * Updates counts before calculation for accuracy
+      * Returns percentages and absolute counts
+    - Recent Sales Activity:
+      * Gets last 20 binary pairs for distributor
+      * Left PV: Sum of completed payment amounts for left_user (or booking amount fallback)
+      * Right PV: Sum of completed payment amounts for right_user (or booking amount fallback)
+      * Matched PV: Minimum of Left PV and Right PV, or pair_amount from BinaryPair
+      * Commission: pair_amount or earning_amount from BinaryPair
+      * Net Amount: net_amount from BinaryEarning
+      * Status: status from BinaryPair (matched, pending, processed)
+      * Date: Formatted as "DD MMM YYYY" (e.g., "21 Jan 2026")
+    - Commission Trend:
+      * Groups BinaryEarning records by month (from created_at)
+      * Sums net_amount per month for last 6 calendar months
+      * Returns formatted data for bar chart visualization
+    - PV (Point Value) Calculation:
+      * Left PV: Sum of completed payment amounts for left_user, or booking amount if no payments
+      * Right PV: Sum of completed payment amounts for right_user, or booking amount if no payments
+      * Matched PV: Minimum of Left PV and Right PV, or pair_amount if available
+    - Requires binary node to exist (returns 404 if not found)
+    - All monetary values are returned as strings with 2 decimal places
+    - Month names are abbreviated (Jan, Feb, Mar, etc.)
+    - Team assignment (RSA/RSB) is based on user's side in BinaryNode relative to distributor's tree
+
+
+85. ADMIN DASHBOARD (Admin/Staff Only)
+    Method: GET
+    URL: /api/reports/admin-dashboard/
+    Authentication: Required (Admin or Staff)
+    Description: Get comprehensive admin dashboard with all business intelligence metrics including KPIs, charts, sales funnel, conversion rates, buyer segments, and staff performance. Only accessible to admin and staff roles.
+    
+    Response (200 OK):
+    {
+      "kpi_cards": {
+        "active_buyers": {
+          "value": 8450,
+          "change": 8.5,
+          "trend": "up"
+        },
+        "total_visitors": {
+          "value": 10000,
+          "change": 8.2,
+          "trend": "up"
+        },
+        "pre_booked": {
+          "value": 1250,
+          "conversion": 12.5
+        },
+        "paid_orders": {
+          "value": 850,
+          "conversion": 68.0
+        },
+        "delivered": {
+          "value": 720,
+          "conversion": 84.7
+        }
+      },
+      "booking_trends": {
+        "months": ["Jan", "Feb", "Mar", "Apr"],
+        "bookings": [120, 180, 240, 300],
+        "growth": 15.2
+      },
+      "payment_distribution": {
+        "full_payment": {
+          "count": 450,
+          "percentage": 45.0
+        },
+        "emi": {
+          "count": 300,
+          "percentage": 30.0
+        },
+        "wallet": {
+          "count": 150,
+          "percentage": 15.0
+        },
+        "mixed": {
+          "count": 100,
+          "percentage": 10.0
+        }
+      },
+      "staff_performance": [
+        {
+          "name": "Rahul",
+          "achievement": 85
+        },
+        {
+          "name": "Priya",
+          "achievement": 92
+        },
+        {
+          "name": "Amit",
+          "achievement": 78
+        },
+        {
+          "name": "Sneha",
+          "achievement": 88
+        },
+        {
+          "name": "Vikram",
+          "achievement": 68
+        }
+      ],
+      "buyer_growth_trend": {
+        "months": ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
+        "active_buyers": [3000, 3500, 4000, 4500, 5000, 5500],
+        "total_buyers": [7000, 7500, 8000, 8500, 9000, 9500]
+      },
+      "buyer_segments": {
+        "active_buyers": 6100,
+        "inactive": 2650,
+        "pre_booked": 1250,
+        "new_this_month": 950
+      },
+      "sales_funnel": [
+        {
+          "stage": "Visitors",
+          "count": 10000,
+          "percentage": 100.0,
+          "drop_off": null
+        },
+        {
+          "stage": "Interested",
+          "count": 3500,
+          "percentage": 35.0,
+          "drop_off": 65.0
+        },
+        {
+          "stage": "Pre-Booked",
+          "count": 1250,
+          "percentage": 12.5,
+          "drop_off": 64.3
+        },
+        {
+          "stage": "Paid",
+          "count": 850,
+          "percentage": 8.5,
+          "drop_off": 32.0
+        },
+        {
+          "stage": "Delivered",
+          "count": 720,
+          "percentage": 7.2,
+          "drop_off": 15.3
+        }
+      ],
+      "conversion_rates": [
+        {
+          "from": "Visitors",
+          "to": "Interested",
+          "rate": 35.0,
+          "change": 2.5,
+          "trend": "up",
+          "converted_count": 3500
+        },
+        {
+          "from": "Interested",
+          "to": "Pre-Booked",
+          "rate": 35.7,
+          "change": 1.2,
+          "trend": "down",
+          "converted_count": 1250
+        },
+        {
+          "from": "Pre-Booked",
+          "to": "Paid",
+          "rate": 68.0,
+          "change": 3.8,
+          "trend": "up",
+          "converted_count": 850
+        },
+        {
+          "from": "Paid",
+          "to": "Delivered",
+          "rate": 84.7,
+          "change": 0.5,
+          "trend": "up",
+          "converted_count": 720
+        }
+      ]
+    }
+    
+    Error Response (403 Forbidden):
+    {
+      "detail": "This endpoint is only available for admin and staff users."
+    }
+    
+    Notes:
+    - Only Admin and Staff roles can access this endpoint
+    - Returns comprehensive dashboard data including:
+      * KPI Cards: Active Buyers, Total Visitors, Pre-Booked, Paid Orders, Delivered with percentage changes and conversion rates
+      * Booking Trends: Monthly booking data for last 4 months with growth percentage
+      * Payment Distribution: Breakdown by payment type (Full Payment, EMI, Wallet, Mixed) with counts and percentages
+      * Staff Performance: Achievement percentages for all staff members based on bookings processed
+      * Buyer Growth Trend: Cumulative active buyers and total buyers over last 6 months
+      * Buyer Segments: Distribution of buyer categories (Active, Inactive, Pre-Booked, New This Month)
+      * Sales Funnel: 5-stage funnel (Visitors → Interested → Pre-Booked → Paid → Delivered) with drop-off percentages
+      * Conversion Rates: Stage-to-stage conversion rates with trend indicators (up/down) and percentage changes
+    - KPI Cards:
+      * Active Buyers: Count of users with is_active_buyer=True, with percentage change vs last month
+      * Total Visitors: Total registered users count, with percentage change vs last month
+      * Pre-Booked: Bookings with status='pending', with conversion rate from total visitors
+      * Paid Orders: Bookings with completed payments, with conversion rate from pre-booked
+      * Delivered: Bookings with status='completed', with conversion rate from paid orders
+    - Booking Trends:
+      * Returns monthly booking counts for last 4 months
+      * Growth percentage calculated as ((current_month - previous_month) / previous_month) * 100
+      * Month names are abbreviated (Jan, Feb, Mar, etc.)
+    - Payment Distribution:
+      * Full Payment: Bookings with payment_option='full_payment' and single payment method (not wallet)
+      * EMI: Bookings with payment_option='emi_options' (excluding wallet-only)
+      * Wallet: Payments made using wallet payment method
+      * Mixed: Bookings with multiple different payment methods
+      * Percentages are calculated from total bookings with completed payments
+    - Staff Performance:
+      * Calculates achievement percentage based on bookings processed per staff member
+      * Uses default target of 100 bookings per month (can be adjusted)
+      * Returns staff members sorted by achievement (descending)
+      * Note: Since there's no direct staff assignment tracking, performance is calculated based on total bookings divided among staff
+    - Buyer Growth Trend:
+      * Returns cumulative counts at end of each month (not new users per month)
+      * Active Buyers: Cumulative count of users with is_active_buyer=True at end of each month
+      * Total Buyers: Cumulative count of all users at end of each month
+      * Returns data for last 6 calendar months
+    - Buyer Segments:
+      * Active Buyers: Users with is_active_buyer=True
+      * Inactive: Users who are not active buyers (is_active_buyer=False, role='user')
+      * Pre-Booked: Users with pending bookings (bookings__status='pending')
+      * New This Month: Users who joined in the current month
+    - Sales Funnel:
+      * Visitors: Total registered users
+      * Interested: Users with bookings (pre-booked status)
+      * Pre-Booked: Same as Interested (users with pending bookings)
+      * Paid: Users with completed payments (bookings__payments__status='completed')
+      * Delivered: Users with completed bookings (bookings__status='completed')
+      * Drop-off percentages calculated between consecutive stages
+      * Percentages are relative to total visitors (100%)
+    - Conversion Rates:
+      * Visitors → Interested: Percentage of visitors who created bookings
+      * Interested → Pre-Booked: Percentage of interested users who pre-booked (same as interested in this implementation)
+      * Pre-Booked → Paid: Percentage of pre-booked users who made payments
+      * Paid → Delivered: Percentage of paid users who received delivery
+      * Change: Percentage point change vs previous period
+      * Trend: "up" if change >= 0, "down" if change < 0
+      * Converted Count: Number of users converted at each stage
+    - All monetary values and counts are returned as numbers (not strings)
+    - Percentage values are rounded to 1 decimal place
+    - Month names are abbreviated (Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec)
+    - Date calculations use current month and previous month for comparisons
+    - Empty data scenarios are handled gracefully (returns 0 or empty arrays)
+
+
 ================================================================================
                          PLATFORM SETTINGS APIs
 ================================================================================
 
-84. GET PLATFORM SETTINGS
+86. GET PLATFORM SETTINGS
    Method: GET
    URL: /api/settings/
    Authentication: Required (All authenticated users)
@@ -4247,7 +4604,7 @@ Super User: EVAdmin && EVAdmin@123
    - binary_daily_pair_limit: Maximum pairs per day (resets at midnight)
 
 
-85. UPDATE PLATFORM SETTINGS (Admin Only)
+87. UPDATE PLATFORM SETTINGS (Admin Only)
    Method: PATCH
    URL: /api/settings/
    Authentication: Required (Admin or Superuser only)

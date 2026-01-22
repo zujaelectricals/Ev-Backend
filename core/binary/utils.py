@@ -233,7 +233,9 @@ def process_direct_user_commission(referrer, new_user):
                             user=ancestor_user,
                             deduction_amount=tds_amount,
                             deduction_type='TDS_DEDUCTION',
-                            description=f"TDS ({tds_percentage}%) on user commission for {new_user.username}"
+                            description=f"TDS ({tds_percentage}%) on user commission for {new_user.username}",
+                            reference_id=new_user.id,
+                            reference_type='user'
                         )
                         
                         commissions_paid = True
@@ -257,16 +259,18 @@ def process_direct_user_commission(referrer, new_user):
     return commissions_paid
 
 
-def deduct_from_booking_balance(user, deduction_amount, deduction_type='EXTRA_DEDUCTION', description=''):
+def deduct_from_booking_balance(user, deduction_amount, deduction_type='EXTRA_DEDUCTION', description='', reference_id=None, reference_type='booking'):
     """
     Deduct amount from user's oldest active booking with remaining amount
-    Only used for EXTRA_DEDUCTION (6th+ pairs) - TDS is NOT deducted from booking balance
+    Used for both TDS_DEDUCTION and EXTRA_DEDUCTION
     
     Args:
         user: User whose payment should be deducted
         deduction_amount: Amount to deduct (Decimal)
-        deduction_type: 'EXTRA_DEDUCTION' (TDS_DEDUCTION is no longer used for binary pairs)
+        deduction_type: 'TDS_DEDUCTION' (for both direct commissions and binary pairs) or 'EXTRA_DEDUCTION' (for 6th+ pairs)
         description: Description for transaction
+        reference_id: Optional reference ID (e.g., pair.id for binary pairs, booking.id for bookings)
+        reference_type: Optional reference type (e.g., 'binary_pair' for pairs, 'booking' for bookings)
     
     Returns:
         bool: True if deduction was successful, False otherwise
@@ -296,8 +300,8 @@ def deduct_from_booking_balance(user, deduction_amount, deduction_type='EXTRA_DE
                 amount=-float(deduction_amount),  # Negative amount for deduction
                 transaction_type=deduction_type,
                 description=description or f"{deduction_type} (no active booking to deduct from)",
-                reference_id=None,
-                reference_type='booking'
+                reference_id=reference_id,
+                reference_type=reference_type
             )
         except Exception as e:
             logger.error(f"Error creating {deduction_type} transaction: {e}")
@@ -326,8 +330,8 @@ def deduct_from_booking_balance(user, deduction_amount, deduction_type='EXTRA_DE
                 amount=-float(actual_deduction),  # Negative amount for deduction
                 transaction_type=deduction_type,
                 description=description or f"{deduction_type} from booking {booking.booking_number}",
-                reference_id=booking.id,
-                reference_type='booking'
+                reference_id=reference_id if reference_id else booking.id,
+                reference_type=reference_type if reference_id else 'booking'
             )
         except Exception as e:
             import logging
@@ -935,17 +939,28 @@ def check_and_create_pair(user):
             net_amount=net_amount if not commission_blocked else Decimal('0')  # Net amount after TDS and extra deduction (0 if blocked)
         )
         
-        # Only deduct extra deduction from booking balance if commission is not blocked
-        # TDS is NOT deducted from booking balance - it only reduces the net amount credited to wallet
-        # Only extra deductions (for 6th+ pairs) are deducted from booking balance
+        # Deduct TDS and extra deduction from booking balance if commission is not blocked
         if not commission_blocked:
+            # Deduct TDS from booking balance (for all pairs)
+            if tds_amount > 0:
+                deduct_from_booking_balance(
+                    user=user,
+                    deduction_amount=tds_amount,
+                    deduction_type='TDS_DEDUCTION',
+                    description=f"TDS ({tds_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})",
+                    reference_id=pair.id,
+                    reference_type='binary_pair'
+                )
+            
             # Deduct extra amount from booking balance (for 6th+ pairs only)
             if extra_deduction > 0:
                 deduct_from_booking_balance(
                     user=user,
                     deduction_amount=extra_deduction,
                     deduction_type='EXTRA_DEDUCTION',
-                    description=f"Extra deduction ({extra_deduction_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})"
+                    description=f"Extra deduction ({extra_deduction_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})",
+                    reference_id=pair.id,
+                    reference_type='binary_pair'
                 )
             
             # Trigger wallet update via Celery (will credit net amount)

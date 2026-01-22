@@ -64,6 +64,11 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         self.max_depth = kwargs.pop('max_depth', 5)
         self.current_depth = kwargs.pop('current_depth', 0)
+        self.min_depth = kwargs.pop('min_depth', 0)
+        self.side_filter = kwargs.pop('side_filter', 'both')  # 'left', 'right', or 'both'
+        self.page = kwargs.pop('page', None)
+        self.page_size = kwargs.pop('page_size', None)
+        self.request = kwargs.pop('request', None)
         super().__init__(*args, **kwargs)
     
     def get_user_full_name(self, obj):
@@ -216,7 +221,11 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_left_child(self, obj):
         """Get left child node recursively"""
-        if self.current_depth >= self.max_depth:
+        # Skip if filtering for right side only
+        if self.side_filter == 'right':
+            return None
+        
+        if self.current_depth >= self.max_depth or self.current_depth < self.min_depth:
             return None
         
         try:
@@ -232,7 +241,12 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             serializer = BinaryTreeNodeSerializer(
                 left_child,
                 max_depth=self.max_depth,
-                current_depth=self.current_depth + 1
+                min_depth=self.min_depth,
+                current_depth=self.current_depth + 1,
+                side_filter=self.side_filter,
+                page=self.page,
+                page_size=self.page_size,
+                request=self.request
             )
             return serializer.data
         except Exception as e:
@@ -244,7 +258,11 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_right_child(self, obj):
         """Get right child node recursively"""
-        if self.current_depth >= self.max_depth:
+        # Skip if filtering for left side only
+        if self.side_filter == 'left':
+            return None
+        
+        if self.current_depth >= self.max_depth or self.current_depth < self.min_depth:
             return None
         
         try:
@@ -260,7 +278,12 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             serializer = BinaryTreeNodeSerializer(
                 right_child,
                 max_depth=self.max_depth,
-                current_depth=self.current_depth + 1
+                min_depth=self.min_depth,
+                current_depth=self.current_depth + 1,
+                side_filter=self.side_filter,
+                page=self.page,
+                page_size=self.page_size,
+                request=self.request
             )
             return serializer.data
         except Exception as e:
@@ -270,10 +293,11 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             logger.error(f"Error getting right child for node {obj.id}: {str(e)}")
             return None
     
-    def _get_all_descendants(self, node, side, max_depth, current_depth=0, exclude_direct_children=False):
+    def _get_all_descendants(self, node, side, max_depth, current_depth=0, exclude_direct_children=False, min_depth=0):
         """
         Get all descendant nodes on a specific side
         exclude_direct_children: If True, excludes direct children (already in left_child/right_child)
+        min_depth: Minimum depth to include in results
         """
         if current_depth >= max_depth:
             return []
@@ -285,8 +309,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         ).filter(parent=node, side=side)
         
         for child in children:
-            # Only add direct children if not excluding them
-            if not exclude_direct_children or current_depth > 0:
+            # Only add direct children if not excluding them and depth is within range
+            if (not exclude_direct_children or current_depth > 0) and current_depth >= min_depth:
                 # Create a simplified serializer for list view (without nested children to avoid duplication)
                 child_data = {
                     'node_id': child.id,
@@ -322,8 +346,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 descendants.append(child_data)
             
             # Recursively get descendants of this child (always include grandchildren and below)
-            descendants.extend(self._get_all_descendants(child, 'left', max_depth, current_depth + 1, exclude_direct_children=False))
-            descendants.extend(self._get_all_descendants(child, 'right', max_depth, current_depth + 1, exclude_direct_children=False))
+            descendants.extend(self._get_all_descendants(child, 'left', max_depth, current_depth + 1, exclude_direct_children=False, min_depth=min_depth))
+            descendants.extend(self._get_all_descendants(child, 'right', max_depth, current_depth + 1, exclude_direct_children=False, min_depth=min_depth))
         
         return descendants
     
@@ -459,19 +483,103 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             return str(total)
         return "0.00"
     
+    def _paginate_side_members(self, members, side_name):
+        """
+        Paginate side members array and return paginated response structure
+        """
+        if not members:
+            return None
+        
+        # If no pagination requested, return all members (backward compatibility)
+        if self.page is None or self.page_size is None:
+            return members
+        
+        try:
+            page = int(self.page)
+            page_size = int(self.page_size)
+            
+            # Validate page_size (max 100)
+            if page_size > 100:
+                page_size = 100
+            if page_size < 1:
+                page_size = 20
+            
+            # Calculate pagination
+            total_count = len(members)
+            total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
+            
+            # Validate page number
+            if page < 1:
+                page = 1
+            if page > total_pages and total_pages > 0:
+                page = total_pages
+            
+            # Calculate slice indices
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            
+            # Get paginated results
+            paginated_members = members[start_index:end_index]
+            
+            # Build pagination URLs if request is available
+            next_url = None
+            previous_url = None
+            
+            if self.request:
+                from django.http import QueryDict
+                from urllib.parse import urlencode
+                
+                # Get current query parameters
+                query_params = self.request.query_params.copy()
+                
+                # Build next URL
+                if page < total_pages:
+                    query_params['page'] = page + 1
+                    next_url = f"{self.request.build_absolute_uri(self.request.path)}?{query_params.urlencode()}"
+                
+                # Build previous URL
+                if page > 1:
+                    query_params['page'] = page - 1
+                    previous_url = f"{self.request.build_absolute_uri(self.request.path)}?{query_params.urlencode()}"
+            
+            return {
+                'count': total_count,
+                'page': page,
+                'page_size': page_size,
+                'total_pages': total_pages,
+                'next': next_url,
+                'previous': previous_url,
+                'results': paginated_members
+            }
+        except (ValueError, TypeError):
+            # If pagination parameters are invalid, return all members
+            return members
+    
     def get_left_side_members(self, obj):
         """
         Get all members on the left side with their details
         Excludes direct left child (already in left_child) to avoid duplication
+        Returns paginated results if pagination is requested
         """
-        return self._get_all_descendants(obj, 'left', self.max_depth, 0, exclude_direct_children=True)
+        # Skip if filtering for right side only
+        if self.side_filter == 'right':
+            return None
+        
+        members = self._get_all_descendants(obj, 'left', self.max_depth, 0, exclude_direct_children=True, min_depth=self.min_depth)
+        return self._paginate_side_members(members, 'left')
     
     def get_right_side_members(self, obj):
         """
         Get all members on the right side with their details
         Excludes direct right child (already in right_child) to avoid duplication
+        Returns paginated results if pagination is requested
         """
-        return self._get_all_descendants(obj, 'right', self.max_depth, 0, exclude_direct_children=True)
+        # Skip if filtering for left side only
+        if self.side_filter == 'left':
+            return None
+        
+        members = self._get_all_descendants(obj, 'right', self.max_depth, 0, exclude_direct_children=True, min_depth=self.min_depth)
+        return self._paginate_side_members(members, 'right')
 
 
 class BinaryPairSerializer(serializers.ModelSerializer):

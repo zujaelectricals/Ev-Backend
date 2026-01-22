@@ -39,15 +39,25 @@ class ReviewedByUserSerializer(serializers.Serializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
+    kyc_status = serializers.SerializerMethodField()
+    
     class Meta:
         model = User
         fields = ('id', 'email', 'mobile', 'first_name', 'last_name',
                   'gender', 'date_of_birth', 'address_line1', 'address_line2',
                   'city', 'state', 'pincode', 'country',
                   'role', 'is_distributor', 'is_active_buyer', 'referral_code', 
-                  'date_joined', 'last_login')
+                  'date_joined', 'last_login', 'kyc_status')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer', 
-                           'referral_code', 'date_joined', 'last_login')
+                           'referral_code', 'date_joined', 'last_login', 'kyc_status')
+    
+    def get_kyc_status(self, obj):
+        """Get KYC status if KYC exists for the user"""
+        # For OneToOneField reverse relationships, use hasattr which safely checks existence
+        # This avoids triggering unnecessary database queries
+        if hasattr(obj, 'kyc') and obj.kyc is not None:
+            return obj.kyc.status
+        return None
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

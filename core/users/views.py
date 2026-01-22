@@ -166,20 +166,77 @@ class UserViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def normal(self, request):
-        """List normal users. Superuser, admin, and staff can access this endpoint."""
+        """List normal users. Superuser, admin, and staff can access this endpoint.
+        Supports filtering by is_distributor, date_joined, search (name), and ordering.
+        """
         user = request.user
         
         # Superuser, admin, and staff can list normal users
         if not (user.is_superuser or user.role == 'admin' or user.role == 'staff'):
             raise PermissionDenied("Only superuser, admin, and staff can list normal users.")
         
-        normal_users = User.objects.filter(role='user').order_by('id')
-        page = self.paginate_queryset(normal_users)
+        # Use select_related to optimize KYC queries and avoid N+1 problem
+        queryset = User.objects.select_related('kyc').filter(role='user')
+        
+        # Filter by is_distributor
+        is_distributor_param = request.query_params.get('is_distributor')
+        if is_distributor_param:
+            if is_distributor_param.lower() == 'true':
+                queryset = queryset.filter(is_distributor=True)
+            elif is_distributor_param.lower() == 'false':
+                queryset = queryset.filter(is_distributor=False)
+        
+        # Filter by date_joined range
+        date_joined_from = request.query_params.get('date_joined_from')
+        date_joined_to = request.query_params.get('date_joined_to')
+        if date_joined_from:
+            try:
+                queryset = queryset.filter(date_joined__date__gte=date_joined_from)
+            except (ValueError, TypeError):
+                pass  # Invalid date format, ignore filter
+        if date_joined_to:
+            try:
+                queryset = queryset.filter(date_joined__date__lte=date_joined_to)
+            except (ValueError, TypeError):
+                pass  # Invalid date format, ignore filter
+        
+        # Search by user name (first_name, last_name, username, email)
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search) |
+                Q(username__icontains=search) |
+                Q(email__icontains=search)
+            )
+        
+        # Ordering - validate ordering fields to prevent SQL injection
+        ordering = request.query_params.get('ordering', 'id')
+        if ordering:
+            # Allow only safe ordering fields
+            allowed_ordering_fields = [
+                'id', '-id',
+                'date_joined', '-date_joined',
+                'username', '-username',
+                'email', '-email',
+                'first_name', '-first_name',
+                'last_name', '-last_name'
+            ]
+            if ordering in allowed_ordering_fields:
+                queryset = queryset.order_by(ordering)
+            else:
+                # Default to id if invalid ordering
+                queryset = queryset.order_by('id')
+        else:
+            queryset = queryset.order_by('id')
+        
+        # Pagination
+        page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
         
-        serializer = self.get_serializer(normal_hUserV, many=True)
+        serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 
 
