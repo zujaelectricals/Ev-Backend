@@ -1015,18 +1015,24 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/users/distributor-application/
     Authentication: Required
-    Description: Submit distributor application form. Application is automatically approved upon creation, and user becomes a distributor immediately. User must have approved KYC to apply.
+    Description: Submit distributor application form. Approval behavior depends on distributor_application_auto_approve setting in Platform Settings. User must have approved KYC to apply.
     
     Eligibility Requirements:
     - User must have approved KYC (kyc.status = 'approved')
     - User can only submit one application
     - Note: Active Buyer requirement removed - only KYC verification needed
     
-    Automatic Approval:
-    - Application is automatically approved upon successful creation (status = 'approved')
-    - User.is_distributor is automatically set to True
-    - No admin/staff approval required
-    - User can immediately start earning from binary pairs and referrals
+    Approval Behavior (controlled by distributor_application_auto_approve setting):
+    - If distributor_application_auto_approve = True (default):
+      * Application is automatically approved upon successful creation (status = 'approved')
+      * User.is_distributor is automatically set to True
+      * No admin/staff approval required
+      * User can immediately start earning from binary pairs and referrals
+    - If distributor_application_auto_approve = False:
+      * Application is created with status = 'pending'
+      * User.is_distributor remains False until admin/staff approval
+      * Admin/staff must approve via /api/users/distributor-application/{id}/update-status/ endpoint
+      * User can only start earning after manual approval
     
     Request Body (multipart/form-data):
     {
@@ -1044,14 +1050,14 @@ Super User: EVAdmin && EVAdmin@123
       "tax_documents": <file>                         // Optional - Tax documents
     }
     
-    Response (201 Created):
+    Response (201 Created) - When auto-approval is enabled (default):
     {
       "id": 1,
       "user": 1,
       "user_email": "user@example.com",
       "user_username": "user@example.com",
       "user_full_name": "John Doe",
-      "status": "approved",  // Automatically approved upon creation
+      "status": "approved",  // Automatically approved if distributor_application_auto_approve = true
       "company_name": "ABC Distributors Pvt Ltd",
       "business_registration_number": "REG123456",
       "tax_id": "TAX789012",
@@ -1065,16 +1071,42 @@ Super User: EVAdmin && EVAdmin@123
       "business_license": "http://localhost:8000/media/distributor/business_license/license_1.pdf",
       "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
       "submitted_at": "2026-01-14T10:00:00Z",
-      "reviewed_at": "2026-01-14T10:00:00Z",  // Set automatically upon creation
+      "reviewed_at": "2026-01-14T10:00:00Z",  // Set automatically when auto-approved
       "reviewed_by": null,  // No reviewer since auto-approved
       "rejection_reason": ""
     }
     
+    Response (201 Created) - When auto-approval is disabled:
+    {
+      "id": 1,
+      "user": 1,
+      "user_email": "user@example.com",
+      "user_username": "user@example.com",
+      "user_full_name": "John Doe",
+      "status": "pending",  // Remains pending if distributor_application_auto_approve = false
+      "company_name": "ABC Distributors Pvt Ltd",
+      "business_registration_number": "REG123456",
+      "tax_id": "TAX789012",
+      "years_in_business": 5,
+      "previous_distribution_experience": "5 years of experience in EV distribution",
+      "product_interest": "Electric vehicles and accessories",
+      "reference_name": "John Smith",
+      "reference_contact": "+919876543210",
+      "reference_relationship": "Business Partner",
+      "is_distributor_terms_and_conditions_accepted": true,
+      "business_license": "http://localhost:8000/media/distributor/business_license/license_1.pdf",
+      "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
+      "submitted_at": "2026-01-14T10:00:00Z",
+      "reviewed_at": null,  // Not set until admin/staff approval
+      "reviewed_by": null,  // Not set until admin/staff approval
+      "rejection_reason": ""
+    }
+    
     Notes:
-    - Application is automatically approved upon creation
-    - User.is_distributor is automatically set to True
-    - User can immediately start earning from binary pairs and referrals
-    - No admin/staff approval required
+    - Approval behavior is controlled by distributor_application_auto_approve setting in Platform Settings
+    - If auto-approval is enabled (default): Application is automatically approved, user becomes distributor immediately
+    - If auto-approval is disabled: Application remains pending until admin/staff approval via update-status endpoint
+    - User can only start earning from binary pairs and referrals when is_distributor = True
     
     Error Response (400 Bad Request):
     {
@@ -1109,12 +1141,12 @@ Super User: EVAdmin && EVAdmin@123
       "user_email": "user@example.com",
       "user_username": "user@example.com",
       "user_full_name": "John Doe",
-      "status": "approved",  // "approved" (auto-approved) or "rejected" (if admin rejected)
+      "status": "approved",  // "pending" (if auto-approval disabled), "approved" (auto-approved or manually approved), or "rejected" (if admin rejected)
       "company_name": "ABC Distributors Pvt Ltd",
       "is_distributor_terms_and_conditions_accepted": true,
       "submitted_at": "2026-01-14T10:00:00Z",
-      "reviewed_at": "2026-01-14T10:00:00Z",  // Set automatically upon creation
-      "reviewed_by": null,  // null for auto-approved applications
+      "reviewed_at": "2026-01-14T10:00:00Z",  // Set automatically when auto-approved, or when manually approved/rejected
+      "reviewed_by": null,  // null for auto-approved applications, user ID for manually reviewed applications
       "rejection_reason": ""
     }
     
@@ -1171,7 +1203,7 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/users/distributor-application/{id}/update-status/
     Authentication: Required (Admin, Staff, or Superuser)
-    Description: Reject or re-approve distributor application. Applications are automatically approved upon creation, but admin/staff can reject them if needed. Setting status to 'approved' sets user.is_distributor = True. Setting status to 'rejected' sets user.is_distributor = False.
+    Description: Approve, reject, or re-approve distributor application. If distributor_application_auto_approve setting is False, this endpoint is required to approve pending applications. If setting is True, applications are auto-approved but can still be rejected here. Setting status to 'approved' sets user.is_distributor = True. Setting status to 'rejected' sets user.is_distributor = False.
     
     Permission Requirements:
     - Superuser (is_superuser=True)
@@ -1184,12 +1216,12 @@ Super User: EVAdmin && EVAdmin@123
       "reason": "Insufficient business experience"  // Optional, only used when status is "rejected"
     }
     
-    Example Request (Re-approve):
+    Example Request (Approve):
     POST /api/users/distributor-application/1/update-status/
     {
       "status": "approved"
     }
-    Note: Applications are automatically approved upon creation. This endpoint is mainly for re-approving previously rejected applications.
+    Note: If distributor_application_auto_approve is False, this endpoint is required to approve pending applications. If setting is True, applications are auto-approved but this endpoint can be used to re-approve previously rejected applications.
     
     Example Request (Reject):
     POST /api/users/distributor-application/1/update-status/
@@ -1227,8 +1259,10 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Notes:
-    - Applications are automatically approved upon creation (via CREATE endpoint)
-    - This endpoint is primarily for rejecting applications or re-approving previously rejected ones
+    - Approval behavior depends on distributor_application_auto_approve setting in Platform Settings
+    - If auto-approval is enabled: Applications are automatically approved upon creation (via CREATE endpoint)
+    - If auto-approval is disabled: Applications remain pending and require approval via this endpoint
+    - This endpoint can be used to approve pending applications, reject applications, or re-approve previously rejected ones
     - Upon approval (or re-approval), user.is_distributor is automatically set to True
     - Upon rejection, user.is_distributor is automatically set to False
     - User can earn from binary pairs and referrals only when is_distributor = True
@@ -1452,7 +1486,7 @@ Super User: EVAdmin && EVAdmin@123
       "total_amount": "50000.00",
       "total_paid": "0.00",
       "remaining_amount": "50000.00",
-      "status": "pending",  // "pending", "active", "completed", "cancelled", "expired"
+      "status": "pending",  // "pending", "active", "completed", "delivered", "cancelled", "expired"
       "referred_by": 5,     // User ID of referrer (if referral_code was used)
       "delivery_city": "Mumbai",
       "delivery_state": "Maharashtra",
@@ -1533,11 +1567,26 @@ Super User: EVAdmin && EVAdmin@123
     Method: GET
     URL: /api/booking/bookings/
     Authentication: Required
-    Description: List user's bookings (admin sees all)
+    Description: List user's bookings (admin sees all). Supports pagination, filtering, and search.
     
     Query Parameters:
-    - page: Page number
-    - status: Filter by status (pending, active, completed, cancelled, expired)
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20, max: 100)
+    - status: Filter by status (pending, active, completed, delivered, cancelled, expired)
+    - search: Search bookings (case-insensitive partial match)
+      Searches across: booking_number, user name/email/username, vehicle name/model_code, delivery city/state/pincode
+      Example: search=EVABC1234 (matches booking number)
+      Example: search=john (matches user name or email)
+      Example: search=mumbai (matches delivery city)
+      Example: search=EV Model X (matches vehicle name)
+    
+    Examples:
+    - Get all bookings: /api/booking/bookings/
+    - Get pending bookings: /api/booking/bookings/?status=pending
+    - Search by booking number: /api/booking/bookings/?search=EVABC1234
+    - Search by user name: /api/booking/bookings/?search=john
+    - Search with status filter: /api/booking/bookings/?status=active&search=mumbai
+    - Paginated search: /api/booking/bookings/?page=1&page_size=10&search=EV Model X
     
     Response (200 OK):
     {
@@ -1853,7 +1902,72 @@ Super User: EVAdmin && EVAdmin@123
       * Booking status is set to 'cancelled'
       * Stock reservation is released (if exists)
       * Vehicle stock (available_quantity) is restored
-    - Cannot cancel bookings with status 'cancelled' or 'completed'
+    - Cannot cancel bookings with status 'cancelled' or 'delivered'
+
+
+33. UPDATE BOOKING STATUS (Admin/Staff Only)
+    Method: PATCH
+    URL: /api/booking/bookings/{id}/update_status/
+    Authentication: Required (Admin/Staff only)
+    Description: Update booking status. Only admin/staff can update booking status. Automatically sets delivered_at timestamp when status changes to 'delivered'.
+    
+    Request Body:
+    {
+      "status": "delivered"  // Required: pending, active, completed, delivered, cancelled, expired
+    }
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "booking_number": "EVABC1234",
+      "status": "delivered",
+      "delivered_at": "2026-01-16T10:30:00Z",
+      "completed_at": "2026-01-15T14:20:00Z",
+      "vehicle_model": 1,
+      "vehicle_details": {
+        "id": 1,
+        "name": "EV Model X",
+        "model_code": "EV-RED-40-ABC123",
+        "price": "50000.00"
+      },
+      "total_amount": "50000.00",
+      "total_paid": "50000.00",
+      "remaining_amount": "0.00",
+      ...
+    }
+    
+    Error Response (400):
+    {
+      "error": "status field is required"
+    }
+    OR
+    {
+      "error": "Invalid status. Valid choices: ['pending', 'active', 'completed', 'delivered', 'cancelled', 'expired']"
+    }
+    OR
+    {
+      "error": "Cannot change status from completed to pending. Valid transitions from completed: ['delivered', 'cancelled']"
+    }
+    
+    Error Response (403):
+    {
+      "error": "Permission denied. Only admin or staff can update booking status."
+    }
+    
+    Valid Status Transitions:
+    - pending → active, cancelled, expired
+    - active → completed, cancelled
+    - completed → delivered, cancelled
+    - delivered → (cannot be changed)
+    - cancelled → (cannot be changed)
+    - expired → (cannot be changed)
+    
+    Notes:
+    - Only admin/staff can update booking status
+    - When status changes to 'delivered', delivered_at timestamp is automatically set
+    - Status transitions are validated - invalid transitions will be rejected
+    - 'delivered' status can only be set when current status is 'completed'
+    - Once a booking is 'delivered', 'cancelled', or 'expired', it cannot be changed to another status
 
 
 ================================================================================
@@ -2384,7 +2498,13 @@ Super User: EVAdmin && EVAdmin@123
     Request Body (JSON example):
     {
       "name": "EV Model X Updated",
-      "price": 55000,
+      "vehicle_color": ["white", "red"],  // Array of available colors
+      "battery_variant": ["40kWh"],  // Array with single battery variant
+      "price": 55000,  // Base price - used if battery_pricing not provided
+      "battery_pricing": {  // Optional: Dictionary mapping battery variant names to prices
+        "40kWh": 55000,
+        "60kWh": 65000
+      },
       "status": "out_of_stock",
       "description": "Updated description",
       "features": ["USB Charging Port", "Parking Mode", "Reverse Gear", "LED Lights"],
@@ -2405,6 +2525,12 @@ Super User: EVAdmin && EVAdmin@123
     - model_code is read-only and cannot be updated (it is auto-generated when the vehicle is created)
     - vehicle_color: Array of available colors (e.g., ["white", "red", "blue"]). Can be updated to change available colors.
     - battery_variant: Array with single battery variant (e.g., ["40kWh"]). Can be updated to change battery variant.
+    - price: (optional) Base vehicle price - used for all variants if battery_pricing not provided, or as fallback for battery variants not in battery_pricing
+    - battery_pricing: (optional) Dictionary mapping battery variant names to prices (e.g., {"40kWh": 55000, "60kWh": 65000})
+      - If provided, all keys in battery_pricing must exist in battery_variant array
+      - If a battery variant is not in battery_pricing, it uses the base price field
+      - Prices in battery_pricing must be non-negative numbers
+      - Note: Since UPDATE operates on a single vehicle, battery_pricing is typically used when updating battery_variant to include multiple variants
     - Features and specifications are optional - can be omitted, updated, or left empty
     - No limit on number of features or specifications
     - color_images: (optional) Dictionary mapping color names to arrays of image IDs (e.g., {"white": [1, 2, 3], "red": [4, 5]})
@@ -2592,7 +2718,7 @@ Super User: EVAdmin && EVAdmin@123
     Method: GET
     URL: /api/inventory/stock/
     Authentication: Required (Admin/Superuser only)
-    Description: List all vehicle stock records with filtering options
+    Description: List all vehicle stock records with filtering options. Includes dashboard summary data with total stock, inventory value, low stock alerts, and stock trend.
     
     Query Parameters:
     - page: Page number (default: 1)
@@ -2620,8 +2746,64 @@ Super User: EVAdmin && EVAdmin@123
           "created_at": "2026-01-06T12:00:00Z",
           "updated_at": "2026-01-06T15:00:00Z"
         }
-      ]
+      ],
+      "summary": {
+        "total_stock": 92,
+        "inventory_value": 7820000.0,
+        "low_stock_threshold_percent": 20,
+        "low_stock_alerts_count": 2,
+        "out_of_stock_count": 1,
+        "low_stock_items": [
+          {
+            "vehicle_id": 15,
+            "vehicle_name": "EVOLVE",
+            "vehicle_model_code": "EV-BLU-60K-TMMR0A",
+            "available_quantity": 15,
+            "total_quantity": 20,
+            "reorder_level": 4,
+            "status": "low_stock"
+          },
+          {
+            "vehicle_id": 18,
+            "vehicle_name": "EVOQUE",
+            "vehicle_model_code": "EV-RED-40K-SCDA4J",
+            "available_quantity": 0,
+            "total_quantity": 10,
+            "reorder_level": 2,
+            "status": "out_of_stock"
+          }
+        ],
+        "stock_trend": [
+          {
+            "label": "Current",
+            "total_stock": 92
+          }
+        ]
+      }
     }
+    
+    Summary Fields:
+    - total_stock: Sum of all total_quantity values across filtered stock records
+    - inventory_value: Total inventory value calculated as sum of (vehicle.price * total_quantity) for all stock records
+    - low_stock_threshold_percent: Percentage threshold used to determine low stock (configurable via LOW_STOCK_THRESHOLD_PERCENT setting, default: 20)
+    - low_stock_alerts_count: Number of vehicles with available_quantity > 0 but <= reorder_level (calculated as total_quantity * threshold_percent / 100)
+    - out_of_stock_count: Number of vehicles with available_quantity == 0
+    - low_stock_items: Array of vehicles that need attention, sorted by available_quantity (lowest first). Each item contains:
+      - vehicle_id: Vehicle ID
+      - vehicle_name: Vehicle name
+      - vehicle_model_code: Vehicle model code
+      - available_quantity: Current available stock
+      - total_quantity: Total stock quantity
+      - reorder_level: Calculated threshold (total_quantity * threshold_percent / 100)
+      - status: "low_stock" if available_quantity > 0 but <= reorder_level, "out_of_stock" if available_quantity == 0
+    - stock_trend: Placeholder array for stock trend data (currently shows only current total_stock). Can be expanded in future to include historical data.
+    
+    Notes:
+    - Summary data is calculated from the filtered queryset (respects all query parameters)
+    - Low stock threshold is percentage-based: a vehicle is considered low stock if available_quantity <= (total_quantity * threshold_percent / 100)
+    - The threshold percentage can be configured via LOW_STOCK_THRESHOLD_PERCENT setting in Django settings (default: 20%)
+    - Low stock items are sorted by available_quantity (lowest first) to prioritize critical alerts
+    - Stock trend is currently a placeholder with only current data; historical tracking can be added in future
     
     Error Response (403):
     {
@@ -4493,7 +4675,63 @@ Super User: EVAdmin && EVAdmin@123
           "trend": "up",
           "converted_count": 720
         }
-      ]
+      ],
+      "pre_bookings": {
+        "kpi_cards": {
+          "total_pre_bookings": 1250,
+          "pending": 245,
+          "confirmed": 850,
+          "total_amount": 6250000.00
+        },
+        "summary": {
+          "total_count": 1250,
+          "pending_count": 245,
+          "confirmed_count": 850,
+          "expired_count": 155,
+          "total_amount": 6250000.00
+        }
+      },
+      "emi_orders": {
+        "kpi_cards": {
+          "total_emi_orders": 850,
+          "active_emis": 720,
+          "monthly_collection": 4800000.00,
+          "pending_amount": 68500000.00
+        },
+        "collection_trend": {
+          "months": ["Jan", "Feb", "Mar", "Apr"],
+          "amounts": [3200000.00, 4800000.00, 5200000.00, 4800000.00],
+          "order_counts": [45, 58, 62, 55]
+        },
+        "summary": {
+          "total_count": 850,
+          "active_count": 720,
+          "completed_count": 100,
+          "cancelled_count": 30,
+          "total_collected": 45000000.00,
+          "total_pending": 68500000.00
+        }
+      },
+      "cancelled_orders": {
+        "kpi_cards": {
+          "total_cancelled": 67,
+          "total_amount": 8200000.00,
+          "refund_pending": 12,
+          "cancellation_rate": 5.4
+        },
+        "cancellation_trend": {
+          "months": ["Jan", "Feb", "Mar", "Apr"],
+          "counts": [12, 15, 18, 22]
+        },
+        "summary": {
+          "total_count": 67,
+          "total_amount": 8200000.00,
+          "refund_pending_count": 12,
+          "refund_processed_count": 55,
+          "total_refunded_amount": 7500000.00,
+          "pending_refund_amount": 700000.00
+        }
+      }
     }
     
     Error Response (403 Forbidden):
@@ -4512,12 +4750,15 @@ Super User: EVAdmin && EVAdmin@123
       * Buyer Segments: Distribution of buyer categories (Active, Inactive, Pre-Booked, New This Month)
       * Sales Funnel: 5-stage funnel (Visitors → Interested → Pre-Booked → Paid → Delivered) with drop-off percentages
       * Conversion Rates: Stage-to-stage conversion rates with trend indicators (up/down) and percentage changes
+      * Pre-Bookings: Pre-booking dashboard data with KPIs and summary
+      * EMI Orders: EMI orders dashboard data with KPIs, collection trend, and summary
+      * Cancelled Orders: Cancelled orders dashboard data with KPIs, cancellation trend, and refund status
     - KPI Cards:
       * Active Buyers: Count of users with is_active_buyer=True, with percentage change vs last month
       * Total Visitors: Total registered users count, with percentage change vs last month
       * Pre-Booked: Bookings with status='pending', with conversion rate from total visitors
       * Paid Orders: Bookings with completed payments, with conversion rate from pre-booked
-      * Delivered: Bookings with status='completed', with conversion rate from paid orders
+      * Delivered: Bookings with status='delivered', with conversion rate from paid orders
     - Booking Trends:
       * Returns monthly booking counts for last 4 months
       * Growth percentage calculated as ((current_month - previous_month) / previous_month) * 100
@@ -4548,7 +4789,7 @@ Super User: EVAdmin && EVAdmin@123
       * Interested: Users with bookings (pre-booked status)
       * Pre-Booked: Same as Interested (users with pending bookings)
       * Paid: Users with completed payments (bookings__payments__status='completed')
-      * Delivered: Users with completed bookings (bookings__status='completed')
+      * Delivered: Users with delivered bookings (bookings__status='delivered')
       * Drop-off percentages calculated between consecutive stages
       * Percentages are relative to total visitors (100%)
     - Conversion Rates:
@@ -4559,6 +4800,27 @@ Super User: EVAdmin && EVAdmin@123
       * Change: Percentage point change vs previous period
       * Trend: "up" if change >= 0, "down" if change < 0
       * Converted Count: Number of users converted at each stage
+    - Pre-Bookings:
+      * Total Pre-Bookings: Count of all bookings with status in ['pending', 'active', 'expired']
+      * Pending: Count of bookings with status='pending' (not yet confirmed/active)
+      * Confirmed: Count of bookings with status='active' (confirmed/active buyers who paid >= ₹5000)
+      * Total Amount: Sum of booking_amount for all pre-bookings
+      * Summary includes breakdown by status (pending, confirmed, expired)
+    - EMI Orders:
+      * Total EMI Orders: Count of bookings with payment_option='emi_options'
+      * Active EMIs: EMI orders that are not completed/cancelled (status in ['pending', 'active'])
+      * Monthly Collection: Sum of EMI payments collected in current month
+      * Pending Amount: Total remaining_amount across all active EMI orders
+      * Collection Trend: Monthly EMI collection data for last 4 months with amounts and order counts
+      * Summary includes total collected, total pending, and status breakdown
+    - Cancelled Orders:
+      * Total Cancelled: Count of bookings with status='cancelled'
+      * Total Amount: Sum of total_amount for cancelled bookings
+      * Refund Pending: Cancelled bookings with payments that haven't been refunded (total_paid > 0 and no refunded payments)
+      * Cancellation Rate: (Total Cancelled / Total Bookings) * 100
+      * Cancellation Trend: Monthly cancellation counts for last 4 months
+      * Summary includes refund status breakdown (pending vs processed) and refund amounts
+      * Refund status determined by checking Payment model for status='refunded'
     - All monetary values and counts are returned as numbers (not strings)
     - Percentage values are rounded to 1 decimal place
     - Month names are abbreviated (Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec)
@@ -4588,6 +4850,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_extra_deduction_percentage": "20.00",  // Extra deduction percentage on 6th+ pairs (default: 20%)
      "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000)
      "binary_tree_default_placement_side": "left",  // Default placement side for binary tree: "left" or "right" (default: "left")
+     "distributor_application_auto_approve": true,  // If true, distributor applications are auto-approved; if false, require admin/staff approval (default: true)
      "updated_at": "2026-01-14T09:00:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -4620,7 +4883,8 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_tds_percentage": 20,  // TDS percentage on ALL binary commissions (default: 20%, range: 0-100)
      "binary_extra_deduction_percentage": 20,  // Extra deduction percentage on 6th+ pairs (default: 20%, range: 0-100)
      "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10, min: 1)
-     "binary_tree_default_placement_side": "left"  // Default placement side: "left" or "right" (default: "left")
+     "binary_tree_default_placement_side": "left",  // Default placement side: "left" or "right" (default: "left")
+     "distributor_application_auto_approve": true  // If true, auto-approve distributor applications; if false, require admin/staff approval (default: true)
    }
    
    Response (200 OK):
@@ -4635,6 +4899,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_extra_deduction_percentage": "20.00",
      "binary_daily_pair_limit": 10,
      "binary_tree_default_placement_side": "left",
+     "distributor_application_auto_approve": true,
      "updated_at": "2026-01-14T09:15:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -4674,6 +4939,10 @@ Super User: EVAdmin && EVAdmin@123
      * If "left": 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain
      * If "right": 1st user → RIGHT, 2nd user → LEFT, 3rd+ → follow RIGHT chain
      * See Binary Tree Placement notes in CREATE BOOKING endpoint for detailed placement rules
+   - distributor_application_auto_approve: Controls automatic approval of distributor applications (default: true)
+     * If true: Applications are automatically approved upon creation, user becomes distributor immediately
+     * If false: Applications remain in 'pending' status, require admin/staff approval via update-status endpoint
+     * See CREATE DISTRIBUTOR APPLICATION endpoint for detailed behavior
    - updated_by is automatically set to the current user making the update
    - Settings are stored as a singleton (only one instance exists)
    - Timeout is stored in minutes (converted from hours for backward compatibility)
@@ -4794,7 +5063,7 @@ Standard Error Format:
 11. Reservation Timeout: Configurable via Platform Settings API (stored in minutes, null = never expires)
 12. Distributor Requirement: Only approved distributors can earn from binary pairs, direct user commissions, and referral bonuses
 13. Distributor Eligibility: User must have approved KYC to apply for distributor program (Active Buyer requirement removed)
-14. Distributor Application: Each user can submit only one distributor application; application is automatically approved upon creation and user becomes distributor immediately (no admin/staff approval required). Admin/staff can still reject applications if needed via update-status endpoint.
+14. Distributor Application: Each user can submit only one distributor application. Approval behavior is controlled by distributor_application_auto_approve setting in Platform Settings. If true (default): application is automatically approved upon creation and user becomes distributor immediately. If false: application remains pending and requires admin/staff approval via update-status endpoint. Admin/staff can reject applications regardless of setting.
 15. Binary Tree Placement: Users are NOT automatically placed in binary tree during booking creation. Placement APIs can ONLY be called AFTER user has successful payment. Referrers must place users AFTER payment via /api/binary/nodes/auto_place_pending/ (automatic) or /api/binary/nodes/place_user/ (manual). Commission is paid when placement happens (regardless of when payment was completed). Auto-placement uses left-priority algorithm: 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain. Referral-based override: If using specific parent's code, place in that parent's tree. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side). Parents can choose side for direct referrals and swap/move direct children via API endpoints.
 16. Manual Tree Placement: Tree owners can manually place/move users in their tree via placement APIs; only users who used referrer's code can be placed
 17. Commission Configuration: All binary commission amounts, thresholds, TDS settings, and daily limits are configurable via Platform Settings API

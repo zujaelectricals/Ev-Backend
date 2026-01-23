@@ -629,6 +629,10 @@ class VehicleSerializer(serializers.ModelSerializer):
         # Support both initial_quantity and stock_quantity for consistency
         initial_quantity = validated_data.pop('initial_quantity', None)
         stock_quantity = validated_data.pop('stock_quantity', None)
+        # battery_pricing is only used during create for per-variant pricing,
+        # it is a write-only helper and not a model field, so remove it here
+        # to avoid trying to set it directly on the Vehicle instance
+        validated_data.pop('battery_pricing', None)
         # Use initial_quantity if provided, otherwise use stock_quantity (backward compatibility)
         quantity_to_update = initial_quantity if initial_quantity is not None else stock_quantity
         
@@ -745,6 +749,44 @@ class VehicleSerializer(serializers.ModelSerializer):
                         id=image_id, 
                         vehicle=instance
                     ).update(order=order)
+        
+        # Apply remaining validated fields to the Vehicle instance
+        # (e.g., name, price, status, description, features, specifications,
+        #  vehicle_color, battery_variant, etc.)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Handle stock quantity update if requested
+        if quantity_to_update is not None:
+            # Ensure non-negative quantity (serializer field already enforces this,
+            # but guard defensively here as well)
+            if quantity_to_update < 0:
+                quantity_to_update = 0
+
+            # Get or create VehicleStock for this vehicle
+            stock, created = VehicleStock.objects.get_or_create(
+                vehicle=instance,
+                defaults={
+                    'total_quantity': quantity_to_update,
+                    'available_quantity': quantity_to_update,
+                },
+            )
+
+            if not created:
+                # Compute reserved quantity based on current stock
+                reserved = max(0, stock.total_quantity - stock.available_quantity)
+
+                # Update totals following the documented rules:
+                # - If new quantity < reserved: available = 0
+                # - Else: available = new_quantity - reserved
+                stock.total_quantity = quantity_to_update
+                if quantity_to_update < reserved:
+                    stock.available_quantity = 0
+                else:
+                    stock.available_quantity = quantity_to_update - reserved
+
+                stock.save(update_fields=['total_quantity', 'available_quantity', 'updated_at'])
         
         return instance
 

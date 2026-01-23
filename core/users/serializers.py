@@ -71,6 +71,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     carry_forward_left = serializers.SerializerMethodField()
     carry_forward_right = serializers.SerializerMethodField()
     is_distributor_terms_and_conditions_accepted = serializers.SerializerMethodField()
+    distributor_application_status = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -81,7 +82,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
                   'referred_by', 'kyc_status', 'nominee_exists', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
-                  'is_distributor_terms_and_conditions_accepted')
+                  'is_distributor_terms_and_conditions_accepted', 'distributor_application_status')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer',
                            'referral_code', 'referred_by', 'date_joined')
     
@@ -149,6 +150,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if hasattr(obj, 'distributor_application') and obj.distributor_application is not None:
             return obj.distributor_application.is_distributor_terms_and_conditions_accepted
         return None
+    
+    def get_distributor_application_status(self, obj):
+        """Get distributor application status if application exists for the user"""
+        # For OneToOneField reverse relationships, use hasattr which safely checks existence
+        # This avoids triggering unnecessary database queries
+        if hasattr(obj, 'distributor_application') and obj.distributor_application is not None:
+            return obj.distributor_application.status
+        return None
 
 
 class KYCSerializer(serializers.ModelSerializer):
@@ -158,6 +167,25 @@ class KYCSerializer(serializers.ModelSerializer):
         model = KYC
         fields = '__all__'
         read_only_fields = ('user', 'submitted_at', 'reviewed_at', 'reviewed_by')
+    
+    def update(self, instance, validated_data):
+        """Update KYC and reset status to pending when resubmitting after rejection"""
+        # If KYC was previously rejected and user is resubmitting, reset status to pending
+        # Also clear rejection reason and reset review fields
+        was_rejected = instance.status == 'rejected'
+        
+        # Update the instance with new data
+        instance = super().update(instance, validated_data)
+        
+        # If it was rejected, reset status and clear review information
+        if was_rejected:
+            instance.status = 'pending'
+            instance.rejection_reason = ''
+            instance.reviewed_by = None
+            instance.reviewed_at = None
+            instance.save(update_fields=['status', 'rejection_reason', 'reviewed_by', 'reviewed_at'])
+        
+        return instance
 
 
 class NomineeSerializer(serializers.ModelSerializer):

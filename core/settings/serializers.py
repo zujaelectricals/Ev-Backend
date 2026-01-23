@@ -19,6 +19,7 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
             'binary_extra_deduction_percentage',
             'binary_daily_pair_limit',
             'binary_tree_default_placement_side',
+            'distributor_application_auto_approve',
             'updated_at',
             'updated_by',
             'updated_by_username',

@@ -4,8 +4,9 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, BasePermission
 from rest_framework.exceptions import PermissionDenied, NotFound
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import Q
+from django.db.models import Q, Sum, F
 from django.db import connection
+from django.conf import settings
 from .models import Vehicle, VehicleImage, VehicleStock
 from .serializers import (
     VehicleSerializer, VehicleListSerializer, VehicleImageSerializer, 
@@ -452,6 +453,99 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
                 pass
         
         return queryset.order_by('-updated_at')
+    
+    def list(self, request, *args, **kwargs):
+        """
+        List vehicle stock with dashboard summary data.
+        Returns paginated results plus summary metrics.
+        """
+        # Get filtered queryset (before pagination)
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # Calculate aggregates from the full filtered queryset
+        aggregates = queryset.aggregate(
+            total_stock=Sum('total_quantity'),
+            inventory_value=Sum(F('vehicle__price') * F('total_quantity'))
+        )
+        
+        total_stock = aggregates['total_stock'] or 0
+        inventory_value = aggregates['inventory_value'] or 0
+        
+        # Get low stock threshold percentage from settings
+        threshold_percent = getattr(settings, 'LOW_STOCK_THRESHOLD_PERCENT', 20)
+        
+        # Calculate low stock and out of stock items
+        low_stock_items = []
+        low_stock_count = 0
+        out_of_stock_count = 0
+        
+        for stock in queryset:
+            if stock.vehicle is None:
+                continue
+                
+            total_qty = stock.total_quantity
+            available_qty = stock.available_quantity
+            
+            # Calculate reorder level (threshold)
+            reorder_level = int(total_qty * (threshold_percent / 100))
+            
+            # Determine status
+            if available_qty == 0:
+                status = "out_of_stock"
+                out_of_stock_count += 1
+            elif available_qty <= reorder_level and total_qty > 0:
+                status = "low_stock"
+                low_stock_count += 1
+            else:
+                continue  # Skip items that don't need alerts
+            
+            low_stock_items.append({
+                'vehicle_id': stock.vehicle.id,
+                'vehicle_name': stock.vehicle.name,
+                'vehicle_model_code': stock.vehicle.model_code or '',
+                'available_quantity': available_qty,
+                'total_quantity': total_qty,
+                'reorder_level': reorder_level,
+                'status': status
+            })
+        
+        # Sort low stock items by available_quantity (lowest first)
+        low_stock_items.sort(key=lambda x: x['available_quantity'])
+        
+        # Build summary
+        summary = {
+            'total_stock': total_stock,
+            'inventory_value': float(inventory_value),
+            'low_stock_threshold_percent': threshold_percent,
+            'low_stock_alerts_count': low_stock_count,
+            'out_of_stock_count': out_of_stock_count,
+            'low_stock_items': low_stock_items,
+            'stock_trend': [
+                {
+                    'label': 'Current',
+                    'total_stock': total_stock
+                }
+            ]
+        }
+        
+        # Get paginated results using standard DRF pagination
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            paginated_response = self.get_paginated_response(serializer.data)
+            # Add summary to paginated response
+            paginated_response.data['summary'] = summary
+            return paginated_response
+        
+        # If no pagination, return all results with summary
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            'count': queryset.count(),
+            'next': None,
+            'previous': None,
+            'results': serializer.data,
+            'summary': summary
+        })
     
     def get_object(self):
         """

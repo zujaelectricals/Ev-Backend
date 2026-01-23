@@ -254,3 +254,6 @@ TDS_CEILING = config('TDS_CEILING', default=10000, cast=int)
 OTP_EXPIRY_MINUTES = 10
 OTP_LENGTH = 6
 
+# Inventory Stock Configuration
+LOW_STOCK_THRESHOLD_PERCENT = config('LOW_STOCK_THRESHOLD_PERCENT', default=20, cast=int)
+

@@ -10,6 +10,7 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from .models import User, KYC, Nominee, DistributorApplication
 from .serializers import UserSerializer, UserProfileSerializer, KYCSerializer, NomineeSerializer, DistributorApplicationSerializer
+from core.settings.models import PlatformSettings
 
 
 class DistributorApplicationPagination(PageNumberPagination):
@@ -518,7 +519,7 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
     
     def create(self, request, *args, **kwargs):
-        """Create distributor application with automatic approval"""
+        """Create distributor application. Approval is automatic if distributor_application_auto_approve setting is True, otherwise requires admin/staff approval."""
         user = request.user
         
         # Check eligibility (Active Buyer requirement removed - only KYC needed)
@@ -540,14 +541,19 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
         # Create the application
         application = serializer.save(user=user)
         
-        # Automatically approve the application
-        application.status = 'approved'
-        application.reviewed_at = timezone.now()
-        application.save(update_fields=['status', 'reviewed_at'])
-        
-        # Set user as distributor immediately
-        user.is_distributor = True
-        user.save(update_fields=['is_distributor'])
+        # Check if auto-approval is enabled
+        platform_settings = PlatformSettings.get_settings()
+        if platform_settings.distributor_application_auto_approve:
+            # Automatically approve the application
+            application.status = 'approved'
+            application.reviewed_at = timezone.now()
+            application.save(update_fields=['status', 'reviewed_at'])
+            
+            # Set user as distributor immediately
+            user.is_distributor = True
+            user.save(update_fields=['is_distributor'])
+        # If auto-approval is False, application remains in 'pending' status
+        # Admin/staff will need to approve via update-status endpoint
         
         # Refresh serializer to include updated status
         serializer = self.get_serializer(application)
@@ -555,7 +561,7 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'], permission_classes=[IsAdminUser], url_path='update-status')
     def update_status(self, request, pk=None):
-        """Update distributor application status - reject or re-approve (Admin/Staff only). Applications are automatically approved upon creation."""
+        """Update distributor application status - reject or re-approve (Admin/Staff only). Applications may be automatically approved upon creation if distributor_application_auto_approve setting is True, otherwise they require manual approval."""
         application = self.get_object()
         new_status = request.data.get('status')
         

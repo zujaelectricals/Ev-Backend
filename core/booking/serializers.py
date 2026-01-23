@@ -48,7 +48,7 @@ class BookingSerializer(serializers.ModelSerializer):
         model = Booking
         fields = '__all__'
         read_only_fields = ('user', 'booking_number', 'status', 'created_at', 
-                          'updated_at', 'confirmed_at', 'completed_at', 'total_paid', 
+                          'updated_at', 'confirmed_at', 'completed_at', 'delivered_at', 'total_paid', 
                           'remaining_amount', 'expires_at', 'ip_address', 'referred_by', 'vehicle_model')
     
     def validate_booking_amount(self, value):

@@ -58,6 +58,12 @@ class PlatformSettings(models.Model):
         help_text="Default placement side for binary tree (left or right). Controls which side chain is followed after first 2 users."
     )
     
+    # Distributor Application Settings
+    distributor_application_auto_approve = models.BooleanField(
+        default=True,
+        help_text="If True, distributor applications are automatically approved upon submission. If False, applications require admin/staff approval."
+    )
+    
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(
         User,
@@ -95,6 +101,7 @@ class PlatformSettings(models.Model):
                 'binary_extra_deduction_percentage': 20,
                 'binary_daily_pair_limit': 10,
                 'binary_tree_default_placement_side': 'left',
+                'distributor_application_auto_approve': True,
             }
         )
         return settings

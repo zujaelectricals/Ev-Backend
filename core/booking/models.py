@@ -12,6 +12,7 @@ class Booking(models.Model):
         ('pending', 'Pending'),
         ('active', 'Active Buyer'),
         ('completed', 'Completed'),
+        ('delivered', 'Delivered'),
         ('cancelled', 'Cancelled'),
         ('expired', 'Expired'),
     ]
@@ -71,6 +72,7 @@ class Booking(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     confirmed_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
     
     class Meta:
         db_table = 'bookings'

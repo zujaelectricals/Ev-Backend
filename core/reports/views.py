@@ -481,6 +481,9 @@ class AdminDashboardView(views.APIView):
             'buyer_segments': self._get_buyer_segments(),
             'sales_funnel': self._get_sales_funnel(),
             'conversion_rates': self._get_conversion_rates(),
+            'pre_bookings': self._get_pre_bookings(),
+            'emi_orders': self._get_emi_orders(),
+            'cancelled_orders': self._get_cancelled_orders(),
         }
         
         return Response(dashboard_data)
@@ -964,4 +967,286 @@ class AdminDashboardView(views.APIView):
         if previous == 0:
             return 0 if current == 0 else 100.0
         return round(((current - previous) / previous) * 100, 1)
+    
+    def _get_pre_bookings(self):
+        """Calculate pre-bookings KPIs and summary data"""
+        # Total Pre-Bookings: All bookings with status in ['pending', 'active', 'expired']
+        pre_booking_statuses = ['pending', 'active', 'expired']
+        total_pre_bookings = Booking.objects.filter(status__in=pre_booking_statuses).count()
+        
+        # Pending: Bookings with status='pending'
+        pending_count = Booking.objects.filter(status='pending').count()
+        
+        # Confirmed: Bookings with status='active' (confirmed/active buyers)
+        confirmed_count = Booking.objects.filter(status='active').count()
+        
+        # Expired: Bookings with status='expired'
+        expired_count = Booking.objects.filter(status='expired').count()
+        
+        # Total Amount: Sum of booking_amount for all pre-bookings
+        total_amount_result = Booking.objects.filter(
+            status__in=pre_booking_statuses
+        ).aggregate(total=Sum('booking_amount'))
+        total_amount = float(total_amount_result['total'] or 0)
+        
+        return {
+            'kpi_cards': {
+                'total_pre_bookings': total_pre_bookings,
+                'pending': pending_count,
+                'confirmed': confirmed_count,
+                'total_amount': round(total_amount, 2)
+            },
+            'summary': {
+                'total_count': total_pre_bookings,
+                'pending_count': pending_count,
+                'confirmed_count': confirmed_count,
+                'expired_count': expired_count,
+                'total_amount': round(total_amount, 2)
+            }
+        }
+    
+    def _get_emi_orders(self):
+        """Calculate EMI orders KPIs, collection trend, and summary data"""
+        now = timezone.now()
+        current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Total EMI Orders: Bookings with payment_option='emi_options'
+        total_emi_orders = Booking.objects.filter(payment_option='emi_options').count()
+        
+        # Active EMIs: EMI orders that are not completed/cancelled
+        active_emis = Booking.objects.filter(
+            payment_option='emi_options',
+            status__in=['pending', 'active']
+        ).count()
+        
+        # Monthly Collection: Sum of EMI payments collected in current month
+        monthly_collection_result = Payment.objects.filter(
+            booking__payment_option='emi_options',
+            status='completed',
+            completed_at__gte=current_month_start
+        ).aggregate(total=Sum('amount'))
+        monthly_collection = float(monthly_collection_result['total'] or 0)
+        
+        # Pending Amount: Total remaining_amount across all active EMI orders
+        pending_amount_result = Booking.objects.filter(
+            payment_option='emi_options',
+            status__in=['pending', 'active']
+        ).aggregate(total=Sum('remaining_amount'))
+        pending_amount = float(pending_amount_result['total'] or 0)
+        
+        # EMI Collection Trend: Monthly data for last 4 months
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        months_data = {}
+        
+        for i in range(4):
+            month_offset = 3 - i
+            year = now.year
+            month = now.month - month_offset
+            
+            # Handle year rollover
+            while month <= 0:
+                month += 12
+                year -= 1
+            while month > 12:
+                month -= 12
+                year += 1
+            
+            month_key = f"{year}-{month:02d}"
+            months_data[month_key] = {
+                'month_name': month_names[month - 1],
+                'amount': Decimal('0'),
+                'order_count': 0
+            }
+        
+        # Get EMI payments for last 4 months
+        emi_payments = Payment.objects.filter(
+            booking__payment_option='emi_options',
+            status='completed',
+            completed_at__gte=datetime(now.year, now.month, 1) - timedelta(days=120)
+        )
+        
+        for payment in emi_payments:
+            payment_month = payment.completed_at.strftime('%Y-%m')
+            if payment_month in months_data:
+                months_data[payment_month]['amount'] += Decimal(str(payment.amount))
+        
+        # Count unique bookings per month
+        for month_key in months_data.keys():
+            year, month = month_key.split('-')
+            month_start = datetime(int(year), int(month), 1)
+            if int(month) == 12:
+                month_end = datetime(int(year) + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end = datetime(int(year), int(month) + 1, 1) - timedelta(days=1)
+            
+            month_start = timezone.make_aware(month_start)
+            month_end = timezone.make_aware(month_end.replace(hour=23, minute=59, second=59))
+            
+            order_count = Payment.objects.filter(
+                booking__payment_option='emi_options',
+                status='completed',
+                completed_at__gte=month_start,
+                completed_at__lte=month_end
+            ).values('booking').distinct().count()
+            
+            months_data[month_key]['order_count'] = order_count
+        
+        # Format trend data
+        sorted_keys = sorted(months_data.keys())
+        months = []
+        amounts = []
+        order_counts = []
+        
+        for month_key in sorted_keys:
+            months.append(months_data[month_key]['month_name'])
+            amounts.append(float(months_data[month_key]['amount']))
+            order_counts.append(months_data[month_key]['order_count'])
+        
+        # Summary data
+        completed_count = Booking.objects.filter(
+            payment_option='emi_options',
+            status='completed'
+        ).count()
+        
+        cancelled_count = Booking.objects.filter(
+            payment_option='emi_options',
+            status='cancelled'
+        ).count()
+        
+        total_collected_result = Payment.objects.filter(
+            booking__payment_option='emi_options',
+            status='completed'
+        ).aggregate(total=Sum('amount'))
+        total_collected = float(total_collected_result['total'] or 0)
+        
+        return {
+            'kpi_cards': {
+                'total_emi_orders': total_emi_orders,
+                'active_emis': active_emis,
+                'monthly_collection': round(monthly_collection, 2),
+                'pending_amount': round(pending_amount, 2)
+            },
+            'collection_trend': {
+                'months': months,
+                'amounts': amounts,
+                'order_counts': order_counts
+            },
+            'summary': {
+                'total_count': total_emi_orders,
+                'active_count': active_emis,
+                'completed_count': completed_count,
+                'cancelled_count': cancelled_count,
+                'total_collected': round(total_collected, 2),
+                'total_pending': round(pending_amount, 2)
+            }
+        }
+    
+    def _get_cancelled_orders(self):
+        """Calculate cancelled orders KPIs, cancellation trend, and summary with refund status"""
+        # Total Cancelled: Bookings with status='cancelled'
+        total_cancelled = Booking.objects.filter(status='cancelled').count()
+        
+        # Total Amount: Sum of total_amount for cancelled bookings
+        total_amount_result = Booking.objects.filter(
+            status='cancelled'
+        ).aggregate(total=Sum('total_amount'))
+        total_amount = float(total_amount_result['total'] or 0)
+        
+        # Refund Pending: Cancelled bookings with payments that haven't been refunded
+        # Get all cancelled bookings with payments
+        cancelled_bookings = Booking.objects.filter(
+            status='cancelled',
+            total_paid__gt=0
+        ).prefetch_related('payments')
+        
+        refund_pending_count = 0
+        refund_processed_count = 0
+        total_refunded_amount = Decimal('0')
+        pending_refund_amount = Decimal('0')
+        
+        for booking in cancelled_bookings:
+            # Check if any payment has status='refunded'
+            has_refunded_payment = booking.payments.filter(status='refunded').exists()
+            
+            if has_refunded_payment:
+                refund_processed_count += 1
+                # Sum refunded amounts
+                refunded_payments = booking.payments.filter(status='refunded')
+                for payment in refunded_payments:
+                    total_refunded_amount += Decimal(str(payment.amount))
+            else:
+                refund_pending_count += 1
+                # Calculate pending refund amount (total_paid that hasn't been refunded)
+                pending_refund_amount += Decimal(str(booking.total_paid))
+        
+        # Cancellation Rate: (Total Cancelled / Total Bookings) * 100
+        total_bookings = Booking.objects.count()
+        cancellation_rate = 0.0
+        if total_bookings > 0:
+            cancellation_rate = round((total_cancelled / total_bookings) * 100, 1)
+        
+        # Cancellation Trend: Monthly cancellation counts for last 4 months
+        now = timezone.now()
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        months_data = {}
+        
+        for i in range(4):
+            month_offset = 3 - i
+            year = now.year
+            month = now.month - month_offset
+            
+            # Handle year rollover
+            while month <= 0:
+                month += 12
+                year -= 1
+            while month > 12:
+                month -= 12
+                year += 1
+            
+            month_key = f"{year}-{month:02d}"
+            months_data[month_key] = {
+                'month_name': month_names[month - 1],
+                'count': 0
+            }
+        
+        # Count cancelled bookings by month
+        cancelled_bookings_all = Booking.objects.filter(
+            status='cancelled',
+            created_at__gte=datetime(now.year, now.month, 1) - timedelta(days=120)
+        )
+        
+        for booking in cancelled_bookings_all:
+            cancelled_month = booking.created_at.strftime('%Y-%m')
+            if cancelled_month in months_data:
+                months_data[cancelled_month]['count'] += 1
+        
+        # Format trend data
+        sorted_keys = sorted(months_data.keys())
+        months = []
+        counts = []
+        
+        for month_key in sorted_keys:
+            months.append(months_data[month_key]['month_name'])
+            counts.append(months_data[month_key]['count'])
+        
+        return {
+            'kpi_cards': {
+                'total_cancelled': total_cancelled,
+                'total_amount': round(total_amount, 2),
+                'refund_pending': refund_pending_count,
+                'cancellation_rate': cancellation_rate
+            },
+            'cancellation_trend': {
+                'months': months,
+                'counts': counts
+            },
+            'summary': {
+                'total_count': total_cancelled,
+                'total_amount': round(total_amount, 2),
+                'refund_pending_count': refund_pending_count,
+                'refund_processed_count': refund_processed_count,
+                'total_refunded_amount': round(float(total_refunded_amount), 2),
+                'pending_refund_amount': round(float(pending_refund_amount), 2)
+            }
+        }
 

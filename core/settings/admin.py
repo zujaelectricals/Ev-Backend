@@ -14,6 +14,9 @@ class PlatformSettingsAdmin(admin.ModelAdmin):
         ('Booking Settings', {
             'fields': ('booking_reservation_timeout_minutes',)
         }),
+        ('Distributor Settings', {
+            'fields': ('distributor_application_auto_approve',)
+        }),
         ('Metadata', {
             'fields': ('id', 'updated_at', 'updated_by'),
         }),

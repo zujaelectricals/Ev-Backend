@@ -3,13 +3,23 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.pagination import PageNumberPagination
 from django.conf import settings
 from django.utils import timezone
+from django.db.models import Q
 from decimal import Decimal
 from core.users.models import User
 from core.inventory.utils import create_reservation
 from .models import Booking, Payment
 from .serializers import BookingSerializer, PaymentSerializer
+
+
+class BookingPagination(PageNumberPagination):
+    """Custom pagination for booking list with page_size support"""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+    page_query_param = 'page'
 
 
 class BookingViewSet(viewsets.ModelViewSet):
@@ -19,6 +29,7 @@ class BookingViewSet(viewsets.ModelViewSet):
     queryset = Booking.objects.select_related('user', 'vehicle_model', 'referred_by').all()
     serializer_class = BookingSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = BookingPagination
     
     def get_queryset(self):
         user = self.request.user
@@ -34,6 +45,23 @@ class BookingViewSet(viewsets.ModelViewSet):
             # Strip whitespace for consistent filtering
             status_param = status_param.strip()
             queryset = queryset.filter(status=status_param)
+        
+        # Search query (searches across multiple fields)
+        search = self.request.query_params.get('search', None)
+        if search:
+            search_queries = (
+                Q(booking_number__icontains=search) |
+                Q(user__first_name__icontains=search) |
+                Q(user__last_name__icontains=search) |
+                Q(user__username__icontains=search) |
+                Q(user__email__icontains=search) |
+                Q(vehicle_model__name__icontains=search) |
+                Q(vehicle_model__model_code__icontains=search) |
+                Q(delivery_city__icontains=search) |
+                Q(delivery_state__icontains=search) |
+                Q(delivery_pin__icontains=search)
+            )
+            queryset = queryset.filter(search_queries)
         
         return queryset
     
@@ -208,6 +236,95 @@ class BookingViewSet(viewsets.ModelViewSet):
         
         serializer = PaymentSerializer(payment)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    @action(detail=True, methods=['patch', 'post'])
+    def update_status(self, request, pk=None):
+        """Update booking status (Admin/Staff only)"""
+        if not (request.user.is_superuser or request.user.role in ['admin', 'staff']):
+            return Response(
+                {'error': 'Permission denied. Only admin or staff can update booking status.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        booking = self.get_object()
+        new_status = request.data.get('status')
+        
+        if not new_status:
+            return Response(
+                {'error': 'status field is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if new_status not in dict(Booking.STATUS_CHOICES):
+            return Response(
+                {'error': f'Invalid status. Valid choices: {[choice[0] for choice in Booking.STATUS_CHOICES]}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        old_status = booking.status
+        
+        # Validate status transitions
+        valid_transitions = {
+            'pending': ['active', 'cancelled', 'expired'],
+            'active': ['completed', 'cancelled'],
+            'completed': ['delivered', 'cancelled'],
+            'delivered': [],  # Cannot change from delivered
+            'cancelled': [],  # Cannot change from cancelled
+            'expired': [],  # Cannot change from expired
+        }
+        
+        if new_status != old_status and new_status not in valid_transitions.get(old_status, []):
+            return Response(
+                {'error': f'Cannot change status from {old_status} to {new_status}. Valid transitions from {old_status}: {valid_transitions.get(old_status, [])}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update status
+        booking.status = new_status
+        
+        # Set delivered_at timestamp when status changes to 'delivered'
+        if new_status == 'delivered' and old_status != 'delivered':
+            booking.delivered_at = timezone.now()
+        
+        booking.save(update_fields=['status', 'delivered_at'])
+        
+        serializer = BookingSerializer(booking)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """Cancel a booking and release reservation"""
+        booking = self.get_object()
+        
+        # Check permission - user can cancel their own booking, admin/staff can cancel any
+        if booking.user != request.user and not (request.user.is_superuser or request.user.role in ['admin', 'staff']):
+            return Response(
+                {'error': 'Permission denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if booking can be cancelled
+        if booking.status in ['cancelled', 'delivered']:
+            return Response(
+                {'error': f'Cannot cancel booking with status: {booking.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Release reservation if exists
+        from core.inventory.utils import release_reservation
+        try:
+            reservation = booking.stock_reservation
+            if reservation and reservation.status == 'reserved':
+                release_reservation(reservation)
+        except:
+            pass  # No reservation exists, skip
+        
+        # Update booking status
+        booking.status = 'cancelled'
+        booking.save(update_fields=['status'])
+        
+        serializer = BookingSerializer(booking)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class PaymentViewSet(viewsets.ModelViewSet):
@@ -383,52 +500,5 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment_completed.delay(booking.id, float(payment.amount))
         
         serializer = PaymentSerializer(payment)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-    
-    def perform_destroy(self, instance):
-        """Handle booking deletion - release reservation if exists"""
-        from core.inventory.utils import release_reservation
-        try:
-            reservation = instance.stock_reservation
-            if reservation and reservation.status == 'reserved':
-                release_reservation(reservation)
-        except:
-            pass  # No reservation exists, skip
-        
-        instance.delete()
-    
-    @action(detail=True, methods=['post'])
-    def cancel(self, request, pk=None):
-        """Cancel a booking and release reservation"""
-        booking = self.get_object()
-        
-        # Check permission - user can cancel their own booking, admin/staff can cancel any
-        if booking.user != request.user and not (request.user.is_superuser or request.user.role in ['admin', 'staff']):
-            return Response(
-                {'error': 'Permission denied'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        # Check if booking can be cancelled
-        if booking.status in ['cancelled', 'completed']:
-            return Response(
-                {'error': f'Cannot cancel booking with status: {booking.status}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Release reservation if exists
-        from core.inventory.utils import release_reservation
-        try:
-            reservation = booking.stock_reservation
-            if reservation and reservation.status == 'reserved':
-                release_reservation(reservation)
-        except:
-            pass  # No reservation exists, skip
-        
-        # Update booking status
-        booking.status = 'cancelled'
-        booking.save(update_fields=['status'])
-        
-        serializer = BookingSerializer(booking)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

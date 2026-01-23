@@ -8,7 +8,7 @@ class BookingAdmin(admin.ModelAdmin):
                    'total_paid', 'status', 'created_at')
     list_filter = ('status', 'created_at', 'join_distributor_program')
     search_fields = ('booking_number', 'user__username', 'user__email', 'vehicle_model__name', 'vehicle_model__model_code')
-    readonly_fields = ('booking_number', 'created_at', 'updated_at', 'confirmed_at', 'completed_at', 'expires_at')
+    readonly_fields = ('booking_number', 'created_at', 'updated_at', 'confirmed_at', 'completed_at', 'delivered_at', 'expires_at')
 
 
 @admin.register(Payment)
