@@ -270,20 +270,27 @@ class PayoutViewSet(viewsets.ModelViewSet):
         if wallet.balance < requested_amount:
             raise serializers.ValidationError("Insufficient wallet balance")
         
-        payout = serializer.save(user=user, wallet=wallet)
-        
-        # Calculate TDS
-        payout.calculate_tds()
+        # Create temporary payout instance to calculate TDS before saving
+        temp_payout = Payout(user=user, wallet=wallet, requested_amount=requested_amount)
+        temp_payout.calculate_tds()
         
         # Check if EMI auto-fill is requested
         emi_auto_filled = self.request.data.get('emi_auto_filled', False)
         if emi_auto_filled:
             emi_used, remaining = auto_fill_emi_from_payout(user, requested_amount)
-            payout.emi_amount = emi_used
-            payout.net_amount = remaining
-            payout.emi_auto_filled = True
+            temp_payout.emi_amount = emi_used
+            temp_payout.net_amount = remaining
+            temp_payout.emi_auto_filled = True
         
-        payout.save()
+        # Save payout with calculated TDS and net_amount
+        payout = serializer.save(
+            user=user,
+            wallet=wallet,
+            tds_amount=temp_payout.tds_amount,
+            net_amount=temp_payout.net_amount,
+            emi_amount=temp_payout.emi_amount,
+            emi_auto_filled=temp_payout.emi_auto_filled
+        )
         
         # Check payout_approval_needed setting
         platform_settings = PlatformSettings.get_settings()
