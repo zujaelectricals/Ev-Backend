@@ -255,8 +255,89 @@ def process_direct_user_commission(referrer, new_user):
                 # This ensures D.created_at == activation_timestamp, so D is included with >= comparison
                 locked_node.activation_timestamp = new_user_node.created_at
                 locked_node.save(update_fields=['binary_commission_activated', 'activation_timestamp'])
+                
+                # Process initial bonus payment (if configured)
+                # Handle errors gracefully - don't fail activation if bonus payment fails
+                try:
+                    process_binary_initial_bonus(locked_node.user)
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(
+                        f"Error processing initial bonus for user {locked_node.user.username} "
+                        f"after activation: {e}",
+                        exc_info=True
+                    )
     
     return commissions_paid
+
+
+def process_binary_initial_bonus(user):
+    """
+    Process initial bonus payment when user achieves binary commission activation (3 persons).
+    Credits net amount (after TDS) to wallet and total_earnings.
+    TDS is calculated but NOT deducted from booking balance (unlike other commissions).
+    
+    Args:
+        user: User who just achieved binary commission activation
+    
+    Returns:
+        bool: True if bonus was paid, False otherwise (already paid or error)
+    """
+    from core.wallet.models import WalletTransaction
+    from decimal import Decimal
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Check if bonus was already paid (prevent duplicates)
+    if WalletTransaction.objects.filter(
+        user=user,
+        transaction_type='BINARY_INITIAL_BONUS'
+    ).exists():
+        logger.info(f"Binary initial bonus already paid for user {user.username}. Skipping.")
+        return False
+    
+    try:
+        # Get settings
+        platform_settings = PlatformSettings.get_settings()
+        initial_bonus = platform_settings.binary_commission_initial_bonus
+        tds_percentage = platform_settings.binary_commission_tds_percentage
+        
+        # If bonus amount is zero, skip payment
+        if initial_bonus <= 0:
+            logger.info(f"Binary initial bonus is zero for user {user.username}. Skipping.")
+            return False
+        
+        # Calculate TDS (for tracking/reporting purposes)
+        tds_amount = initial_bonus * (tds_percentage / Decimal('100'))
+        
+        # Calculate net amount (bonus - TDS)
+        net_amount = initial_bonus - tds_amount
+        
+        # Credit net amount to wallet
+        # Note: TDS is NOT deducted from booking balance for this bonus
+        add_wallet_balance(
+            user=user,
+            amount=net_amount,
+            transaction_type='BINARY_INITIAL_BONUS',
+            description=f"Binary commission initial bonus (₹{initial_bonus} - TDS ₹{tds_amount} = ₹{net_amount})",
+            reference_type='binary_activation'
+        )
+        
+        logger.info(
+            f"Binary initial bonus credited to user {user.username}: "
+            f"Gross: ₹{initial_bonus}, TDS: ₹{tds_amount}, Net: ₹{net_amount}"
+        )
+        
+        return True
+        
+    except Exception as e:
+        logger.error(
+            f"Error processing binary initial bonus for user {user.username}: {e}",
+            exc_info=True
+        )
+        return False
 
 
 def deduct_from_booking_balance(user, deduction_amount, deduction_type='EXTRA_DEDUCTION', description='', reference_id=None, reference_type='booking'):
@@ -798,6 +879,19 @@ def check_and_create_pair(user):
             node.binary_commission_activated = True
             node.activation_timestamp = third_member_node.created_at
             node.save(update_fields=['binary_commission_activated', 'activation_timestamp'])
+            
+            # Process initial bonus payment (if configured)
+            # Handle errors gracefully - don't fail activation if bonus payment fails
+            try:
+                process_binary_initial_bonus(node.user)
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    f"Error processing initial bonus for user {node.user.username} "
+                    f"after retroactive activation: {e}",
+                    exc_info=True
+                )
     
     # Check if binary commission is activated
     # STRICT RULE: Pair matching is BLOCKED before activation

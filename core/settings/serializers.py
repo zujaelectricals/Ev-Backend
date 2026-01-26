@@ -18,8 +18,10 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
             'binary_commission_tds_percentage',
             'binary_extra_deduction_percentage',
             'binary_daily_pair_limit',
+            'binary_commission_initial_bonus',
             'binary_tree_default_placement_side',
             'distributor_application_auto_approve',
+            'payout_approval_needed',
             'updated_at',
             'updated_by',
             'updated_by_username',
@@ -77,5 +79,11 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
         """Validate that daily pair limit is positive"""
         if value < 1:
             raise serializers.ValidationError("binary_daily_pair_limit must be at least 1")
+        return value
+    
+    def validate_binary_commission_initial_bonus(self, value):
+        """Validate that initial bonus amount is non-negative"""
+        if value < 0:
+            raise serializers.ValidationError("binary_commission_initial_bonus must be non-negative")
         return value
 

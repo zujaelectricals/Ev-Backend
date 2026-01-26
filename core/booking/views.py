@@ -237,7 +237,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         serializer = PaymentSerializer(payment)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     
-    @action(detail=True, methods=['patch', 'post'])
+    @action(detail=True, methods=['patch', 'post'], url_path='update_status', url_name='update-status')
     def update_status(self, request, pk=None):
         """Update booking status (Admin/Staff only)"""
         if not (request.user.is_superuser or request.user.role in ['admin', 'staff']):

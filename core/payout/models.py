@@ -47,6 +47,7 @@ class Payout(models.Model):
     transaction_id = models.CharField(max_length=200, unique=True, null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
     notes = models.TextField(blank=True)
+    reason = models.TextField(blank=True, help_text="User's reason for payout request")
     
     class Meta:
         db_table = 'payouts'

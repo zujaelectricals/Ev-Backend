@@ -42,6 +42,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     net_amount_total = serializers.SerializerMethodField()
     binary_commission_activated = serializers.BooleanField(read_only=True)
     activation_timestamp = serializers.DateTimeField(read_only=True)
+    parent_name = serializers.SerializerMethodField()
     left_child = serializers.SerializerMethodField()
     right_child = serializers.SerializerMethodField()
     left_side_members = serializers.SerializerMethodField()
@@ -55,7 +56,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             'is_distributor', 'is_active_buyer', 'referral_code', 'date_joined',
             'wallet_balance', 'total_bookings', 'total_binary_pairs', 'total_earnings',
             'total_referrals', 'total_amount', 'tds_current', 'net_amount_total',
-            'parent', 'side', 'level', 'left_count', 'right_count',
+            'parent', 'parent_name', 'side', 'level', 'left_count', 'right_count',
             'binary_commission_activated', 'activation_timestamp', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
             'created_at', 'updated_at'
         ]
@@ -75,6 +76,12 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         """Get user's full name"""
         if obj.user:
             return obj.user.get_full_name() or obj.user.username
+        return None
+    
+    def get_parent_name(self, obj):
+        """Get parent's full name"""
+        if obj.parent and obj.parent.user:
+            return obj.parent.user.get_full_name() or obj.parent.user.username
         return None
     
     def get_wallet_balance(self, obj):
@@ -199,24 +206,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     def get_net_amount_total(self, obj):
         """Get total net amount from all binary earnings and direct user commissions"""
         if obj.user:
-            from core.wallet.models import WalletTransaction
-            from decimal import Decimal
-            
-            # Sum binary pair net amounts
-            binary_net = BinaryEarning.objects.filter(user=obj.user).aggregate(
-                total=Sum('net_amount')
-            )['total'] or Decimal('0')
-            
-            # Sum direct user commissions (these are already net amounts after TDS)
-            direct_commissions_net = WalletTransaction.objects.filter(
-                user=obj.user,
-                transaction_type='DIRECT_USER_COMMISSION'
-            ).aggregate(
-                total=Sum('amount')
-            )['total'] or Decimal('0')
-            
-            total = binary_net + direct_commissions_net
-            return str(total)
+            # Use the helper method which includes BINARY_INITIAL_BONUS
+            return self._get_net_amount_total(obj.user)
         return "0.00"
     
     def get_left_child(self, obj):
@@ -336,6 +327,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                     'tds_current': self._get_tds_current(child.user),
                     'net_amount_total': self._get_net_amount_total(child.user),
                     'parent': child.parent.id if child.parent else None,
+                    'parent_name': child.parent.user.get_full_name() or child.parent.user.username if child.parent and child.parent.user else None,
                     'side': child.side,
                     'level': child.level,
                     'left_count': child.left_count,
@@ -479,7 +471,15 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 total=Sum('amount')
             )['total'] or Decimal('0')
             
-            total = binary_net + direct_commissions_net
+            # Sum binary initial bonus (net amount after TDS, but TDS not deducted from booking balance)
+            initial_bonus_net = WalletTransaction.objects.filter(
+                user=user,
+                transaction_type='BINARY_INITIAL_BONUS'
+            ).aggregate(
+                total=Sum('amount')
+            )['total'] or Decimal('0')
+            
+            total = binary_net + direct_commissions_net + initial_bonus_net
             return str(total)
         return "0.00"
     

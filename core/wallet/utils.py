@@ -21,7 +21,7 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
         balance_before = wallet.balance
         
         # Business Rule: Only distributors can earn from binary pairs and direct user commissions
-        if transaction_type in ['BINARY_PAIR', 'BINARY_PAIR_COMMISSION', 'DIRECT_USER_COMMISSION']:
+        if transaction_type in ['BINARY_PAIR', 'BINARY_PAIR_COMMISSION', 'DIRECT_USER_COMMISSION', 'BINARY_INITIAL_BONUS']:
             if not user.is_distributor:
                 # Log warning but don't raise error (silent failure for non-distributors)
                 import logging
@@ -57,10 +57,26 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
                 )
                 return wallet  # Return wallet without crediting
         
-        # Handle TDS_DEDUCTION (negative transaction)
-        if transaction_type == 'TDS_DEDUCTION':
-            # TDS is a deduction, so amount should be negative
+        # Handle TDS_DEDUCTION and EXTRA_DEDUCTION (tracking only - does not affect wallet balance)
+        # These deductions are already deducted from commission before crediting to wallet
+        # These transactions are only for tracking/record-keeping purposes
+        if transaction_type in ['TDS_DEDUCTION', 'EXTRA_DEDUCTION']:
+            # Deduction amount should be negative for tracking
             final_amount = -Decimal(str(abs(amount)))
+            # DO NOT update wallet balance - deductions were already accounted for in net commission
+            # Only create transaction record for tracking
+            WalletTransaction.objects.create(
+                user=user,
+                wallet=wallet,
+                transaction_type=transaction_type,
+                amount=final_amount,
+                balance_before=wallet.balance,  # Balance unchanged
+                balance_after=wallet.balance,   # Balance unchanged
+                description=description,
+                reference_id=reference_id,
+                reference_type=reference_type
+            )
+            return wallet  # Return without updating balance
         else:
             # Business Rule: Check if user is Active Buyer
             is_active_buyer = user.is_active_buyer
@@ -98,7 +114,7 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
                     else:
                         # Active Buyer gets full amount
                         final_amount = Decimal(str(amount))
-            elif transaction_type in ['BINARY_PAIR_COMMISSION', 'DIRECT_USER_COMMISSION']:
+            elif transaction_type in ['BINARY_PAIR_COMMISSION', 'DIRECT_USER_COMMISSION', 'BINARY_INITIAL_BONUS']:
                 # New commission types: credit full amount (TDS already handled if applicable)
                 final_amount = Decimal(str(amount))
             else:
@@ -109,7 +125,7 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
         wallet.balance += final_amount
         
         # Update total earned for credit transactions
-        if transaction_type in ['BINARY_PAIR', 'BINARY_PAIR_COMMISSION', 'DIRECT_USER_COMMISSION']:
+        if transaction_type in ['BINARY_PAIR', 'BINARY_PAIR_COMMISSION', 'DIRECT_USER_COMMISSION', 'BINARY_INITIAL_BONUS']:
             # Only add positive amounts to total_earned
             if final_amount > 0:
                 wallet.total_earned += final_amount

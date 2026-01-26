@@ -51,6 +51,12 @@ class PlatformSettings(models.Model):
         default=10,
         help_text="Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000)"
     )
+    binary_commission_initial_bonus = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Initial bonus amount credited to user's wallet and total_earnings when binary commission is activated (3 persons). TDS is deducted from this amount, but TDS is NOT deducted from booking balance."
+    )
     binary_tree_default_placement_side = models.CharField(
         max_length=5,
         choices=[('left', 'Left'), ('right', 'Right')],
@@ -62,6 +68,12 @@ class PlatformSettings(models.Model):
     distributor_application_auto_approve = models.BooleanField(
         default=True,
         help_text="If True, distributor applications are automatically approved upon submission. If False, applications require admin/staff approval."
+    )
+    
+    # Payout Settings
+    payout_approval_needed = models.BooleanField(
+        default=True,
+        help_text="If True, payout requests require admin approval before processing. If False, payouts are automatically processed upon creation."
     )
     
     updated_at = models.DateTimeField(auto_now=True)
@@ -100,8 +112,10 @@ class PlatformSettings(models.Model):
                 'binary_commission_tds_percentage': 20,
                 'binary_extra_deduction_percentage': 20,
                 'binary_daily_pair_limit': 10,
+                'binary_commission_initial_bonus': 0,
                 'binary_tree_default_placement_side': 'left',
                 'distributor_application_auto_approve': True,
+                'payout_approval_needed': True,
             }
         )
         return settings
