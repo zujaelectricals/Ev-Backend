@@ -75,6 +75,12 @@ class PlatformSettings(models.Model):
         default=True,
         help_text="If True, payout requests require admin approval before processing. If False, payouts are automatically processed upon creation."
     )
+    payout_tds_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0,
+        help_text="TDS percentage applied on payout withdrawals (default: 0, meaning no payout TDS)"
+    )
     
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(
@@ -116,6 +122,7 @@ class PlatformSettings(models.Model):
                 'binary_tree_default_placement_side': 'left',
                 'distributor_application_auto_approve': True,
                 'payout_approval_needed': True,
+                'payout_tds_percentage': 0,
             }
         )
         return settings

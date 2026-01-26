@@ -61,9 +61,20 @@ class Payout(models.Model):
     def calculate_tds(self):
         """Calculate TDS based on business rules"""
         from decimal import Decimal
+        from core.settings.models import PlatformSettings
         
-        # TDS calculation: 5% with ceiling of ₹10,000
-        tds_percentage = Decimal(str(settings.TDS_PERCENTAGE)) / Decimal('100')
+        # Get payout TDS percentage from Platform Settings
+        platform_settings = PlatformSettings.get_settings()
+        payout_tds_percentage = Decimal(str(platform_settings.payout_tds_percentage))
+        
+        # If payout TDS percentage is 0, no TDS is applied
+        if payout_tds_percentage == 0:
+            self.tds_amount = Decimal('0')
+            self.net_amount = Decimal(str(self.requested_amount))
+            return self.tds_amount, self.net_amount
+        
+        # TDS calculation: percentage from settings with ceiling of ₹10,000
+        tds_percentage = payout_tds_percentage / Decimal('100')
         tds_calculated = Decimal(str(self.requested_amount)) * tds_percentage
         
         # Apply ceiling

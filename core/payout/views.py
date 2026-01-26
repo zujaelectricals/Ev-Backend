@@ -104,6 +104,26 @@ class PayoutViewSet(viewsets.ModelViewSet):
             'total_withdrawn': str(wallet.total_withdrawn)
         }
     
+    def _get_user_bank_details(self, user):
+        """Get bank details from user's KYC document"""
+        bank_details = []
+        
+        # Check if user has KYC with bank details
+        try:
+            kyc = user.kyc
+            if kyc and kyc.bank_name and kyc.account_number:
+                bank_details.append({
+                    'bank_name': kyc.bank_name,
+                    'account_number': kyc.account_number,
+                    'ifsc_code': kyc.ifsc_code or '',
+                    'account_holder_name': kyc.account_holder_name or ''
+                })
+        except Exception:
+            # User doesn't have KYC or KYC doesn't have bank details
+            pass
+        
+        return bank_details
+    
     def _get_withdrawal_history(self, user, filters=None):
         """Get withdrawal history (completed payouts only)"""
         queryset = Payout.objects.filter(
@@ -228,9 +248,13 @@ class PayoutViewSet(viewsets.ModelViewSet):
         withdrawal_queryset = self._get_withdrawal_history(request.user, withdrawal_filters)
         withdrawal_serializer = self.get_serializer(withdrawal_queryset, many=True)
         
+        # Get bank details from user's KYC
+        bank_details = self._get_user_bank_details(request.user)
+        
         # Build comprehensive response
         response_data = {
             'wallet_summary': wallet_summary,
+            'bank_details': bank_details,
             'withdrawal_history': withdrawal_serializer.data,
             'payouts': pagination_data
         }

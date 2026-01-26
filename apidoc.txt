@@ -4056,8 +4056,11 @@ Super User: EVAdmin && EVAdmin@123
       * Wallet balance is deducted only after admin approval
     
     TDS Calculation:
-    - 5% of requested amount
-    - Maximum ₹10,000 ceiling
+    - TDS percentage is read from Platform Settings (payout_tds_percentage field in /api/settings/)
+    - If payout_tds_percentage is 0 (default): No TDS is applied (tds_amount = 0, net_amount = requested_amount)
+    - If payout_tds_percentage is non-zero: TDS = requested_amount × (payout_tds_percentage / 100)
+    - Maximum ₹10,000 ceiling applies when TDS is calculated
+    - Example: If payout_tds_percentage = 5% and requested_amount = ₹10,000, then tds_amount = ₹500, net_amount = ₹9,500
 
 
 59. LIST PAYOUTS
@@ -4082,6 +4085,14 @@ Super User: EVAdmin && EVAdmin@123
         "total_earned": "150000.00",
         "total_withdrawn": "100000.00"
       },
+      "bank_details": [
+        {
+          "bank_name": "State Bank of India",
+          "account_number": "1234567890",
+          "ifsc_code": "SBIN0001234",
+          "account_holder_name": "John Doe"
+        }
+      ],
       "withdrawal_history": [
         {
           "id": 1,
@@ -4125,7 +4136,15 @@ Super User: EVAdmin && EVAdmin@123
             "rejection_reason": "",
             "notes": "",
             "user_email": "user@example.com",
-            "wallet_balance": "50000.00"
+            "wallet_balance": "50000.00",
+            "bank_details": [
+              {
+                "bank_name": "State Bank of India",
+                "account_number": "1234567890",
+                "ifsc_code": "SBIN0001234",
+                "account_holder_name": "John Doe"
+              }
+            ]
           }
         ]
       }
@@ -4140,8 +4159,9 @@ Super User: EVAdmin && EVAdmin@123
     
     Notes:
     - wallet_summary: Always shows current wallet state (not filtered by date)
+    - bank_details: Array of bank account details fetched from user's KYC document. If user has no KYC or KYC doesn't have bank details, returns empty array. Currently supports one bank account per user (from KYC), but returned as array for future extensibility.
     - withdrawal_history: Shows only completed payouts (limited to last 50 if no date filter applied)
-    - payouts: Paginated list of all payout requests matching the filters
+    - payouts: Paginated list of all payout requests matching the filters. Each payout object also includes bank_details field with user's bank accounts from KYC.
     - Date range and preset period are mutually exclusive (preset period takes precedence)
 
 
@@ -4926,6 +4946,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_tree_default_placement_side": "left",  // Default placement side for binary tree: "left" or "right" (default: "left")
      "distributor_application_auto_approve": true,  // If true, distributor applications are auto-approved; if false, require admin/staff approval (default: true)
      "payout_approval_needed": true,  // If true, payout requests require admin approval; if false, payouts are automatically processed (default: true)
+     "payout_tds_percentage": "0.00",  // TDS percentage applied on payout withdrawals (default: 0, meaning no payout TDS, range: 0-100)
      "updated_at": "2026-01-14T09:00:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -4962,7 +4983,8 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_initial_bonus": 0,  // Initial bonus amount (in rupees) credited to user's wallet and total_earnings when binary commission is activated (3 persons). TDS is deducted from this amount, but TDS is NOT deducted from booking balance (default: 0)
      "binary_tree_default_placement_side": "left",  // Default placement side: "left" or "right" (default: "left")
      "distributor_application_auto_approve": true,  // If true, auto-approve distributor applications; if false, require admin/staff approval (default: true)
-     "payout_approval_needed": true  // If true, payout requests require admin approval; if false, payouts are automatically processed upon creation (default: true)
+     "payout_approval_needed": true,  // If true, payout requests require admin approval; if false, payouts are automatically processed upon creation (default: true)
+     "payout_tds_percentage": 0  // TDS percentage applied on payout withdrawals (default: 0, meaning no payout TDS, range: 0-100)
    }
    
    Response (200 OK):
@@ -4980,6 +5002,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_tree_default_placement_side": "left",
      "distributor_application_auto_approve": true,
      "payout_approval_needed": true,
+     "payout_tds_percentage": "0.00",
      "updated_at": "2026-01-14T09:15:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -4996,7 +5019,8 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_tds_percentage": ["binary_commission_tds_percentage must be between 0 and 100"],
      "binary_extra_deduction_percentage": ["binary_extra_deduction_percentage must be between 0 and 100"],
      "binary_daily_pair_limit": ["binary_daily_pair_limit must be at least 1"],
-     "binary_commission_initial_bonus": ["binary_commission_initial_bonus must be non-negative"]
+     "binary_commission_initial_bonus": ["binary_commission_initial_bonus must be non-negative"],
+     "payout_tds_percentage": ["payout_tds_percentage must be between 0 and 100"]
    }
    
    Error Response (403):
@@ -5029,6 +5053,11 @@ Super User: EVAdmin && EVAdmin@123
      * If true: Payout requests require admin approval via POST /api/payout/{id}/process/ before processing
      * If false: Payout requests are automatically processed upon creation (wallet deducted, status set to 'processing')
      * See CREATE PAYOUT REQUEST endpoint for detailed behavior
+   - payout_tds_percentage: Controls TDS applied on payout withdrawals (default: 0, range: 0-100)
+     * If 0: No TDS is applied on payouts (tds_amount = 0, net_amount = requested_amount)
+     * If non-zero: TDS is calculated as requested_amount × (payout_tds_percentage / 100) with maximum ₹10,000 ceiling
+     * This setting is separate from binary commission TDS (binary_commission_tds_percentage)
+     * See CREATE PAYOUT REQUEST endpoint for detailed TDS calculation behavior
    - updated_by is automatically set to the current user making the update
    - Settings are stored as a singleton (only one instance exists)
    - Timeout is stored in minutes (converted from hours for backward compatibility)
@@ -5148,7 +5177,7 @@ Standard Error Format:
    - LONG leg (more remaining members) has ALL remaining members CARRIED FORWARD to next day
    - Next day: New members on ignored side match with carried-forward members from long leg
    - Daily limit reset: Resets at midnight (00:00 server time)
-7. Payout TDS: 5% with ₹10,000 ceiling (separate from binary commission TDS)
+7. Payout TDS: Configurable via payout_tds_percentage in Platform Settings (default: 0, meaning no payout TDS). If non-zero, TDS is calculated as requested_amount × (payout_tds_percentage / 100) with maximum ₹10,000 ceiling. This is separate from binary commission TDS (binary_commission_tds_percentage)
 8. EMI Auto-fill: Optional feature in payout requests
 9. Payment Status: Payments default to 'pending' and require admin/staff approval or payment gateway confirmation
 10. Stock Reservation: Bookings automatically reserve vehicle stock; released if payment not confirmed within timeout
