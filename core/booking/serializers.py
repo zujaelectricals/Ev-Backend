@@ -43,6 +43,8 @@ class BookingSerializer(serializers.ModelSerializer):
     reservation_status = serializers.CharField(source='stock_reservation.status', read_only=True)
     reservation_expires_at = serializers.DateTimeField(source='stock_reservation.expires_at', read_only=True)
     referred_by = ReferredUserSerializer(read_only=True, allow_null=True)
+     # Aggregated payment status for this booking (derived from related Payment records)
+    payment_status = serializers.SerializerMethodField()
     
     class Meta:
         model = Booking
@@ -195,6 +197,36 @@ class BookingSerializer(serializers.ModelSerializer):
             return mobile
         
         return None
+
+    def get_payment_status(self, obj):
+        """
+        Return a high-level payment status for the booking based on its Payment records.
+        Priority:
+        - If any payment is 'completed' -> 'completed'
+        - Else if any payment is 'pending' -> 'pending'
+        - Else if any payment is 'failed' -> 'failed'
+        - Else if any payment is 'refunded' -> 'refunded'
+        - If there are no payments -> 'no_payment'
+        """
+        payments_qs = getattr(obj, 'payments', None)
+        if payments_qs is None:
+            return 'no_payment'
+
+        # Evaluate statuses once to avoid multiple queries
+        statuses = list(payments_qs.values_list('status', flat=True))
+        if not statuses:
+            return 'no_payment'
+
+        if 'completed' in statuses:
+            return 'completed'
+        if 'pending' in statuses:
+            return 'pending'
+        if 'failed' in statuses:
+            return 'failed'
+        if 'refunded' in statuses:
+            return 'refunded'
+
+        return 'no_payment'
 
 
 class PaymentSerializer(serializers.ModelSerializer):

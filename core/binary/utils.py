@@ -94,6 +94,8 @@ def get_total_descendants_count(node):
 def has_successful_payment(user):
     """
     Check if user has at least one successful payment (completed payment)
+    Note: This function is kept for backward compatibility and descendants counting.
+    For commission eligibility, use has_activation_payment() instead.
     
     Args:
         user: User to check
@@ -106,6 +108,40 @@ def has_successful_payment(user):
         user=user,
         status='completed'
     ).exists()
+
+
+def has_activation_payment(user, booking=None):
+    """
+    Check if user has at least one successful payment that meets activation_amount threshold.
+    If booking is provided, checks if that specific booking has payment >= activation_amount.
+    Otherwise, checks if user has any booking with payment >= activation_amount.
+    
+    Args:
+        user: User to check
+        booking: Optional Booking instance to check specific booking
+    
+    Returns:
+        bool: True if user has payment >= activation_amount, False otherwise
+    """
+    from core.booking.models import Payment, Booking
+    from core.settings.models import PlatformSettings
+    
+    platform_settings = PlatformSettings.get_settings()
+    activation_amount = platform_settings.activation_amount
+    
+    # If activation_amount is 0, any payment qualifies
+    if activation_amount == 0:
+        return has_successful_payment(user)
+    
+    if booking:
+        # Check specific booking's total_paid
+        return booking.total_paid >= activation_amount
+    else:
+        # Check if user has any booking with total_paid >= activation_amount
+        return Booking.objects.filter(
+            user=user,
+            total_paid__gte=activation_amount
+        ).exists()
 
 
 def process_direct_user_commission(referrer, new_user):
@@ -127,7 +163,8 @@ def process_direct_user_commission(referrer, new_user):
         bool: True if at least one commission was paid, False otherwise
     """
     # Check if user has successful payment - commission only paid if payment is completed
-    if not has_successful_payment(new_user):
+    # AND payment meets activation_amount threshold
+    if not has_activation_payment(new_user):
         return False
     
     try:
@@ -990,6 +1027,22 @@ def check_and_create_pair(user):
     if left_node is None or right_node is None:
         return None
     
+    # Check activation_amount eligibility for both users
+    # Both users must have payment >= activation_amount for commission to be paid
+    left_user_eligible = has_activation_payment(left_node.user)
+    right_user_eligible = has_activation_payment(right_node.user)
+    
+    if not (left_user_eligible and right_user_eligible):
+        # Users don't meet activation_amount threshold, skip pair creation
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"Pair creation skipped for user {user.username}: "
+            f"Left user {left_node.user.username} eligible: {left_user_eligible}, "
+            f"Right user {right_node.user.username} eligible: {right_user_eligible}"
+        )
+        return None
+    
     # Create binary pair
     with transaction.atomic():
         pair = BinaryPair.objects.create(
@@ -1093,6 +1146,34 @@ def check_and_create_pair(user):
     return None
 
 
+def _format_user_display_info(user):
+    """
+    Format user information for display in error messages.
+    Returns just the user's name.
+    
+    Args:
+        user: User instance
+    
+    Returns:
+        str: User's name or fallback identifier
+    """
+    if not user:
+        return "Unknown user"
+    
+    # Try to get full name first
+    full_name = user.get_full_name()
+    if full_name and full_name.strip():
+        return full_name
+    elif user.first_name:
+        return user.first_name
+    elif user.username:
+        return user.username
+    elif user.email:
+        return user.email
+    else:
+        return str(user)
+
+
 def place_user_manually(user, parent_node, side, allow_replacement=False):
     """
     Manually place a user in a specific position in the binary tree
@@ -1117,7 +1198,11 @@ def place_user_manually(user, parent_node, side, allow_replacement=False):
     
     if existing_node:
         if not allow_replacement:
-            raise ValueError(f"Position {side} under parent node {parent_node.id} is already occupied")
+            parent_info = _format_user_display_info(parent_node.user)
+            side_display = side.capitalize()
+            raise ValueError(
+                f"The {side_display} position under {parent_info} is already occupied. Please choose a different position."
+            )
         # If allowing replacement, we need to handle the existing node
         # For now, we'll raise an error - replacement logic can be added later
         raise ValueError("Replacement of existing nodes is not yet supported")
@@ -1165,7 +1250,11 @@ def move_binary_node(node, new_parent, new_side):
     # Check if target position is available
     existing_node = BinaryNode.objects.filter(parent=new_parent, side=new_side).first()
     if existing_node and existing_node != node:
-        raise ValueError(f"Position {new_side} under parent node {new_parent.id} is already occupied")
+        parent_info = _format_user_display_info(new_parent.user)
+        side_display = new_side.capitalize()
+        raise ValueError(
+            f"The {side_display} position under {parent_info} is already occupied. Please choose a different position."
+        )
     
     # Store old parent for count updates
     old_parent = node.parent

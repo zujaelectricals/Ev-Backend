@@ -120,16 +120,16 @@ class KYC(models.Model):
     country = models.CharField(max_length=100, default='India')
     
     # Documents
-    pan_document = models.ImageField(upload_to='kyc/pan/', null=True, blank=True)
-    aadhaar_front = models.ImageField(upload_to='kyc/aadhaar/', null=True, blank=True)
-    aadhaar_back = models.ImageField(upload_to='kyc/aadhaar/', null=True, blank=True)
+    pan_document = models.FileField(upload_to='kyc/pan/', null=True, blank=True)
+    aadhaar_front = models.FileField(upload_to='kyc/aadhaar/', null=True, blank=True)
+    aadhaar_back = models.FileField(upload_to='kyc/aadhaar/', null=True, blank=True)
     
     # Bank Details
     bank_name = models.CharField(max_length=200, null=True, blank=True)
     account_number = models.CharField(max_length=50, null=True, blank=True)
     ifsc_code = models.CharField(max_length=11, null=True, blank=True)
     account_holder_name = models.CharField(max_length=200, null=True, blank=True)
-    bank_passbook = models.ImageField(upload_to='kyc/bank_passbook/', null=True, blank=True)
+    bank_passbook = models.FileField(upload_to='kyc/bank_passbook/', null=True, blank=True)
     
     submitted_at = models.DateTimeField(auto_now_add=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)

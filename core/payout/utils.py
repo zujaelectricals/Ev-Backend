@@ -1,5 +1,6 @@
 from decimal import Decimal
 from django.db import transaction
+from django.utils import timezone
 from django.conf import settings
 from .models import Payout
 from core.wallet.utils import deduct_wallet_balance
@@ -52,8 +53,33 @@ def auto_fill_emi_from_payout(user, payout_amount):
 
 def process_payout(payout):
     """
-    Process payout request
+    Process payout request - deducts from wallet and sets status to 'processing'
+    
+    This function:
+    1. Calculates TDS and net amount
+    2. Handles EMI auto-fill if enabled
+    3. Deducts amount from user's wallet
+    4. Sets status to 'processing' and records processed_at timestamp
+    
+    NOTE: Payment gateway integration will be added here in the future.
+    After deducting from wallet, this function should:
+    - Call payment gateway API to initiate transfer
+    - Handle gateway response (success/failure)
+    - If gateway supports webhooks, the webhook will call complete_payout()
+    
+    Args:
+        payout: Payout instance with status='pending'
+    
+    Returns:
+        payout: Updated Payout instance with status='processing'
+    
+    Raises:
+        ValueError: If payout status is not 'pending'
+        Exception: If wallet deduction fails
     """
+    if payout.status != 'pending':
+        raise ValueError(f"Cannot process payout with status '{payout.status}'. Expected 'pending'.")
+    
     with transaction.atomic():
         # Calculate TDS
         payout.calculate_tds()
@@ -74,9 +100,55 @@ def process_payout(payout):
             reference_type='payout'
         )
         
-        # Update payout status
+        # Update payout status and timestamp
         payout.status = 'processing'
+        payout.processed_at = timezone.now()
         payout.save()
         
+        # TODO: Future payment gateway integration
+        # After this point, integrate with payment gateway:
+        # 1. Call payment gateway API with payout details
+        # 2. Store gateway transaction reference
+        # 3. Handle gateway response:
+        #    - If synchronous success: call complete_payout() automatically
+        #    - If asynchronous: wait for webhook to call complete_payout()
+        #    - If failure: set status to 'rejected' and refund wallet
+        
         return payout
+
+
+def complete_payout(payout, transaction_id=None, notes=None):
+    """
+    Mark payout as completed - called after payment gateway confirms successful transfer
+    
+    This function should be called:
+    - Manually by admin after verifying bank transfer
+    - Automatically by payment gateway webhook when transfer succeeds
+    - After synchronous payment gateway API returns success
+    
+    Args:
+        payout: Payout instance with status='processing'
+        transaction_id: Transaction ID from payment gateway (optional)
+        notes: Additional notes (optional)
+    
+    Returns:
+        payout: Updated Payout instance with status='completed'
+    
+    Raises:
+        ValueError: If payout status is not 'processing'
+    """
+    if payout.status != 'processing':
+        raise ValueError(f"Cannot complete payout with status '{payout.status}'. Expected 'processing'.")
+    
+    payout.status = 'completed'
+    payout.completed_at = timezone.now()
+    
+    if transaction_id:
+        payout.transaction_id = transaction_id
+    
+    if notes:
+        payout.notes = notes
+    
+    payout.save()
+    return payout
 

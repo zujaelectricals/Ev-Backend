@@ -168,6 +168,56 @@ class KYCSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ('user', 'submitted_at', 'reviewed_at', 'reviewed_by')
     
+    def validate_file(self, value, field_name):
+        """Validate that file is either an image or PDF"""
+        if value is None:
+            return value
+        
+        max_size = 10 * 1024 * 1024  # 10MB
+        content_type = getattr(value, 'content_type', '')
+        
+        # Check file size
+        if value.size > max_size:
+            raise serializers.ValidationError(f'{field_name} file size must be <= 10MB')
+        
+        # Check file type - allow images and PDFs
+        valid_image_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+        valid_pdf_type = 'application/pdf'
+        
+        if content_type:
+            if content_type not in valid_image_types and content_type != valid_pdf_type:
+                raise serializers.ValidationError(
+                    f'{field_name} must be an image (JPEG, PNG, GIF, WEBP) or PDF file.'
+                )
+        else:
+            # Fallback: check file extension if content_type is not available
+            file_name = getattr(value, 'name', '')
+            if file_name:
+                ext = file_name.lower().split('.')[-1]
+                valid_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf']
+                if ext not in valid_extensions:
+                    raise serializers.ValidationError(
+                        f'{field_name} must be an image (JPEG, PNG, GIF, WEBP) or PDF file.'
+                    )
+        
+        return value
+    
+    def validate_pan_document(self, value):
+        """Validate PAN document file"""
+        return self.validate_file(value, 'pan_document')
+    
+    def validate_aadhaar_front(self, value):
+        """Validate Aadhaar front document file"""
+        return self.validate_file(value, 'aadhaar_front')
+    
+    def validate_aadhaar_back(self, value):
+        """Validate Aadhaar back document file"""
+        return self.validate_file(value, 'aadhaar_back')
+    
+    def validate_bank_passbook(self, value):
+        """Validate bank passbook document file"""
+        return self.validate_file(value, 'bank_passbook')
+    
     def update(self, instance, validated_data):
         """Update KYC and reset status to pending when resubmitting after rejection"""
         # If KYC was previously rejected and user is resubmitting, reset status to pending

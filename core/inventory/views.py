@@ -512,6 +512,21 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
         # Sort low stock items by available_quantity (lowest first)
         low_stock_items.sort(key=lambda x: x['available_quantity'])
         
+        # Group stock by vehicle name and calculate totals per model
+        model_stock_trends = queryset.values('vehicle__name').annotate(
+            model_total=Sum('total_quantity')
+        ).order_by('vehicle__name')
+        
+        # Build stock_trend array with one entry per model
+        stock_trend = [
+            {
+                'label': item['vehicle__name'],
+                'total_stock': item['model_total']
+            }
+            for item in model_stock_trends
+            if item['vehicle__name']  # Filter out None values
+        ]
+        
         # Build summary
         summary = {
             'total_stock': total_stock,
@@ -520,12 +535,7 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
             'low_stock_alerts_count': low_stock_count,
             'out_of_stock_count': out_of_stock_count,
             'low_stock_items': low_stock_items,
-            'stock_trend': [
-                {
-                    'label': 'Current',
-                    'total_stock': total_stock
-                }
-            ]
+            'stock_trend': stock_trend
         }
         
         # Get paginated results using standard DRF pagination
@@ -593,11 +603,12 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only admin users can delete stock records.")
         instance.delete()
     
-    @action(detail=False, methods=['get'], url_path='by-vehicle/(?P<vehicle_id>[^/.]+)')
-    def get_by_vehicle(self, request, vehicle_id=None):
+    @action(detail=False, methods=['get', 'post'], url_path='by-vehicle/(?P<vehicle_id>[^/.]+)')
+    def by_vehicle(self, request, vehicle_id=None):
         """
-        Get stock for a specific vehicle by vehicle ID
-        GET /api/inventory/stock/by-vehicle/{vehicle_id}/
+        Get or update stock for a specific vehicle by vehicle ID
+        GET /api/inventory/stock/by-vehicle/{vehicle_id}/ - Get stock (all authenticated users)
+        POST /api/inventory/stock/by-vehicle/{vehicle_id}/ - Update stock (admin only)
         """
         try:
             vehicle = Vehicle.objects.prefetch_related('images').get(id=vehicle_id)
@@ -610,33 +621,17 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
         # Get or create stock
         stock = get_or_create_vehicle_stock(vehicle)
         
-        # Serialize and return
+        # Handle POST request (update)
+        if request.method == 'POST':
+            if not (request.user.is_superuser or request.user.role == 'admin'):
+                raise PermissionDenied("Only admin users can update stock.")
+            
+            # Update stock
+            serializer = self.get_serializer(stock, data=request.data, partial=True, context={'request': request})
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        
+        # Handle GET request (retrieve)
         serializer = self.get_serializer(stock, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
-    
-    @action(detail=False, methods=['post'], url_path='by-vehicle/(?P<vehicle_id>[^/.]+)')
-    def update_by_vehicle(self, request, vehicle_id=None):
-        """
-        Update or create stock for a specific vehicle
-        POST /api/inventory/stock/by-vehicle/{vehicle_id}/
-        """
-        if not (request.user.is_superuser or request.user.role == 'admin'):
-            raise PermissionDenied("Only admin users can update stock.")
-        
-        try:
-            vehicle = Vehicle.objects.prefetch_related('images').get(id=vehicle_id)
-        except Vehicle.DoesNotExist:
-            return Response(
-                {'error': 'Vehicle not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Get or create stock
-        stock = get_or_create_vehicle_stock(vehicle)
-        
-        # Update stock
-        serializer = self.get_serializer(stock, data=request.data, partial=True, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        
         return Response(serializer.data, status=status.HTTP_200_OK)

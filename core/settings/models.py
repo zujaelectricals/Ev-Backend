@@ -63,6 +63,12 @@ class PlatformSettings(models.Model):
         default='left',
         help_text="Default placement side for binary tree (left or right). Controls which side chain is followed after first 2 users."
     )
+    activation_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=5000,
+        help_text="Minimum payment amount per booking required for seniors to earn commission. If payment is less than this amount, no commission is credited, but user is still counted in descendants calculation. On cancellation, this amount is withheld for future point redemption. (default: ₹5000)"
+    )
     
     # Distributor Application Settings
     distributor_application_auto_approve = models.BooleanField(
@@ -120,6 +126,7 @@ class PlatformSettings(models.Model):
                 'binary_daily_pair_limit': 10,
                 'binary_commission_initial_bonus': 0,
                 'binary_tree_default_placement_side': 'left',
+                'activation_amount': 5000,
                 'distributor_application_auto_approve': True,
                 'payout_approval_needed': True,
                 'payout_tds_percentage': 0,

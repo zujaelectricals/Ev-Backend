@@ -176,10 +176,19 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        amount = Decimal(str(request.data.get('amount', 0)))
+        amount = request.data.get('amount', None)
         payment_method = request.data.get('payment_method', 'cash')
         transaction_id = request.data.get('transaction_id', '')
         notes = request.data.get('notes', '')
+        
+        # Try to use an existing pending payment for this booking before creating a new one
+        pending_payment = Payment.objects.filter(booking=booking, status='pending').order_by('-payment_date').first()
+
+        # If no amount provided, default to pending payment's amount
+        if amount is None and pending_payment:
+            amount = pending_payment.amount
+        else:
+            amount = Decimal(str(amount or 0))
         
         if amount <= 0:
             return Response(
@@ -195,7 +204,15 @@ class BookingViewSet(viewsets.ModelViewSet):
         
         # Check if transaction_id already exists (if provided)
         if transaction_id:
-            existing_payment = Payment.objects.filter(transaction_id=transaction_id).first()
+            if pending_payment:
+                existing_payment = Payment.objects.filter(
+                    transaction_id=transaction_id
+                ).exclude(pk=pending_payment.pk).first()
+            else:
+                existing_payment = Payment.objects.filter(
+                    transaction_id=transaction_id
+                ).first()
+
             if existing_payment:
                 return Response(
                     {
@@ -206,17 +223,27 @@ class BookingViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-        # Create payment record with status='completed'
-        payment = Payment.objects.create(
-            booking=booking,
-            user=booking.user,
-            amount=amount,
-            payment_method=payment_method,
-            transaction_id=transaction_id or None,
-            status='completed',
-            notes=notes,
-            completed_at=timezone.now()
-        )
+        # Approve existing pending payment if available, else create a new completed payment
+        if pending_payment:
+            payment = pending_payment
+            payment.amount = amount  # allow admin to correct/confirm amount
+            payment.payment_method = payment_method
+            payment.transaction_id = transaction_id or None
+            payment.status = 'completed'
+            payment.notes = notes
+            payment.completed_at = timezone.now()
+            payment.save(update_fields=['amount', 'payment_method', 'transaction_id', 'status', 'notes', 'completed_at'])
+        else:
+            payment = Payment.objects.create(
+                booking=booking,
+                user=booking.user,
+                amount=amount,
+                payment_method=payment_method,
+                transaction_id=transaction_id or None,
+                status='completed',
+                notes=notes,
+                completed_at=timezone.now()
+            )
         
         # Update booking (only when admin/staff accepts payment)
         booking.make_payment(amount)
@@ -230,9 +257,8 @@ class BookingViewSet(viewsets.ModelViewSet):
         except:
             pass  # No reservation exists, skip
         
-        # Trigger Celery task for payment processing (direct user commission, etc.)
-        from core.booking.tasks import payment_completed
-        payment_completed.delay(booking.id, float(amount))
+        # Note: booking.make_payment already triggers the payment_completed Celery task,
+        # so we don't need to trigger it again here to avoid duplicate processing.
         
         serializer = PaymentSerializer(payment)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -293,7 +319,19 @@ class BookingViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
-        """Cancel a booking and release reservation"""
+        """Cancel a booking and release reservation
+        
+        Refund Logic:
+        - Only (total_paid - activation_amount) is refunded
+        - activation_amount is withheld and stored in ActivationPoints for future redemption (after 1 year)
+        - If total_paid <= activation_amount, no refund is processed, but activation_amount is still stored
+        """
+        from decimal import Decimal
+        from datetime import timedelta
+        from core.settings.models import PlatformSettings
+        from core.wallet.models import ActivationPoints
+        from core.wallet.utils import add_wallet_balance
+        
         booking = self.get_object()
         
         # Check permission - user can cancel their own booking, admin/staff can cancel any
@@ -319,12 +357,57 @@ class BookingViewSet(viewsets.ModelViewSet):
         except:
             pass  # No reservation exists, skip
         
+        # Get activation_amount from settings
+        platform_settings = PlatformSettings.get_settings()
+        activation_amount = platform_settings.activation_amount
+        
+        # Calculate refund amount
+        total_paid = Decimal(str(booking.total_paid))
+        activation_amount_decimal = Decimal(str(activation_amount))
+        refund_amount = total_paid - activation_amount_decimal
+        
         # Update booking status
         booking.status = 'cancelled'
         booking.save(update_fields=['status'])
         
+        # Store activation_amount in ActivationPoints for future redemption
+        if total_paid > 0 and activation_amount_decimal > 0:
+            redeemable_after = timezone.now() + timedelta(days=365)
+            ActivationPoints.objects.create(
+                user=booking.user,
+                booking=booking,
+                amount=min(activation_amount_decimal, total_paid),  # Don't store more than what was paid
+                status='pending',
+                redeemable_after=redeemable_after
+            )
+        
+        # Process refund if refund_amount > 0
+        if refund_amount > 0:
+            try:
+                # Refund to user's wallet
+                add_wallet_balance(
+                    user=booking.user,
+                    amount=float(refund_amount),
+                    transaction_type='REFUND',
+                    description=f"Refund for cancelled booking {booking.booking_number} (₹{total_paid} paid - ₹{min(activation_amount_decimal, total_paid)} activation_amount = ₹{refund_amount} refunded)",
+                    reference_id=booking.id,
+                    reference_type='booking'
+                )
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    f"Error processing refund for booking {booking.id}: {e}",
+                    exc_info=True
+                )
+                # Continue even if refund fails - booking is already cancelled
+        
         serializer = BookingSerializer(booking)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        response_data = serializer.data
+        response_data['refund_amount'] = float(refund_amount) if refund_amount > 0 else 0
+        response_data['activation_amount_withheld'] = float(min(activation_amount_decimal, total_paid)) if total_paid > 0 and activation_amount_decimal > 0 else 0
+        
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 class PaymentViewSet(viewsets.ModelViewSet):

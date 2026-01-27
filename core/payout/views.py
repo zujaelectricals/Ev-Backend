@@ -8,7 +8,7 @@ from django.utils import timezone
 from datetime import timedelta, datetime
 from .models import Payout, PayoutTransaction
 from .serializers import PayoutSerializer, PayoutTransactionSerializer
-from .utils import process_payout, auto_fill_emi_from_payout
+from .utils import process_payout, complete_payout, auto_fill_emi_from_payout
 from core.wallet.utils import get_or_create_wallet
 from core.settings.models import PlatformSettings
 
@@ -306,7 +306,23 @@ class PayoutViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def process(self, request, pk=None):
-        """Process payout (admin only)"""
+        """
+        Process payout (admin only)
+        
+        This endpoint:
+        1. Validates payout is in 'pending' status
+        2. Deducts amount from user's wallet
+        3. Handles EMI auto-fill if enabled
+        4. Sets status to 'processing' and records processed_at timestamp
+        
+        NOTE: Payment gateway integration will be added here in the future.
+        After wallet deduction, the payment gateway API will be called to initiate transfer.
+        
+        Request Body (optional):
+        {
+            "notes": "Additional notes for processing"
+        }
+        """
         if not (request.user.is_superuser or request.user.role == 'admin'):
             return Response(
                 {'error': 'Permission denied'}, 
@@ -317,23 +333,51 @@ class PayoutViewSet(viewsets.ModelViewSet):
         
         if payout.status != 'pending':
             return Response(
-                {'error': 'Payout already processed'}, 
+                {'error': f'Payout cannot be processed. Current status: {payout.status}. Expected: pending'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
             process_payout(payout)
+            
+            # Update notes if provided
+            notes = request.data.get('notes', '')
+            if notes:
+                payout.notes = notes
+                payout.save(update_fields=['notes'])
+            
             serializer = self.get_serializer(payout)
-            return Response(serializer.data)
-        except Exception as e:
+            return Response({
+                'message': 'Payout processed successfully. Amount deducted from wallet.',
+                'payout': serializer.data
+            }, status=status.HTTP_200_OK)
+        except ValueError as e:
             return Response(
                 {'error': str(e)}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to process payout: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def complete(self, request, pk=None):
-        """Mark payout as completed (admin only)"""
+        """
+        Mark payout as completed (admin only)
+        
+        This endpoint should be called:
+        - Manually by admin after verifying bank transfer was successful
+        - Automatically by payment gateway webhook when transfer succeeds (future)
+        - After synchronous payment gateway API returns success (future)
+        
+        Request Body:
+        {
+            "transaction_id": "TXN123456789",  // Optional: Transaction ID from payment gateway
+            "notes": "Payment confirmed via bank statement"  // Optional: Additional notes
+        }
+        """
         if not (request.user.is_superuser or request.user.role == 'admin'):
             return Response(
                 {'error': 'Permission denied'}, 
@@ -341,13 +385,74 @@ class PayoutViewSet(viewsets.ModelViewSet):
             )
         
         payout = self.get_object()
-        payout.status = 'completed'
-        payout.completed_at = timezone.now()
-        payout.transaction_id = request.data.get('transaction_id', '')
-        payout.save()
         
-        serializer = self.get_serializer(payout)
-        return Response(serializer.data)
+        if payout.status != 'processing':
+            return Response(
+                {'error': f'Payout cannot be completed. Current status: {payout.status}. Expected: processing'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            transaction_id = request.data.get('transaction_id', '')
+            notes = request.data.get('notes', '')
+            
+            complete_payout(
+                payout=payout,
+                transaction_id=transaction_id if transaction_id else None,
+                notes=notes if notes else None
+            )
+            
+            serializer = self.get_serializer(payout)
+            return Response({
+                'message': 'Payout marked as completed successfully.',
+                'payout': serializer.data
+            }, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to complete payout: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+    # TODO: Future Payment Gateway Webhook Endpoint
+    # @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    # def webhook(self, request):
+    #     """
+    #     Payment Gateway Webhook Handler (Future Implementation)
+    #     
+    #     This endpoint will be called by the payment gateway when:
+    #     - Payout transfer succeeds
+    #     - Payout transfer fails
+    #     - Payout transfer status changes
+    #     
+    #     Expected Request Body (example):
+    #     {
+    #         "event": "payout.success" | "payout.failed" | "payout.pending",
+    #         "payout_id": "internal_payout_id_or_reference",
+    #         "gateway_transaction_id": "TXN123456789",
+    #         "amount": "9500.00",
+    #         "status": "success" | "failed" | "pending",
+    #         "timestamp": "2026-01-06T14:00:00Z",
+    #         "signature": "webhook_signature_for_verification"
+    #     }
+    #     
+    #     Implementation Steps:
+    #     1. Verify webhook signature for security
+    #     2. Find payout by payout_id or gateway_transaction_id
+    #     3. If event == "payout.success":
+    #        - Call complete_payout(payout, transaction_id=gateway_transaction_id)
+    #     4. If event == "payout.failed":
+    #        - Set payout.status = 'rejected'
+    #        - Refund amount to user's wallet
+    #        - Store failure reason
+    #     5. Return 200 OK to acknowledge webhook receipt
+    #     """
+    #     pass
 
 
 class PayoutTransactionViewSet(viewsets.ReadOnlyModelViewSet):

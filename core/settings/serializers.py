@@ -20,6 +20,7 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
             'binary_daily_pair_limit',
             'binary_commission_initial_bonus',
             'binary_tree_default_placement_side',
+            'activation_amount',
             'distributor_application_auto_approve',
             'payout_approval_needed',
             'payout_tds_percentage',
@@ -92,5 +93,11 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
         """Validate that payout TDS percentage is between 0 and 100"""
         if value < 0 or value > 100:
             raise serializers.ValidationError("payout_tds_percentage must be between 0 and 100")
+        return value
+    
+    def validate_activation_amount(self, value):
+        """Validate that activation amount is non-negative"""
+        if value < 0:
+            raise serializers.ValidationError("activation_amount must be non-negative")
         return value
 
