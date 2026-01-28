@@ -988,7 +988,8 @@ def check_and_create_pair(user):
     pair_number_after_activation = pairs_after_activation + 1
     
     # Check if commission should be blocked for non-Active Buyer distributors
-    # Non-Active Buyer distributors can only earn commission for first 5 pairs
+    # Non-Active Buyer distributors can only earn commission for first N pairs (configurable)
+    max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
     commission_blocked = False
     blocked_reason = ''
     
@@ -996,10 +997,10 @@ def check_and_create_pair(user):
         # Count binary pairs that were actually paid (not blocked)
         paid_pairs_count = get_binary_pairs_after_activation_count(user)
         
-        # If 6th+ pair and not Active Buyer, block commission
-        if paid_pairs_count >= 5:
+        # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, block commission
+        if paid_pairs_count >= max_earnings_before_active_buyer:
             commission_blocked = True
-            blocked_reason = f"Not Active Buyer, 6th+ pair (already earned {paid_pairs_count} pairs). Commission will resume when user becomes Active Buyer."
+            blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (already earned {paid_pairs_count} pairs). Commission will resume when user becomes Active Buyer."
     
     # Calculate TDS (always applied on all pairs, but only if commission is not blocked)
     tds_amount = Decimal('0')

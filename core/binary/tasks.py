@@ -5,6 +5,7 @@ from django.db import transaction
 from .models import BinaryPair, BinaryEarning
 from core.wallet.models import WalletTransaction
 from core.wallet.utils import add_wallet_balance, get_or_create_wallet
+from core.settings.models import PlatformSettings
 import logging
 from decimal import Decimal
 
@@ -68,16 +69,19 @@ def pair_matched(self, pair_id):
         
         # IMPORTANT: Check if commission should be blocked based on pair_number_after_activation
         # NOT based on current paid count (which has off-by-one bug)
-        # Business rule: Non-Active Buyer can only earn for first 5 pairs
-        if not user.is_active_buyer and pair_number and pair_number > 5:
+        # Business rule: Non-Active Buyer can only earn for first N pairs (configurable)
+        platform_settings = PlatformSettings.get_settings()
+        max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
+        
+        if not user.is_active_buyer and pair_number and pair_number > max_earnings_before_active_buyer:
             logger.warning(
                 f"Pair {pair_id} (Pair #{pair_number}) blocked for non-Active Buyer user {user.email}. "
-                f"This is the 6th+ pair. Commission will resume when user becomes Active Buyer."
+                f"This is the {max_earnings_before_active_buyer+1}th+ pair. Commission will resume when user becomes Active Buyer."
             )
             # Mark as blocked if not already
             if not pair.commission_blocked:
                 pair.commission_blocked = True
-                pair.blocked_reason = f"Not Active Buyer, 6th+ pair (Pair #{pair_number}). Commission will resume when user becomes Active Buyer."
+                pair.blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (Pair #{pair_number}). Commission will resume when user becomes Active Buyer."
                 pair.save(update_fields=['commission_blocked', 'blocked_reason'])
             # Update status to processed (for tracking)
             pair.status = 'processed'
@@ -161,7 +165,10 @@ def pair_matched(self, pair_id):
                     pair_number = pair.pair_number_after_activation
                     
                     # Check if should be blocked based on pair_number
-                    if not user.is_active_buyer and pair_number and pair_number > 5:
+                    platform_settings = PlatformSettings.get_settings()
+                    max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
+                    
+                    if not user.is_active_buyer and pair_number and pair_number > max_earnings_before_active_buyer:
                         logger.warning(
                             f"Recovery: Pair {pair_id} (Pair #{pair_number}) should be blocked for non-Active Buyer. "
                             f"Skipping wallet credit."
@@ -175,10 +182,13 @@ def pair_matched(self, pair_id):
                         transaction_type='BINARY_PAIR_COMMISSION'
                     ).count()
                     
-                    if not user.is_active_buyer and existing_txns_count >= 5:
+                    platform_settings = PlatformSettings.get_settings()
+                    max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
+                    
+                    if not user.is_active_buyer and existing_txns_count >= max_earnings_before_active_buyer:
                         logger.warning(
                             f"Recovery: User {user.email} already has {existing_txns_count} wallet transactions. "
-                            f"This recovery would be 6th+ pair. Skipping for non-Active Buyer."
+                            f"This recovery would be {max_earnings_before_active_buyer+1}th+ pair. Skipping for non-Active Buyer."
                         )
                         return
                 
@@ -286,17 +296,20 @@ def fix_missing_wallet_transactions():
             # Not based on current paid count (which would incorrectly block delayed pairs)
             pair_number = pair.pair_number_after_activation
             
-            # Business rule: Non-Active Buyer can only earn for first 5 pairs
-            # If pair_number > 5 and user is not Active Buyer, this pair should be blocked
-            if not user.is_active_buyer and pair_number and pair_number > 5:
+            # Business rule: Non-Active Buyer can only earn for first N pairs (configurable)
+            platform_settings = PlatformSettings.get_settings()
+            max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
+            
+            # If pair_number > max_earnings_before_active_buyer and user is not Active Buyer, this pair should be blocked
+            if not user.is_active_buyer and pair_number and pair_number > max_earnings_before_active_buyer:
                 logger.info(
                     f"Skipping pair {pair.id}: Pair #{pair_number} for non-Active Buyer user {user.email}. "
-                    f"This pair should be blocked (6th+ pair)."
+                    f"This pair should be blocked ({max_earnings_before_active_buyer+1}th+ pair)."
                 )
                 # Mark as blocked if not already
                 if not pair.commission_blocked:
                     pair.commission_blocked = True
-                    pair.blocked_reason = f"Not Active Buyer, 6th+ pair (Pair #{pair_number}). Commission will resume when user becomes Active Buyer."
+                    pair.blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (Pair #{pair_number}). Commission will resume when user becomes Active Buyer."
                     pair.save(update_fields=['commission_blocked', 'blocked_reason'])
                 # Update BinaryEarning to reflect blocked status
                 earning = BinaryEarning.objects.filter(binary_pair=pair).first()

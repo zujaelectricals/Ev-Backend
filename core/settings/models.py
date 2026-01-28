@@ -51,6 +51,10 @@ class PlatformSettings(models.Model):
         default=10,
         help_text="Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000)"
     )
+    max_earnings_before_active_buyer = models.IntegerField(
+        default=5,
+        help_text="Maximum number of binary pairs non-Active Buyer distributors can earn commission for before becoming Active Buyer (default: 5 pairs). 6th+ pairs are blocked until user becomes Active Buyer."
+    )
     binary_commission_initial_bonus = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -124,6 +128,7 @@ class PlatformSettings(models.Model):
                 'binary_commission_tds_percentage': 20,
                 'binary_extra_deduction_percentage': 20,
                 'binary_daily_pair_limit': 10,
+                'max_earnings_before_active_buyer': 5,
                 'binary_commission_initial_bonus': 0,
                 'binary_tree_default_placement_side': 'left',
                 'activation_amount': 5000,

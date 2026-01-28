@@ -5065,6 +5065,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_tds_percentage": "20.00",  // TDS percentage on ALL binary commissions (default: 20%)
      "binary_extra_deduction_percentage": "20.00",  // Extra deduction percentage on 6th+ pairs (default: 20%)
      "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000)
+     "max_earnings_before_active_buyer": 5,  // Maximum number of binary pairs non-Active Buyer distributors can earn commission for before becoming Active Buyer (default: 5 pairs). 6th+ pairs are blocked until user becomes Active Buyer (default: 5, min: 1)
      "binary_commission_initial_bonus": "0.00",  // Initial bonus amount (in rupees) credited to user's wallet and total_earnings when binary commission is activated (3 persons). TDS is deducted from this amount, but TDS is NOT deducted from booking balance (default: 0)
      "binary_tree_default_placement_side": "left",  // Default placement side for binary tree: "left" or "right" (default: "left")
      "activation_amount": "5000.00",  // Minimum payment amount per booking required for seniors to earn commission. If payment is less than this amount, no commission is credited, but user is still counted in descendants calculation. On cancellation, this amount is withheld for future point redemption (default: ₹5000)
@@ -5105,6 +5106,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_tds_percentage": 20,  // TDS percentage on ALL binary commissions (default: 20%, range: 0-100)
      "binary_extra_deduction_percentage": 20,  // Extra deduction percentage on 6th+ pairs (default: 20%, range: 0-100)
      "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10, min: 1)
+     "max_earnings_before_active_buyer": 5,  // Maximum number of binary pairs non-Active Buyer distributors can earn commission for before becoming Active Buyer (default: 5 pairs). 6th+ pairs are blocked until user becomes Active Buyer (default: 5, min: 1)
      "binary_commission_initial_bonus": 0,  // Initial bonus amount (in rupees) credited to user's wallet and total_earnings when binary commission is activated (3 persons). TDS is deducted from this amount, but TDS is NOT deducted from booking balance (default: 0)
      "binary_tree_default_placement_side": "left",  // Default placement side: "left" or "right" (default: "left")
      "activation_amount": 5000,  // Minimum payment amount per booking required for seniors to earn commission. If payment is less than this amount, no commission is credited, but user is still counted in descendants calculation. On cancellation, this amount is withheld for future point redemption (default: ₹5000, min: 0)
@@ -5124,6 +5126,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_tds_percentage": "20.00",
      "binary_extra_deduction_percentage": "20.00",
      "binary_daily_pair_limit": 10,
+     "max_earnings_before_active_buyer": 5,
      "binary_commission_initial_bonus": "0.00",
      "binary_tree_default_placement_side": "left",
      "distributor_application_auto_approve": true,
@@ -5145,6 +5148,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_commission_tds_percentage": ["binary_commission_tds_percentage must be between 0 and 100"],
      "binary_extra_deduction_percentage": ["binary_extra_deduction_percentage must be between 0 and 100"],
      "binary_daily_pair_limit": ["binary_daily_pair_limit must be at least 1"],
+     "max_earnings_before_active_buyer": ["max_earnings_before_active_buyer must be at least 1"],
      "binary_commission_initial_bonus": ["binary_commission_initial_bonus must be non-negative"],
      "payout_tds_percentage": ["payout_tds_percentage must be between 0 and 100"]
    }
@@ -5166,6 +5170,11 @@ Super User: EVAdmin && EVAdmin@123
    - binary_commission_tds_percentage: TDS percentage applied to ALL binary commissions - direct user and pairs (default: 20%, range: 0-100)
    - binary_extra_deduction_percentage: Extra deduction percentage for 6th+ pairs in addition to TDS (default: 20%, range: 0-100)
    - binary_daily_pair_limit: Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000 before deductions)
+   - max_earnings_before_active_buyer: Maximum number of binary pairs non-Active Buyer distributors can earn commission for before becoming Active Buyer (default: 5 pairs, min: 1)
+     * Non-Active Buyer distributors can only earn commission for the first N pairs (where N = max_earnings_before_active_buyer)
+     * Pairs beyond this limit (N+1th pair onwards) are blocked until the distributor becomes an Active Buyer (total paid ≥ ₹5000)
+     * When a distributor becomes an Active Buyer, future pairs will be paid normally
+     * This setting controls the commission restriction for non-Active Buyer distributors
    - binary_tree_default_placement_side: Default placement side for binary tree placement algorithm (default: "left", options: "left" or "right")
      * Controls which side chain is followed after first 2 users are placed
      * If "left": 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain
@@ -5189,6 +5198,609 @@ Super User: EVAdmin && EVAdmin@123
    - Timeout is stored in minutes (converted from hours for backward compatibility)
    - Example: 1440 minutes = 24 hours, 60 minutes = 1 hour, null = never expires
    - Daily pair limit resets at midnight (00:00 server time)
+
+
+86. COMPREHENSIVE REPORTS (Admin/Staff Only)
+    Method: GET
+    URL: /api/reports/comprehensive/
+    Authentication: Required (Admin or Staff)
+    Description: Get comprehensive reports aggregating all dashboard data including transaction history,
+     investment logs, BV logs, referral commission, team commission, login history, and notification history. 
+     Only accessible to admin and staff roles. Supports per-section pagination and status filtering.
+    
+    Query Parameters:
+    - sections (optional): Comma-separated list of sections to include. Options: transaction_history, investment_logs, bv_logs, 
+      referral_commission, team_commission, login_history, notification_history. If not provided, all sections are returned.
+    
+    Pagination Parameters (per-section):
+    - transaction_page (optional, default: 1): Page number for transaction history
+    - transaction_page_size (optional, default: 20, max: 100): Items per page for transaction history
+    - investment_page (optional, default: 1): Page number for investment logs
+    - investment_page_size (optional, default: 20, max: 100): Items per page for investment logs
+    - bv_page (optional, default: 1): Page number for BV logs
+    - bv_page_size (optional, default: 20, max: 100): Items per page for BV logs
+    - referral_page (optional, default: 1): Page number for referral commission
+    - referral_page_size (optional, default: 20, max: 100): Items per page for referral commission
+    - team_page (optional, default: 1): Page number for team commission
+    - team_page_size (optional, default: 20, max: 100): Items per page for team commission
+    - notification_page (optional, default: 1): Page number for notification history
+    - notification_page_size (optional, default: 20, max: 100): Items per page for notification history
+    
+    Status Filter Parameters:
+    - transaction_status (optional): Filter transactions by status. Values: Completed, Deducted (comma-separated for multiple)
+    - investment_status (optional): Filter bookings by status. Values: pending, active, completed, delivered, cancelled, expired
+    - bv_status (optional): Filter binary pairs by status. Values: pending, matched, processed
+    - notification_status (optional): Filter notifications by status. Values: read, unread
+    
+    Examples:
+    GET /api/reports/comprehensive/
+    GET /api/reports/comprehensive/?sections=transaction_history,investment_logs
+    GET /api/reports/comprehensive/?transaction_page=2&transaction_page_size=50
+    GET /api/reports/comprehensive/?transaction_status=Completed&investment_status=active,pending
+    GET /api/reports/comprehensive/?sections=transaction_history&transaction_page=1&transaction_status=Deducted
+    
+    Response (200 OK):
+    {
+      "transaction_history": {
+        "summary_cards": {
+          "total_transactions": 1250,
+          "total_amount": "1,25,00,000.00",
+          "success_rate": 98.5,
+          "failed": 0
+        },
+        "transaction_type_summary": [
+          {
+            "type": "PAYMENT",
+            "count": 850,
+            "total_amount": "1,25,00,000.00",
+            "avg_amount": "14,705.88",
+            "success_rate": 98.5
+          },
+          {
+            "type": "COMMISSION",
+            "count": 245,
+            "total_amount": "32,00,000.00",
+            "avg_amount": "13,061.22",
+            "success_rate": 95.2
+          }
+        ],
+        "weekly_trend": {
+          "Mon": {
+            "transactions": 120,
+            "amount": 1300000.00
+          },
+          "Tue": {
+            "transactions": 135,
+            "amount": 1400000.00
+          }
+        },
+        "all_transactions": {
+          "pagination": {
+            "total_count": 1250,
+            "total_pages": 63,
+            "current_page": 1,
+            "page_size": 20,
+            "has_next": true,
+            "has_previous": false
+          },
+          "results": [
+            {
+              "id": 1,
+              "transaction_id": "TXN-2024-001",
+              "date": "2024-03-22",
+              "user": {
+                "id": 1,
+                "name": "Rajesh Kumar",
+                "email": "rajesh@example.com"
+              },
+              "type": "PAYMENT",
+              "amount": "50000.00",
+              "status": "Completed",
+              "description": "Vehicle pre-booking payment",
+              "created_at": "2024-03-22T10:00:00Z"
+            }
+          ]
+        }
+      },
+      "investment_logs": {
+        "summary_cards": {
+          "total_investments": 4,
+          "total_amount": "2,45,000.00",
+          "avg_investment": "61,250.00",
+          "active_investments": 3
+        },
+        "investment_type_summary": [
+          {
+            "type": "Pre-Booking",
+            "count": 1250,
+            "total_amount": "6,25,00,000.00",
+            "avg_amount": "50,000.00",
+            "completed": 1200,
+            "pending": 50
+          },
+          {
+            "type": "Full Payment",
+            "count": 850,
+            "total_amount": "12,75,00,000.00",
+            "avg_amount": "1,50,000.00",
+            "completed": 850,
+            "pending": 0
+          },
+          {
+            "type": "EMI",
+            "count": 950,
+            "total_amount": "2,37,50,000.00",
+            "avg_amount": "25,000.00",
+            "completed": 900,
+            "pending": 50
+          },
+          {
+            "type": "Top Up",
+            "count": 200,
+            "total_amount": "40,00,000.00",
+            "avg_amount": "20,000.00",
+            "completed": 0,
+            "pending": 180
+          }
+        ],
+        "payment_method_summary": [
+          {
+            "payment_method": "Card",
+            "count": 1200,
+            "total_amount": "15,00,00,000.00",
+            "percentage": 38.0
+          },
+          {
+            "payment_method": "UPI",
+            "count": 1500,
+            "total_amount": "18,00,00,000.00",
+            "percentage": 47.0
+          }
+        ],
+        "detailed_bookings": {
+          "pagination": {
+            "total_count": 3050,
+            "total_pages": 153,
+            "current_page": 1,
+            "page_size": 20,
+            "has_next": true,
+            "has_previous": false
+          },
+          "results": [
+            {
+              "id": 1,
+              "booking_number": "BK-2024-001",
+              "user": {
+                "id": 1,
+                "name": "Rajesh Kumar",
+                "email": "rajesh@example.com"
+              },
+              "vehicle_model": "EV Model X",
+              "booking_amount": "50,000.00",
+              "payment_option": "full_payment",
+              "status": "active",
+              "total_paid": "50,000.00",
+              "remaining_amount": "0.00",
+              "created_at": "2024-03-22T10:00:00Z"
+            }
+          ]
+        }
+      },
+      "bv_logs": {
+        "summary_cards": {
+          "total_bv_generated": "90,000.00",
+          "total_bv_distributed": "30,000.00",
+          "total_bv_used": "20,000.00",
+          "active_bv": "1,20,000.00"
+        },
+        "bv_type_summary": [
+          {
+            "type": "Generated",
+            "count": 1250,
+            "total_amount": "6,25,00,000.00",
+            "avg_amount": "50,000.00",
+            "active": 1200
+          },
+          {
+            "type": "Distributed",
+            "count": 1100,
+            "total_amount": "5,50,00,000.00",
+            "avg_amount": "50,000.00",
+            "active": 1100
+          },
+          {
+            "type": "Used",
+            "count": 850,
+            "total_amount": "4,25,00,000.00",
+            "avg_amount": "50,000.00",
+            "active": 0
+          },
+          {
+            "type": "Expired",
+            "count": 50,
+            "total_amount": "25,00,000.00",
+            "avg_amount": "50,000.00",
+            "active": 0
+          }
+        ],
+        "bv_source_summary": [
+          {
+            "source": "Booking",
+            "count": 1800,
+            "total_amount": "9,00,00,000.00",
+            "percentage": 72.0
+          },
+          {
+            "source": "Commission",
+            "count": 500,
+            "total_amount": "2,50,00,000.00",
+            "percentage": 20.0
+          }
+        ],
+        "detailed_pairs": {
+          "pagination": {
+            "total_count": 1250,
+            "total_pages": 63,
+            "current_page": 1,
+            "page_size": 20,
+            "has_next": true,
+            "has_previous": false
+          },
+          "results": [
+            {
+              "id": 1,
+              "user": {
+                "id": 1,
+                "name": "Rajesh Kumar",
+                "email": "rajesh@example.com"
+              },
+              "left_user": {
+                "id": 2,
+                "name": "Priya Sharma"
+              },
+              "right_user": {
+                "id": 3,
+                "name": "Amit Patel"
+              },
+              "pair_amount": "2,000.00",
+              "earning_amount": "1,600.00",
+              "status": "processed",
+              "pair_number_after_activation": 5,
+              "extra_deduction_applied": "0.00",
+              "created_at": "2024-03-22T10:00:00Z",
+              "processed_at": "2024-03-22T12:00:00Z"
+            }
+          ]
+        }
+      },
+      "referral_commission": {
+        "summary_cards": {
+          "total_commissions": 3,
+          "total_amount": "3,000.00",
+          "paid_amount": "2,000.00",
+          "pending_amount": "1,000.00",
+          "avg_commission": "1,000.00"
+        },
+        "top_referrer_performance": [
+          {
+            "referrer": "Rajesh Kumar",
+            "referrals": 25,
+            "total_amount": "25,000.00",
+            "tds": "2,500.00",
+            "net_amount": "22,500.00",
+            "paid": 20,
+            "pending": 5
+          },
+          {
+            "referrer": "Priya Sharma",
+            "referrals": 20,
+            "total_amount": "20,000.00",
+            "tds": "2,000.00",
+            "net_amount": "18,000.00",
+            "paid": 18,
+            "pending": 2
+          }
+        ],
+        "commission_status_summary": [
+          {
+            "status": "Completed",
+            "count": 850,
+            "total_amount": "8,50,000.00",
+            "tds": "85,000.00",
+            "net_amount": "7,65,000.00"
+          },
+          {
+            "status": "Pending",
+            "count": 120,
+            "total_amount": "1,20,000.00",
+            "tds": "12,000.00",
+            "net_amount": "1,08,000.00"
+          }
+        ],
+        "detailed_commissions": {
+          "pagination": {
+            "total_count": 970,
+            "total_pages": 49,
+            "current_page": 1,
+            "page_size": 20,
+            "has_next": true,
+            "has_previous": false
+          },
+          "results": [
+            {
+              "id": 1,
+              "transaction_id": "REF-2024-001",
+              "user": {
+                "id": 1,
+                "name": "Rajesh Kumar",
+                "email": "rajesh@example.com"
+              },
+              "amount": "1,000.00",
+              "referral_for": "Referred user booking",
+              "created_at": "2024-03-22T10:00:00Z"
+            }
+          ]
+        }
+      },
+      "team_commission": {
+        "summary_cards": {
+          "total_commissions": 3,
+          "total_pairs": 17,
+          "total_amount": "34,000.00",
+          "pool_money": "6,800.00",
+          "net_payout": "23,800.00",
+          "avg_per_pair": "2,000.00"
+        },
+        "top_distributor_performance": [
+          {
+            "distributor": "Rajesh Kumar",
+            "pairs": 25,
+            "total_amount": "50,000.00",
+            "tds": "5,000.00",
+            "pool_money": "10,000.00",
+            "net_amount": "35,000.00",
+            "paid": 20,
+            "pending": 5
+          },
+          {
+            "distributor": "Priya Sharma",
+            "pairs": 20,
+            "total_amount": "40,000.00",
+            "tds": "4,000.00",
+            "pool_money": "8,000.00",
+            "net_amount": "28,000.00",
+            "paid": 18,
+            "pending": 2
+          }
+        ],
+        "commission_breakdown_by_status": [
+          {
+            "status": "Completed",
+            "count": 850,
+            "total_amount": "1,70,00,000.00",
+            "tds": "17,00,000.00",
+            "pool_money": "34,00,000.00",
+            "net_amount": "1,19,00,000.00"
+          }
+        ],
+        "detailed_earnings": {
+          "pagination": {
+            "total_count": 850,
+            "total_pages": 43,
+            "current_page": 1,
+            "page_size": 20,
+            "has_next": true,
+            "has_previous": false
+          },
+          "results": [
+            {
+              "id": 1,
+              "user": {
+                "id": 1,
+                "name": "Rajesh Kumar",
+                "email": "rajesh@example.com"
+              },
+              "binary_pair_id": 5,
+              "amount": "2,000.00",
+              "pair_number": 5,
+              "emi_deducted": "200.00",
+              "net_amount": "1,800.00",
+              "created_at": "2024-03-22T10:00:00Z"
+            }
+          ]
+        }
+      },
+      "login_history": {
+        "summary_cards": {
+          "total_logins": 0,
+          "unique_users": 0,
+          "failed_logins": 0,
+          "active_sessions": 0,
+          "avg_logins_per_user": 0.0
+        },
+        "device_summary": [],
+        "login_status_summary": [],
+        "login_location_summary": []
+      },
+      "notification_history": {
+        "summary_cards": {
+          "total_sent": 1750,
+          "delivered": 1710,
+          "opened": 1270,
+          "clicked": 0,
+          "failed": 40,
+          "delivery_rate": 97.7,
+          "open_rate": 75.0,
+          "click_rate": 0.0
+        },
+        "delivery_status_summary": [
+          {
+            "status": "Delivered",
+            "count": 4850,
+            "percentage": 97.0
+          },
+          {
+            "status": "Opened",
+            "count": 3200,
+            "percentage": 64.0
+          },
+          {
+            "status": "Clicked",
+            "count": 1500,
+            "percentage": 30.0
+          },
+          {
+            "status": "Failed",
+            "count": 150,
+            "percentage": 3.0
+          }
+        ],
+        "notification_type_performance": [
+          {
+            "type": "Email",
+            "sent": 2500,
+            "delivered": 2425,
+            "opened": 1600,
+            "delivery_rate": 97.0,
+            "open_rate": 66.0
+          },
+          {
+            "type": "SMS",
+            "sent": 1800,
+            "delivered": 1764,
+            "opened": 1440,
+            "delivery_rate": 98.0,
+            "open_rate": 81.6
+          },
+          {
+            "type": "Push",
+            "sent": 3200,
+            "delivered": 3136,
+            "opened": 2464,
+            "delivery_rate": 98.0,
+            "open_rate": 78.6
+          },
+          {
+            "type": "In-App",
+            "sent": 1500,
+            "delivered": 1500,
+            "opened": 1200,
+            "delivery_rate": 100.0,
+            "open_rate": 80.0
+          }
+        ],
+        "weekly_notification_volume": {
+          "Mon": 1200,
+          "Tue": 1350,
+          "Wed": 1400,
+          "Thu": 1600,
+          "Fri": 1500,
+          "Sat": 900,
+          "Sun": 800
+        },
+        "detailed_notifications": {
+          "pagination": {
+            "total_count": 1750,
+            "total_pages": 88,
+            "current_page": 1,
+            "page_size": 20,
+            "has_next": true,
+            "has_previous": false
+          },
+          "results": [
+            {
+              "id": 1,
+              "notification_type": "booking",
+              "title": "Booking Confirmed",
+              "message": "Your vehicle booking has been confirmed",
+              "is_read": true,
+              "read_at": "2024-03-22T12:00:00Z",
+              "user": {
+                "id": 1,
+                "name": "Rajesh Kumar",
+                "email": "rajesh@example.com"
+              },
+              "created_at": "2024-03-22T10:00:00Z"
+            }
+          ]
+        }
+      }
+    }
+    
+    Error Response (403 Forbidden):
+    {
+      "detail": "This endpoint is only available for admin and staff users."
+    }
+    
+    Notes:
+    - Only users with is_superuser=True or role in ['admin', 'staff'] can access this endpoint
+    - Returns all sections by default if no 'sections' query parameter is provided
+    - Sections can be filtered using comma-separated list: ?sections=transaction_history,investment_logs
+    - Available sections: transaction_history, investment_logs, bv_logs, referral_commission, team_commission, login_history, notification_history
+    
+    Pagination:
+    - Each section supports independent pagination with {section}_page and {section}_page_size parameters
+    - Default page size: 20, Maximum page size: 100
+    - Pagination metadata includes: total_count, total_pages, current_page, page_size, has_next, has_previous
+    - Detailed lists are returned with pagination structure: { "pagination": {...}, "results": [...] }
+    
+    Status Filtering:
+    - transaction_status: Filters wallet transactions by Completed (credit/positive) or Deducted (debit/negative)
+    - investment_status: Filters bookings by pending, active, completed, delivered, cancelled, or expired
+    - bv_status: Filters binary pairs by pending, matched, or processed
+    - notification_status: Filters notifications by read or unread
+    - Multiple values can be comma-separated: ?investment_status=active,pending
+    - Filters apply only to detailed lists, not to summary cards or aggregations
+    
+    Transaction History:
+    - Includes all wallet transactions
+    - Success rate calculated from Payment model (completed vs failed payments)
+    - Weekly trend shows last 7 days of data
+    - Detailed list includes: transaction_id, date, user, type, amount, status, description, created_at
+    - Supports pagination and status filtering (Completed/Deducted)
+    
+    Investment Logs:
+    - Based on booking records
+    - Investment types: Pre-Booking, Full Payment, EMI, Top Up
+    - Payment method summary based on completed payments
+    - Detailed bookings list includes: booking_number, user, vehicle_model, booking_amount, payment_option, status, total_paid, remaining_amount, created_at
+    - Supports pagination and status filtering (booking status)
+    
+    BV Logs:
+    - Business Volume calculated from binary pairs and earnings
+    - BV types: Generated, Distributed, Used, Expired
+    - BV sources: Booking (from payments), Commission (from binary earnings)
+    - Detailed pairs list includes: user, left_user, right_user, pair_amount, earning_amount, status, pair_number_after_activation, extra_deduction_applied, created_at, processed_at
+    - Supports pagination and status filtering (pair status)
+    
+    Referral Commission:
+    - Based on REFERRAL_BONUS wallet transactions
+    - TDS calculated at 20% (configurable)
+    - Top referrers sorted by total amount
+    - Detailed commissions list includes: transaction_id, user, amount, referral_for (description), created_at
+    - Supports pagination
+    
+    Team Commission:
+    - Based on BinaryEarning and BinaryPair records
+    - Pool money includes TDS and extra deductions
+    - Top distributors sorted by total amount
+    - Detailed earnings list includes: user, binary_pair_id, amount, pair_number, emi_deducted, net_amount, created_at
+    - Supports pagination
+    
+    Login History:
+    - Currently returns placeholder data (no login tracking model exists)
+    
+    Notification History:
+    - Based on Notification model
+    - Delivery rate = delivered / sent
+    - Open rate = opened / sent (assumes is_read = opened)
+    - Click tracking requires additional implementation
+    - Detailed notifications list includes: notification_type, title, message, is_read, read_at, user, created_at
+    - Supports pagination and status filtering (read/unread)
+    
+    - All monetary values are returned as formatted strings with 2 decimal places
+    - Percentages are rounded to 1 decimal place
+    - Dates are in ISO 8601 format (UTC)
 
 
 ================================================================================
@@ -5319,12 +5931,13 @@ Standard Error Format:
     - Commission is granted only if referrer_was_distributor is True when payment is completed
 19. Tree Counting: left_count and right_count now count ALL descendants recursively (entire subtree, not just direct children)
 20. Distributor Eligibility: Active Buyer requirement removed - only KYC verification needed to apply for distributor program
-21. Commission Restriction for Non-Active Buyer Distributors:
+21. Commission Restriction for Non-Active Buyer Distributors (configurable via max_earnings_before_active_buyer in Platform Settings, default: 5):
     - Can earn unlimited direct user commissions (₹1000 per direct user, before binary activation)
-    - Can earn commission for first 5 binary pairs after binary activation (₹2000 per pair)
-    - Binary pair commissions from 6th pair onwards are BLOCKED until they become Active Buyer
-    - When distributor becomes Active Buyer (total paid ≥ ₹5000), future binary pairs (6th+) will be paid normally
+    - Can earn commission for first N binary pairs after binary activation (where N = max_earnings_before_active_buyer, default: 5 pairs, ₹2000 per pair)
+    - Binary pair commissions from (N+1)th pair onwards are BLOCKED until they become Active Buyer
+    - When distributor becomes Active Buyer (total paid ≥ ₹5000), future binary pairs will be paid normally
     - No retroactive commissions for pairs that were blocked during restriction period
+    - The limit is configurable via Platform Settings API endpoint (max_earnings_before_active_buyer field, min: 1)
 
 
 ================================================================================

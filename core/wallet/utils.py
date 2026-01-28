@@ -32,22 +32,25 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
                 )
                 return wallet  # Return wallet without crediting
         
-        # Business Rule: Non-Active Buyer distributors can only earn commission for first 5 binary pairs
+        # Business Rule: Non-Active Buyer distributors can only earn commission for first N binary pairs (configurable)
         # This check only applies to BINARY_PAIR_COMMISSION (not DIRECT_USER_COMMISSION)
         # 
         # WARNING: This check has an off-by-one bug - it counts pairs with status 'matched' OR 'processed',
-        # which includes the current pair being processed, causing the 5th pair to be incorrectly blocked.
+        # which includes the current pair being processed, causing the Nth pair to be incorrectly blocked.
         # 
         # FIXED: The pair_matched Celery task now bypasses this function and uses pair_number_after_activation
         # directly. This function should NOT be called directly for BINARY_PAIR_COMMISSION without first
         # checking pair_number_after_activation.
         if transaction_type == 'BINARY_PAIR_COMMISSION' and user.is_distributor and not user.is_active_buyer:
             from core.binary.utils import get_binary_pairs_after_activation_count
+            from core.settings.models import PlatformSettings
             paid_pairs_count = get_binary_pairs_after_activation_count(user)
+            platform_settings = PlatformSettings.get_settings()
+            max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
             
-            # If 6th+ pair and not Active Buyer, block the commission
+            # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, block the commission
             # NOTE: This check is buggy - see warning above. Use pair_number_after_activation instead.
-            if paid_pairs_count >= 5:
+            if paid_pairs_count >= max_earnings_before_active_buyer:
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.warning(

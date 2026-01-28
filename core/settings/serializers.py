@@ -18,6 +18,7 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
             'binary_commission_tds_percentage',
             'binary_extra_deduction_percentage',
             'binary_daily_pair_limit',
+            'max_earnings_before_active_buyer',
             'binary_commission_initial_bonus',
             'binary_tree_default_placement_side',
             'activation_amount',
@@ -81,6 +82,12 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
         """Validate that daily pair limit is positive"""
         if value < 1:
             raise serializers.ValidationError("binary_daily_pair_limit must be at least 1")
+        return value
+    
+    def validate_max_earnings_before_active_buyer(self, value):
+        """Validate that max earnings before active buyer is positive"""
+        if value < 1:
+            raise serializers.ValidationError("max_earnings_before_active_buyer must be at least 1")
         return value
     
     def validate_binary_commission_initial_bonus(self, value):
