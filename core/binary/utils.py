@@ -792,10 +792,11 @@ def get_unmatched_users_for_pairing(node):
     
     Uses BinaryPair records to determine which users are already matched
     
-    IMPORTANT: Only includes members created at or after activation (excludes pre-activation members)
-    - Members created before activation (1st and 2nd) are excluded
-    - Member that triggered activation (3rd) is included
-    - Members created after activation are included
+    IMPORTANT: Pairing eligibility depends on activation_count:
+    - Even activation_count (2, 4, 6...): Only members created AFTER activation are eligible
+      (exclude the member that triggered activation)
+    - Odd activation_count (3, 5, 7...): Members created AT OR AFTER activation are eligible
+      (include the member that triggered activation)
     
     Args:
         node: BinaryNode to get unmatched users for
@@ -812,6 +813,11 @@ def get_unmatched_users_for_pairing(node):
     if not activation_time:
         # If no activation timestamp, return None (shouldn't happen if activated)
         return (None, None)
+    
+    # Get activation count to determine even/odd logic
+    platform_settings = PlatformSettings.get_settings()
+    activation_count = platform_settings.binary_commission_activation_count
+    is_even = (activation_count % 2 == 0)
     
     # 1. Get all BinaryPair records for this node's user
     pairs = BinaryPair.objects.filter(user=node.user)
@@ -830,17 +836,27 @@ def get_unmatched_users_for_pairing(node):
     # 4. Get all descendant nodes on RIGHT side (where side='right' relative to this node)
     right_descendants = get_all_descendant_nodes(node, 'right')
     
-    # 5. Filter: Only include nodes created at or after activation
-    # Exclude nodes that existed before activation (B, C in the example)
-    # Include D (3rd member that triggered activation) and all subsequent members
-    left_post_activation = [
-        n for n in left_descendants 
-        if n.created_at >= activation_time and n.user.id not in matched_user_ids
-    ]
-    right_post_activation = [
-        n for n in right_descendants 
-        if n.created_at >= activation_time and n.user.id not in matched_user_ids
-    ]
+    # 5. Filter based on even/odd logic
+    if is_even:
+        # Even: Exclude activation-triggering member (strictly after activation)
+        left_post_activation = [
+            n for n in left_descendants 
+            if n.created_at > activation_time and n.user.id not in matched_user_ids
+        ]
+        right_post_activation = [
+            n for n in right_descendants 
+            if n.created_at > activation_time and n.user.id not in matched_user_ids
+        ]
+    else:
+        # Odd: Include activation-triggering member (at or after activation)
+        left_post_activation = [
+            n for n in left_descendants 
+            if n.created_at >= activation_time and n.user.id not in matched_user_ids
+        ]
+        right_post_activation = [
+            n for n in right_descendants 
+            if n.created_at >= activation_time and n.user.id not in matched_user_ids
+        ]
     
     # 6. Return first unmatched node from LEFT and first unmatched node from RIGHT
     # 7. If either side has no unmatched users, return (None, None)

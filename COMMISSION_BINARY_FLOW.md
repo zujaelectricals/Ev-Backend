@@ -67,12 +67,21 @@ New User Added → Has Payment? → YES → Process Commission for All Ancestors
 #### Strict Pairing Logic
 - **Pair = 1 left-leg member + 1 right-leg member**
 - **Two members on same leg (LL or RR) → NOT a pair**
-- **Pre-activation members excluded**: Only members created at or after activation are eligible
+- **Pre-activation members excluded**: Eligibility depends on activation_count (even/odd logic)
 
 #### Member Eligibility
-- ✅ **Included**: Member that triggered activation (3rd member - D)
-- ✅ **Included**: All members added after activation (E, F, G...)
-- ❌ **Excluded**: Members created before activation (1st and 2nd - B, C)
+
+The eligibility depends on whether `binary_commission_activation_count` is **even** or **odd**:
+
+**Even Activation Count (2, 4, 6...):**
+- ❌ **Excluded**: Member that triggered activation (created at activation timestamp)
+- ✅ **Included**: All members created strictly after activation
+- ❌ **Excluded**: Members created before activation
+
+**Odd Activation Count (3, 5, 7...):**
+- ✅ **Included**: Member that triggered activation (created at activation timestamp)
+- ✅ **Included**: All members created after activation
+- ❌ **Excluded**: Members created before activation
 
 ### Commission Calculation
 

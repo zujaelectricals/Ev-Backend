@@ -166,7 +166,7 @@ class KYCSerializer(serializers.ModelSerializer):
     class Meta:
         model = KYC
         fields = '__all__'
-        read_only_fields = ('user', 'submitted_at', 'reviewed_at', 'reviewed_by')
+        read_only_fields = ('user', 'reviewed_at', 'reviewed_by')
     
     def validate_file(self, value, field_name):
         """Validate that file is either an image or PDF"""
@@ -219,21 +219,45 @@ class KYCSerializer(serializers.ModelSerializer):
         return self.validate_file(value, 'bank_passbook')
     
     def update(self, instance, validated_data):
-        """Update KYC and reset status to pending when resubmitting after rejection"""
-        # If KYC was previously rejected and user is resubmitting, reset status to pending
-        # Also clear rejection reason and reset review fields
-        was_rejected = instance.status == 'rejected'
+        """Update KYC and reset status to pending when critical fields are resubmitted"""
+        # Check if critical fields changed
+        document_fields = ['pan_document', 'aadhaar_front', 'aadhaar_back', 'bank_passbook']
+        identity_fields = ['pan_number', 'aadhaar_number']
+        critical_fields_changed = False
+        
+        # Check document fields - if any new file is provided, consider it changed
+        for field in document_fields:
+            if field in validated_data:
+                # FileField comparison: check if new file is provided
+                if validated_data[field] is not None:
+                    critical_fields_changed = True
+                    break
+        
+        # Check identity number fields - compare old vs new values
+        for field in identity_fields:
+            if field in validated_data:
+                old_value = getattr(instance, field, None)
+                new_value = validated_data[field]
+                if old_value != new_value:
+                    critical_fields_changed = True
+                    break
+        
+        # Store original status before update
+        original_status = instance.status
         
         # Update the instance with new data
         instance = super().update(instance, validated_data)
         
-        # If it was rejected, reset status and clear review information
-        if was_rejected:
+        # If critical fields changed and status is not already pending, reset to pending
+        if critical_fields_changed and original_status != 'pending':
+            # Reset status and clear review information
             instance.status = 'pending'
             instance.rejection_reason = ''
             instance.reviewed_by = None
             instance.reviewed_at = None
-            instance.save(update_fields=['status', 'rejection_reason', 'reviewed_by', 'reviewed_at'])
+            # Update submitted_at to track resubmission
+            instance.submitted_at = timezone.now()
+            instance.save(update_fields=['status', 'rejection_reason', 'reviewed_by', 'reviewed_at', 'submitted_at'])
         
         return instance
 

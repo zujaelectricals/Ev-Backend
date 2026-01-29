@@ -778,11 +778,23 @@ Super User: EVAdmin && EVAdmin@123
                               KYC APIs
 ================================================================================
 
-16. CREATE KYC
+16. CREATE/UPDATE KYC
    Method: POST
    URL: /api/users/kyc/
    Authentication: Required
-   Description: Submit KYC documents
+   Description: Submit or resubmit KYC documents. If KYC already exists for the user, it will be updated.
+   
+   Important: KYC Resubmission Behavior
+   - Users can resubmit their KYC documents at any time
+   - If critical fields are changed during resubmission, the KYC status will automatically reset to 'pending' and require admin re-approval, regardless of previous status (approved/rejected)
+   - Critical fields that trigger re-approval:
+     * Document files: pan_document, aadhaar_front, aadhaar_back, bank_passbook
+     * Identity numbers: pan_number, aadhaar_number
+   - When resubmitting with critical field changes:
+     * Status is reset to 'pending'
+     * submitted_at timestamp is updated to current time
+     * Review fields are cleared (reviewed_by, reviewed_at, rejection_reason)
+   - Updating only non-critical fields (address, bank details without documents) will NOT reset the status
    
    Request Body (multipart/form-data):
    {
@@ -805,14 +817,30 @@ Super User: EVAdmin && EVAdmin@123
      "bank_passbook": <file>  // Bank account passbook document
    }
    
-   Response (201 Created):
+   Response (201 Created - First Submission):
    {
      "id": 1,
      "user": 1,
      "status": "pending",
      "pan_number": "ABCDE1234F",
+     "submitted_at": "2026-01-06T12:00:00Z",
      ...
    }
+   
+   Response (200 OK - Resubmission):
+   {
+     "id": 1,
+     "user": 1,
+     "status": "pending",  // Reset to pending if critical fields changed
+     "pan_number": "ABCDE1234F",
+     "submitted_at": "2026-01-06T14:30:00Z",  // Updated timestamp
+     "reviewed_at": null,  // Cleared on resubmission
+     "reviewed_by": null,  // Cleared on resubmission
+     "rejection_reason": "",  // Cleared on resubmission
+     ...
+   }
+   
+   Note: If resubmitting with only non-critical field changes (e.g., address update), the status will remain unchanged.
 
 
 17. GET KYC STATUS
@@ -2728,8 +2756,10 @@ Super User: EVAdmin && EVAdmin@123
 42. LIST VEHICLE STOCK
     Method: GET
     URL: /api/inventory/stock/
-    Authentication: Required (Admin/Superuser only)
+    Authentication: Not required (Public access)
     Description: List all vehicle stock records with filtering options. Includes dashboard summary data with total stock, inventory value, low stock alerts, and stock trend.
+    - For non-admin users: Only returns vehicles with available stock (available_quantity > 0)
+    - For admin users: Returns all vehicles regardless of stock availability
     
     Query Parameters:
     - page: Page number (default: 1)
@@ -2828,18 +2858,18 @@ Super User: EVAdmin && EVAdmin@123
     - Low stock items are sorted by available_quantity (lowest first) to prioritize critical alerts
     - Stock trend shows current stock levels broken down by model name, with each model having its own trend point
     - Stock quantities are aggregated by vehicle name (all color-battery variants of the same model are summed together)
-    
-    Error Response (403):
-    {
-      "detail": "Only admin users can perform this action."
-    }
+    - Non-admin users will only see vehicles with available_quantity > 0 in the results
+    - Summary data (low_stock_items, out_of_stock_count) is only visible to admin users (non-admin users won't see out-of-stock items in results)
 
 
 43. GET VEHICLE STOCK BY ID
     Method: GET
     URL: /api/inventory/stock/{id}/
-    Authentication: Required (Admin/Superuser only)
-    Description: Get specific vehicle stock record
+    Authentication: Not required (Public access)
+    Description: Get specific vehicle stock record with full details including other variants.
+    - For non-admin users: Only returns vehicles with available stock (available_quantity > 0)
+    - For admin users: Returns all vehicles regardless of stock availability
+    - The {id} parameter can be either a VehicleStock ID or a Vehicle ID (variantId)
     
     Response (200 OK):
     {
@@ -2847,6 +2877,51 @@ Super User: EVAdmin && EVAdmin@123
       "vehicle": 1,
       "vehicle_name": "EV Model X",
       "vehicle_model_code": "EV-RED-40K-A9F3X2",
+      "vehicle_colors": ["red"],
+      "battery_variants": ["40kWh"],
+      "features": ["USB Charging Port", "Parking Mode", "Reverse Gear"],
+      "specifications": {
+        "Battery": "60V × 50AH",
+        "Motor Power": "48V/60V/72V 1000W",
+        "Max Speed": "25 km/h"
+      },
+      "description": "Electric vehicle description...",
+      "price": "65000.00",
+      "status": "available",
+      "primary_image_url": "http://example.com/media/vehicles/images/image1.jpg",
+      "images": [
+        {
+          "id": 1,
+          "image_url": "http://example.com/media/vehicles/images/image1.jpg",
+          "is_primary": true,
+          "alt_text": "EV Model X front view",
+          "order": 0
+        },
+        {
+          "id": 2,
+          "image_url": "http://example.com/media/vehicles/images/image2.jpg",
+          "is_primary": false,
+          "alt_text": "EV Model X side view",
+          "order": 1
+        }
+      ],
+      "other_variants": [
+        {
+          "id": 2,
+          "model_code": "EV-BLU-40K-XYZ789",
+          "vehicle_color": ["blue"],
+          "battery_variant": ["40kWh"],
+          "price": "65000.00",
+          "status": "available",
+          "primary_image_url": "http://example.com/media/vehicles/images/image3.jpg",
+          "image_count": 3,
+          "images": [...],
+          "stock_total_quantity": 5,
+          "stock_available_quantity": 3,
+          "stock_reserved_quantity": 2,
+          "created_at": "2026-01-06T12:00:00Z"
+        }
+      ],
       "total_quantity": 10,
       "available_quantity": 7,
       "reserved_quantity": 3,
@@ -2856,8 +2931,20 @@ Super User: EVAdmin && EVAdmin@123
     
     Error Response (404):
     {
-      "detail": "Not found."
+      "detail": "Vehicle stock not found or not available."
     }
+    
+    Notes:
+    - This endpoint fetches stock details for a clicked variant (via useGetStockQuery hook)
+    - Returns current variant details (price, images, stock quantities)
+    - Returns other_variants array (all other variants for the same vehicle model/name)
+    - Returns specifications, features, description, etc.
+    - Non-admin users will receive 404 if the vehicle has no available stock
+    - The {id} parameter accepts either:
+      * VehicleStock ID (e.g., /api/inventory/stock/1/)
+      * Vehicle ID / Variant ID (e.g., /api/inventory/stock/5/) - will automatically get or create stock for that vehicle
+    - If using Vehicle ID and stock doesn't exist, it will be created with 0 quantity (admin users can see it, non-admin users will get 404)
+    - Response includes full vehicle details and all other variants of the same model for easy comparison
 
 
 44. UPDATE VEHICLE STOCK
@@ -2903,18 +2990,60 @@ Super User: EVAdmin && EVAdmin@123
     - Cannot set total_quantity less than current reserved quantity
 
 
-45. UPDATE STOCK BY VEHICLE ID
-    Method: POST
+45. GET/UPDATE STOCK BY VEHICLE ID
+    Method: GET / POST
     URL: /api/inventory/stock/by-vehicle/{vehicle_id}/
-    Authentication: Required (Admin/Superuser only)
-    Description: Update or create stock for a specific vehicle by vehicle ID
+    Authentication: 
+    - GET: Not required (Public access)
+    - POST: Required (Admin/Superuser only)
+    Description: Get or update stock for a specific vehicle by vehicle ID
     
-    Request Body:
+    GET Request:
+    - For non-admin users: Only returns vehicles with available stock (available_quantity > 0)
+    - For admin users: Returns all vehicles regardless of stock availability
+    - Returns the same full response structure as GET VEHICLE STOCK BY ID (including other_variants, images, etc.)
+    
+    GET Response (200 OK):
+    {
+      "id": 1,
+      "vehicle": 5,
+      "vehicle_name": "EV Model Y",
+      "vehicle_model_code": "EV-BLU-60K-XYZ789",
+      "vehicle_colors": ["blue"],
+      "battery_variants": ["60kWh"],
+      "features": ["USB Charging Port", "Parking Mode"],
+      "specifications": {
+        "Battery": "60V × 50AH",
+        "Motor Power": "48V/60V/72V 1000W"
+      },
+      "description": "Electric vehicle description...",
+      "price": "75000.00",
+      "status": "available",
+      "primary_image_url": "http://example.com/media/vehicles/images/image1.jpg",
+      "images": [...],
+      "other_variants": [...],
+      "total_quantity": 20,
+      "available_quantity": 20,
+      "reserved_quantity": 0,
+      "created_at": "2026-01-06T16:00:00Z",
+      "updated_at": "2026-01-06T16:00:00Z"
+    }
+    
+    GET Error Response (404):
+    {
+      "error": "Vehicle not found"
+    }
+    OR
+    {
+      "error": "Vehicle stock not found or not available"
+    }
+    
+    POST Request Body:
     {
       "total_quantity": 20
     }
     
-    Response (200 OK):
+    POST Response (200 OK):
     {
       "id": 1,
       "vehicle": 5,
@@ -2927,20 +3056,22 @@ Super User: EVAdmin && EVAdmin@123
       "updated_at": "2026-01-06T16:00:00Z"
     }
     
-    Error Response (404):
+    POST Error Response (404):
     {
       "error": "Vehicle not found"
     }
     
-    Error Response (403):
+    POST Error Response (403):
     {
-      "detail": "Only admin users can perform this action."
+      "detail": "Only admin users can update stock."
     }
     
-    Note:
-    - If stock doesn't exist for the vehicle, it will be created automatically
-    - If stock exists, it will be updated
-    - Same validation rules apply as UPDATE VEHICLE STOCK endpoint
+    Notes:
+    - GET: If stock doesn't exist for the vehicle, it will be created automatically (with 0 quantity)
+    - POST: If stock doesn't exist for the vehicle, it will be created automatically
+    - POST: If stock exists, it will be updated
+    - POST: Same validation rules apply as UPDATE VEHICLE STOCK endpoint
+    - GET: Non-admin users will receive 404 if the vehicle has no available stock
 
 
 ================================================================================
@@ -2969,32 +3100,55 @@ Super User: EVAdmin && EVAdmin@123
     Method: GET
     URL: /api/wallet/transactions/
     Authentication: Required
-    Description: Get wallet transaction history
+    Description: Get wallet transaction history with pagination and filtering support
     
     Query Parameters:
-    - page: Page number
-    - transaction_type: Filter by type (REFERRAL_BONUS, BINARY_PAIR, EMI_DEDUCTION, PAYOUT, etc.)
-    - start_date: Filter from date (YYYY-MM-DD)
-    - end_date: Filter to date (YYYY-MM-DD)
+    - page: Page number (default: 1)
+    - page_size: Number of results per page (default: 20, max: 100)
+    - user_id: Filter by user ID (Admin only - returns 404 if user doesn't exist)
+    - transaction_type: Filter by transaction type (REFERRAL_BONUS, BINARY_PAIR, EMI_DEDUCTION, PAYOUT, etc.)
+    - start_date: Filter from date (YYYY-MM-DD format)
+    - end_date: Filter to date (YYYY-MM-DD format, includes entire day up to 23:59:59)
+    
+    Notes:
+    - Regular users can only see their own transactions
+    - Admin users can see all transactions or filter by user_id
+    - Transactions are ordered by created_at (newest first)
+    - All date filters use created_at timestamp
+    - Invalid date formats return 400 Bad Request with error message
     
     Response (200 OK):
     {
-      "count": 50,
+      "count": 150,
+      "next": "http://api/wallet/transactions/?page=2&page_size=20",
+      "previous": null,
       "results": [
         {
           "id": 1,
           "user": 1,
-          "transaction_type": "BINARY_PAIR",
+          "user_email": "user@example.com",
+          "wallet": 1,
+          "transaction_type": "BINARY_PAIR_COMMISSION",
           "amount": "500.00",
           "balance_before": "10000.00",
           "balance_after": "10500.00",
-          "description": "Binary pair earning (Pair #1)",
+          "description": "Binary pair commission (Pair #1)",
           "reference_id": 1,
           "reference_type": "binary_pair",
           "created_at": "2026-01-06T12:00:00Z"
         }
       ]
     }
+    
+    Error Responses:
+    - 400 Bad Request: Invalid date format or user_id format
+      {
+        "detail": "Invalid start_date format: '2026-01'. Use YYYY-MM-DD format."
+      }
+    - 404 Not Found: User with specified user_id doesn't exist (Admin only)
+      {
+        "detail": "User with ID 161 does not exist."
+      }
     
     Transaction Types:
     - REFERRAL_BONUS: Referral earnings
@@ -3009,6 +3163,20 @@ Super User: EVAdmin && EVAdmin@123
     - PAYOUT: Withdrawal transactions
     - DEPOSIT: Manual deposits
     - REFUND: Refund transactions
+    
+    Example Requests:
+    - Get first page with default page size:
+      GET /api/wallet/transactions/?page=1
+    - Get second page with 50 items per page:
+      GET /api/wallet/transactions/?page=2&page_size=50
+    - Filter by transaction type:
+      GET /api/wallet/transactions/?transaction_type=BINARY_PAIR_COMMISSION&page=1
+    - Filter by date range:
+      GET /api/wallet/transactions/?start_date=2026-01-01&end_date=2026-01-31&page=1
+    - Admin: Get transactions for specific user:
+      GET /api/wallet/transactions/?user_id=161&page=1&page_size=20
+    - Combined filters:
+      GET /api/wallet/transactions/?user_id=161&transaction_type=PAYOUT&start_date=2026-01-01&page=1&page_size=10
 
 
 ================================================================================

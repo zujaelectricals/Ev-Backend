@@ -65,18 +65,38 @@ class IsAdminOrReadOnly(BasePermission):
         )
 
 
+class IsAdminOrPublicReadOnly(BasePermission):
+    """
+    Custom permission class:
+    - Read operations (GET): All users (authenticated and unauthenticated)
+    - Write operations (POST, PUT, PATCH, DELETE): Only admin/superuser
+    """
+    def has_permission(self, request, view):
+        # Allow read operations for all users (including unauthenticated)
+        if request.method in ['GET', 'HEAD', 'OPTIONS']:
+            return True
+        
+        # Write operations require admin or superuser
+        return (
+            request.user and
+            request.user.is_authenticated and
+            (request.user.is_superuser or request.user.role == 'admin')
+        )
+
+
 class VehicleViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Vehicle management with JSON API
     Images are uploaded separately and linked via image_ids
     
     Permissions:
-    - All authenticated users can view vehicles (list, retrieve)
+    - All users (authenticated and unauthenticated) can view vehicles (list, retrieve)
     - Only admin/superuser can create, update, delete vehicles
     - Only admin/superuser can manage images
+    - Non-admin users only see vehicles with available stock
     """
     queryset = Vehicle.objects.all()
-    permission_classes = [IsAdminOrReadOnly]
+    permission_classes = [IsAdminOrPublicReadOnly]
     parser_classes = [parsers.JSONParser]  # JSON only - images uploaded separately
     pagination_class = VehicleGroupedPagination
     
@@ -93,8 +113,21 @@ class VehicleViewSet(viewsets.ModelViewSet):
         return VehicleSerializer
     
     def get_queryset(self):
-        """Filter vehicles based on query params"""
+        """Filter vehicles based on query params and user permissions"""
         queryset = Vehicle.objects.all().prefetch_related('images', 'stock')
+        
+        # Check if user is admin
+        is_admin = (
+            self.request.user and
+            self.request.user.is_authenticated and
+            (self.request.user.is_superuser or self.request.user.role == 'admin')
+        )
+        
+        # Filter by stock availability for non-admin users
+        # Only show vehicles with available stock (available_quantity > 0)
+        # Vehicles without stock records are excluded (not considered "in stock")
+        if not is_admin:
+            queryset = queryset.filter(stock__available_quantity__gt=0).distinct()
         
         # Filter by name (exact match or contains)
         name = self.request.query_params.get('name', None)
@@ -410,15 +443,29 @@ def upload_images(request):
 class VehicleStockViewSet(viewsets.ModelViewSet):
     """
     ViewSet for VehicleStock management
-    Admin/Superuser only - for managing vehicle inventory stock
+    - Read operations (GET): All users (authenticated and unauthenticated)
+    - Write operations (POST, PUT, PATCH, DELETE): Only admin/superuser
+    - Non-admin users only see vehicles with available stock (available_quantity > 0)
     """
     queryset = VehicleStock.objects.all()
     serializer_class = VehicleStockSerializer
-    permission_classes = [IsAdminOrReadOnly]
+    permission_classes = [IsAdminOrPublicReadOnly]
     
     def get_queryset(self):
-        """Filter stocks based on query params"""
+        """Filter stocks based on query params and user permissions"""
         queryset = VehicleStock.objects.all().select_related('vehicle').prefetch_related('vehicle__images')
+        
+        # Check if user is admin
+        is_admin = (
+            self.request.user and
+            self.request.user.is_authenticated and
+            (self.request.user.is_superuser or self.request.user.role == 'admin')
+        )
+        
+        # Filter by stock availability for non-admin users
+        # Only show vehicles with available stock (available_quantity > 0)
+        if not is_admin:
+            queryset = queryset.filter(available_quantity__gt=0)
         
         # Filter by vehicle ID
         vehicle_id = self.request.query_params.get('vehicle_id')
@@ -562,15 +609,28 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
         Override to support lookup by both VehicleStock ID and Vehicle ID.
         If the ID matches a Vehicle ID, return that vehicle's stock.
         Otherwise, try to find a VehicleStock with that ID.
+        For non-admin users, only return vehicles with available stock.
         """
         lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
         lookup_value = self.kwargs[lookup_url_kwarg]
+        
+        # Check if user is admin
+        is_admin = (
+            self.request.user and
+            self.request.user.is_authenticated and
+            (self.request.user.is_superuser or self.request.user.role == 'admin')
+        )
         
         # First, try to find by Vehicle ID
         try:
             vehicle = Vehicle.objects.prefetch_related('images').get(id=lookup_value)
             # Get or create stock for this vehicle
             stock = get_or_create_vehicle_stock(vehicle)
+            
+            # For non-admin users, check if stock is available
+            if not is_admin and stock.available_quantity <= 0:
+                raise NotFound("Vehicle stock not found or not available.")
+            
             return stock
         except Vehicle.DoesNotExist:
             pass
@@ -580,7 +640,13 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
         
         # If not found by Vehicle ID, try VehicleStock ID
         try:
-            return super().get_object()
+            stock = super().get_object()
+            
+            # For non-admin users, check if stock is available
+            if not is_admin and stock.available_quantity <= 0:
+                raise NotFound("Vehicle stock not found or not available.")
+            
+            return stock
         except VehicleStock.DoesNotExist:
             # Raise 404 with a helpful message
             raise NotFound("Vehicle stock not found. The ID may be a Vehicle ID that doesn't have stock, or an invalid VehicleStock ID.")
@@ -607,7 +673,7 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
     def by_vehicle(self, request, vehicle_id=None):
         """
         Get or update stock for a specific vehicle by vehicle ID
-        GET /api/inventory/stock/by-vehicle/{vehicle_id}/ - Get stock (all authenticated users)
+        GET /api/inventory/stock/by-vehicle/{vehicle_id}/ - Get stock (all users, but only shows vehicles with available stock for non-admin users)
         POST /api/inventory/stock/by-vehicle/{vehicle_id}/ - Update stock (admin only)
         """
         try:
@@ -621,9 +687,16 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
         # Get or create stock
         stock = get_or_create_vehicle_stock(vehicle)
         
+        # Check if user is admin
+        is_admin = (
+            request.user and
+            request.user.is_authenticated and
+            (request.user.is_superuser or request.user.role == 'admin')
+        )
+        
         # Handle POST request (update)
         if request.method == 'POST':
-            if not (request.user.is_superuser or request.user.role == 'admin'):
+            if not is_admin:
                 raise PermissionDenied("Only admin users can update stock.")
             
             # Update stock
@@ -633,5 +706,12 @@ class VehicleStockViewSet(viewsets.ModelViewSet):
             return Response(serializer.data, status=status.HTTP_200_OK)
         
         # Handle GET request (retrieve)
+        # For non-admin users, only show vehicles with available stock
+        if not is_admin and stock.available_quantity <= 0:
+            return Response(
+                {'error': 'Vehicle stock not found or not available'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
         serializer = self.get_serializer(stock, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
