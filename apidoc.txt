@@ -1896,7 +1896,259 @@ Super User: EVAdmin && EVAdmin@123
       * Referral commission is granted (if applicable)
 
 
-32. CANCEL BOOKING
+================================================================================
+                         RAZORPAY PAYMENT GATEWAY APIs
+================================================================================
+
+32. CREATE RAZORPAY ORDER
+    Method: POST
+    URL: /api/payments/create-order/
+    Authentication: Required
+    Description: Create a Razorpay order for payment. Amount is calculated server-side from database entity (booking, payout, etc.) to prevent frontend manipulation.
+    
+    Request Body:
+    {
+      "entity_type": "booking",  // "booking" or "payout"
+      "entity_id": 123            // ID of the booking or payout
+    }
+    
+    Response (201 Created):
+    {
+      "order_id": "order_ABC123XYZ",
+      "key_id": "rzp_test_1234567890",
+      "amount": 500000  // Amount in paise (₹5000.00 = 500000 paise)
+    }
+    
+    Error Response (400):
+    {
+      "entity_id": ["Booking with id 123 not found"]
+    }
+    OR
+    {
+      "error": "Amount must be greater than 0"
+    }
+    
+    Error Response (500):
+    {
+      "error": "Failed to create payment order. Please try again."
+    }
+    
+    Notes:
+    - Amount is calculated server-side from database (not trusted from frontend)
+    - For "booking": 
+      * If total_paid == 0 (first payment): Uses Booking.booking_amount (initial booking fee)
+      * If total_paid > 0 (subsequent payments): Uses Booking.remaining_amount (outstanding balance)
+    - For "payout": Uses Payout.net_amount
+    - Payment record is created with status='CREATED'
+    - Returns Razorpay order_id and key_id for frontend integration
+    - Frontend should use these values to initialize Razorpay Checkout
+    - Amount is always in paise (multiply by 100 to convert from rupees)
+
+
+33. VERIFY RAZORPAY PAYMENT
+    Method: POST
+    URL: /api/payments/verify/
+    Authentication: Required
+    Description: Verify Razorpay payment signature and update payment status. This endpoint should be called after successful payment on frontend.
+    
+    Request Body:
+    {
+      "razorpay_order_id": "order_ABC123XYZ",
+      "razorpay_payment_id": "pay_DEF456UVW",
+      "razorpay_signature": "abc123def456..."
+    }
+    
+    Response (200 OK):
+    {
+      "order_id": "order_ABC123XYZ",
+      "payment_id": "pay_DEF456UVW",
+      "status": "SUCCESS",
+      "amount": 500000,
+      "message": "Payment verified successfully"
+    }
+    
+    Error Response (400):
+    {
+      "razorpay_order_id": ["This field is required."]
+    }
+    
+    Error Response (404):
+    {
+      "error": "Payment order not found"
+    }
+    
+    Error Response (500):
+    {
+      "error": "Failed to verify payment. Please try again."
+    }
+    
+    Notes:
+    - Verifies payment signature using HMAC SHA256
+    - Updates Payment status to 'SUCCESS' if signature is valid
+    - Updates Payment status to 'FAILED' if signature is invalid
+    - Idempotent: If payment already processed, returns current status
+    - Uses atomic transactions to prevent double processing
+    - Should be called immediately after frontend payment success
+
+
+34. RAZORPAY WEBHOOK
+    Method: POST
+    URL: /api/payments/webhook/
+    Authentication: Not Required (CSRF Exempt)
+    Description: Webhook endpoint for Razorpay to send payment events. Handles payment status updates automatically.
+    
+    Headers:
+    X-Razorpay-Signature: <webhook_signature>
+    
+    Request Body (JSON):
+    {
+      "event": "payment.captured",
+      "payload": {
+        "payment": {
+          "id": "pay_DEF456UVW",
+          "order_id": "order_ABC123XYZ",
+          "status": "captured",
+          "amount": 500000,
+          ...
+        }
+      }
+    }
+    
+    Response (200 OK):
+    {
+      "status": "success"
+    }
+    
+    Notes:
+    - CSRF exempt endpoint (required for webhooks)
+    - Verifies webhook signature using RAZORPAY_WEBHOOK_SECRET
+    - Handles multiple event types:
+      * payment.captured: Updates Payment status to 'SUCCESS'
+      * payment.failed: Updates Payment status to 'FAILED'
+      * order.paid: Updates Payment status to 'SUCCESS'
+      * refund.processed: Updates Payment status to 'REFUNDED'
+      * payout.processed: Logs payout completion
+    - Stores raw webhook payload in Payment.raw_payload for audit
+    - Idempotent: Prevents duplicate processing
+    - Always returns 200 OK to prevent Razorpay retries
+    - Unknown events are logged for debugging
+    - Configure webhook URL in Razorpay Dashboard:
+      https://yourdomain.com/api/payments/webhook/
+
+
+35. CREATE RAZORPAY PAYOUT (Admin/Staff Only)
+    Method: POST
+    URL: /api/payments/create-payout/
+    Authentication: Required (Admin or Staff)
+    Description: Create Razorpay payout/transfer for an existing Payout model. Initiates bank transfer using Razorpay API.
+    
+    Request Body:
+    {
+      "payout_id": 123  // ID of the Payout model instance
+    }
+    
+    Response (201 Created):
+    {
+      "payout_id": 123,
+      "transaction_id": "pout_XYZ789ABC",
+      "status": "processing",
+      "message": "Payout created successfully"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Payout status must be \"processing\" to create Razorpay transfer. Current status: pending"
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin or staff can create payouts"
+    }
+    
+    Error Response (404):
+    {
+      "error": "Payout with id 123 not found"
+    }
+    
+    Error Response (500):
+    {
+      "error": "Failed to create payout. Please try again."
+    }
+    
+    Notes:
+    - Only admin or staff can use this endpoint
+    - Payout must have status='processing' (set by /api/payout/{id}/process/)
+    - Extracts bank details from Payout model:
+      * account_number, ifsc_code, account_holder_name, bank_name
+    - Creates Razorpay fund account and initiates payout
+    - Updates Payout.transaction_id with Razorpay payout ID
+    - Amount is converted from rupees to paise automatically
+    - Payout status will be updated by webhook or manual verification
+    - Use this endpoint after calling /api/payout/{id}/process/ to initiate actual bank transfer
+
+
+36. CREATE RAZORPAY REFUND (Admin/Staff Only)
+    Method: POST
+    URL: /api/payments/refund/
+    Authentication: Required (Admin or Staff)
+    Description: Create Razorpay refund (full or partial) for a successful payment. Only successful payments can be refunded.
+    
+    Request Body:
+    {
+      "payment_id": "pay_DEF456UVW",  // Razorpay payment_id from Payment model
+      "amount": 5000                   // Optional: Amount in rupees for partial refund (null/omitted = full refund)
+    }
+    
+    Response (201 Created):
+    {
+      "refund_id": "rfnd_GHI789JKL",
+      "payment_id": "pay_DEF456UVW",
+      "amount": 500000,  // Refund amount in paise
+      "status": "REFUNDED",
+      "message": "Refund created successfully"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Can only refund successful payments. Current status: CREATED"
+    }
+    OR
+    {
+      "error": "Payment already refunded"
+    }
+    OR
+    {
+      "amount": ["Refund amount must be greater than 0 and not exceed payment amount"]
+    }
+    
+    Error Response (403):
+    {
+      "detail": "Only admin or staff can create refunds"
+    }
+    
+    Error Response (404):
+    {
+      "error": "Payment with payment_id pay_DEF456UVW not found"
+    }
+    
+    Error Response (500):
+    {
+      "error": "Failed to create refund. Please try again."
+    }
+    
+    Notes:
+    - Only admin or staff can use this endpoint
+    - Can only refund payments with status='SUCCESS'
+    - If amount is provided: Creates partial refund
+    - If amount is omitted/null: Creates full refund
+    - Amount in request is in rupees, converted to paise automatically
+    - Updates Payment status to 'REFUNDED'
+    - Stores refund details in Payment.raw_payload
+    - Idempotent: Prevents duplicate refunds
+    - Refund status will be confirmed via webhook (refund.processed event)
+
+
+37. CANCEL BOOKING
     Method: POST
     URL: /api/booking/bookings/{id}/cancel/
     Authentication: Required
@@ -6214,6 +6466,6 @@ File upload endpoints accept multipart/form-data:
                          END OF DOCUMENTATION
 ================================================================================
 
-Last Updated: 2026-01-06
+Last Updated: 2026-01-30
 Version: 1.0.0
 

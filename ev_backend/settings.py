@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'core.compliance',
     'core.reports',
     'core.settings',
+    'core.payments',
 ]
 
 MIDDLEWARE = [
@@ -256,4 +257,9 @@ OTP_LENGTH = 6
 
 # Inventory Stock Configuration
 LOW_STOCK_THRESHOLD_PERCENT = config('LOW_STOCK_THRESHOLD_PERCENT', default=20, cast=int)
+
+# Razorpay Configuration
+RAZORPAY_KEY_ID = config('RAZORPAY_KEY_ID', default='')
+RAZORPAY_KEY_SECRET = config('RAZORPAY_KEY_SECRET', default='')
+RAZORPAY_WEBHOOK_SECRET = config('RAZORPAY_WEBHOOK_SECRET', default='')
 

@@ -1,0 +1,68 @@
+from django.db import models
+from django.contrib.contenttypes.models import ContentType
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.conf import settings
+from django.utils import timezone
+
+
+class Payment(models.Model):
+    """
+    Razorpay Payment model for tracking payment gateway transactions
+    """
+    STATUS_CHOICES = [
+        ('CREATED', 'Created'),
+        ('SUCCESS', 'Success'),
+        ('FAILED', 'Failed'),
+        ('REFUNDED', 'Refunded'),
+    ]
+    
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='razorpay_payments'
+    )
+    
+    # Razorpay identifiers
+    order_id = models.CharField(max_length=255, unique=True, db_index=True)
+    payment_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    
+    # Amount in paise (Razorpay uses paise, not rupees)
+    amount = models.IntegerField()
+    
+    # Payment status
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='CREATED', db_index=True)
+    
+    # Store raw webhook/API responses for debugging and audit
+    raw_payload = models.JSONField(null=True, blank=True)
+    
+    # Generic foreign key for flexible entity linking (booking, payout, etc.)
+    content_type = models.ForeignKey(ContentType, on_delete=models.SET_NULL, null=True, blank=True)
+    object_id = models.PositiveIntegerField(null=True, blank=True)
+    content_object = GenericForeignKey('content_type', 'object_id')
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'razorpay_payments'
+        verbose_name = 'Razorpay Payment'
+        verbose_name_plural = 'Razorpay Payments'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order_id']),
+            models.Index(fields=['payment_id']),
+            models.Index(fields=['status']),
+            models.Index(fields=['user', 'status']),
+        ]
+    
+    def __str__(self):
+        return f"Payment {self.order_id} - {self.get_status_display()} - ₹{self.amount / 100:.2f}"
+    
+    @property
+    def amount_in_rupees(self):
+        """Convert amount from paise to rupees"""
+        return self.amount / 100
+
