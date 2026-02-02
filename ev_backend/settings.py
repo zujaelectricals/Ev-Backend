@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     'core.reports',
     'core.settings',
     'core.payments',
+    'core.gallery',
 ]
 
 MIDDLEWARE = [

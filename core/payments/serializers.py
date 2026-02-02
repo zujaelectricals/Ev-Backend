@@ -12,6 +12,14 @@ class CreateOrderRequestSerializer(serializers.Serializer):
         min_value=1,
         help_text="ID of the entity (booking_id, payout_id, etc.)"
     )
+    amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=0.01,
+        help_text="Amount in rupees for partial payment (optional - if not provided, uses full remaining amount for bookings or full amount for payouts)"
+    )
 
 
 class CreateOrderResponseSerializer(serializers.Serializer):

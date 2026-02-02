@@ -252,10 +252,29 @@ class BookingViewSet(viewsets.ModelViewSet):
         from core.inventory.utils import complete_reservation
         try:
             reservation = booking.stock_reservation
-            if reservation and reservation.status == 'reserved':
-                complete_reservation(reservation)
-        except:
-            pass  # No reservation exists, skip
+            if reservation:
+                if reservation.status == 'reserved':
+                    # Reservation is still reserved, just mark as completed
+                    complete_reservation(reservation)
+                elif reservation.status == 'released':
+                    # Reservation was released (likely expired), but payment is now complete
+                    # Re-reserve the stock and mark as completed
+                    vehicle_stock = reservation.vehicle_stock
+                    if vehicle_stock.available_quantity >= reservation.quantity:
+                        # Re-reserve the stock
+                        vehicle_stock.reserve(quantity=reservation.quantity)
+                        # Mark reservation as completed
+                        reservation.status = 'completed'
+                        reservation.save(update_fields=['status', 'updated_at'])
+                    else:
+                        # Stock not available, but mark as completed anyway (booking is confirmed)
+                        reservation.status = 'completed'
+                        reservation.save(update_fields=['status', 'updated_at'])
+        except Exception as e:
+            # No reservation exists or error accessing it, skip
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"No reservation to complete for booking {booking.id}: {e}")
         
         # Note: booking.make_payment already triggers the payment_completed Celery task,
         # so we don't need to trigger it again here to avoid duplicate processing.

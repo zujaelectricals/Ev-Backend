@@ -111,7 +111,7 @@ class UserViewSet(viewsets.ModelViewSet):
         # Use select_related for ForeignKey (referred_by) and OneToOneField (binary_node)
         user = User.objects.select_related('referred_by', 'binary_node').get(pk=request.user.pk)
         # The serializer will handle OneToOneField reverse relationships (kyc, nominee) safely
-        serializer = UserProfileSerializer(user)
+        serializer = UserProfileSerializer(user, context={'request': request})
         return Response(serializer.data)
     
     @action(detail=False, methods=['put', 'patch'], permission_classes=[IsAuthenticated])
@@ -119,13 +119,13 @@ class UserViewSet(viewsets.ModelViewSet):
         """Update current user's profile"""
         # Get fresh user instance from database
         user = User.objects.select_related('referred_by').get(pk=request.user.pk)
-        serializer = UserProfileSerializer(user, data=request.data, partial=True)
+        serializer = UserProfileSerializer(user, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             serializer.save()
             # Refresh user from database to ensure all fields are loaded
             user.refresh_from_db()
             # Return updated data with fresh serializer instance
-            serializer = UserProfileSerializer(user)
+            serializer = UserProfileSerializer(user, context={'request': request})
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
@@ -521,13 +521,6 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         """Create distributor application. Approval is automatic if distributor_application_auto_approve setting is True, otherwise requires admin/staff approval."""
         user = request.user
-        
-        # Check eligibility (Active Buyer requirement removed - only KYC needed)
-        if not hasattr(user, 'kyc') or user.kyc.status != 'approved':
-            return Response(
-                {'non_field_errors': ['User must have approved KYC to apply for distributor program.']},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         
         if hasattr(user, 'distributor_application'):
             return Response(

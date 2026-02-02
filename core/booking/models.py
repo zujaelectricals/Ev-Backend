@@ -110,9 +110,13 @@ class Booking(models.Model):
         self.remaining_amount = self.total_amount - self.total_paid
         
         # Update status based on payment
-        if self.total_paid >= 5000:
-            self.status = 'active'
-            self.confirmed_at = timezone.now()
+        # Status becomes 'active' when booking_amount is paid (initial booking fee)
+        # This confirms the booking. If booking_amount < ₹5000, we still activate
+        # because the user has paid the required booking fee.
+        if self.total_paid >= self.booking_amount:
+            if self.status == 'pending':
+                self.status = 'active'
+                self.confirmed_at = timezone.now()
 
         if self.remaining_amount <= 0:
             self.status = 'completed'

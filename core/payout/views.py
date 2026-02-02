@@ -263,6 +263,11 @@ class PayoutViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         user = self.request.user
+        
+        # Check KYC approval requirement
+        if not hasattr(user, 'kyc') or user.kyc.status != 'approved':
+            raise serializers.ValidationError("User must have approved KYC to request payout.")
+        
         wallet = get_or_create_wallet(user)
         
         # Validate wallet balance

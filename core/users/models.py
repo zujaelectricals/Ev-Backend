@@ -30,6 +30,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Additional user details
     gender = models.CharField(max_length=10, choices=GENDER_CHOICES, null=True, blank=True)
     date_of_birth = models.DateField(null=True, blank=True)
+    profile_picture = models.ImageField(upload_to='profile_pictures/', null=True, blank=True)
     
     # Address fields
     address_line1 = models.TextField(blank=True)

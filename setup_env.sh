@@ -48,6 +48,15 @@ EMAIL_HOST_PASSWORD=
 SMS_API_KEY=
 SMS_API_URL=https://api.sms-provider.com
 
+# Razorpay Configuration
+# Get your keys from: https://dashboard.razorpay.com/app/keys
+# Test Mode: Use Test Key ID and Test Key Secret (for development)
+# Live Mode: Use Live Key ID and Live Key Secret (for production)
+# Toggle between Test/Live mode in Razorpay Dashboard
+RAZORPAY_KEY_ID=
+RAZORPAY_KEY_SECRET=
+RAZORPAY_WEBHOOK_SECRET=
+
 # Business Rules
 PRE_BOOKING_MIN_AMOUNT=500
 ACTIVE_BUYER_THRESHOLD=5000

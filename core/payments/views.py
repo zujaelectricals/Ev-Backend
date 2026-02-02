@@ -28,13 +28,154 @@ from .utils.signature import verify_payment_signature, verify_webhook_signature
 logger = logging.getLogger(__name__)
 
 
-def _calculate_amount_from_entity(entity_type, entity_id):
+def _process_booking_payment(razorpay_payment):
+    """
+    Process a successful Razorpay payment for a booking.
+    Creates a booking Payment record and updates the booking status.
+    
+    Args:
+        razorpay_payment: core.payments.models.Payment instance with status='SUCCESS'
+    
+    Returns:
+        tuple: (booking_payment, booking) or (None, None) if not a booking payment
+    """
+    from core.booking.models import Booking, Payment as BookingPayment
+    
+    # Check if this payment is for a booking
+    if razorpay_payment.content_type is None or razorpay_payment.object_id is None:
+        return None, None
+    
+    try:
+        booking = razorpay_payment.content_object
+        if not isinstance(booking, Booking):
+            return None, None
+    except Exception:
+        return None, None
+    
+    # Check if booking payment already exists for this Razorpay payment
+    # Check by payment_id if available, otherwise by order_id in notes
+    existing_payment = None
+    if razorpay_payment.payment_id:
+        existing_payment = BookingPayment.objects.filter(
+            booking=booking,
+            transaction_id=razorpay_payment.payment_id
+        ).first()
+    
+    if not existing_payment:
+        # Also check by order_id in notes (for cases where payment_id wasn't set yet)
+        existing_payment = BookingPayment.objects.filter(
+            booking=booking,
+            notes__icontains=f'Order: {razorpay_payment.order_id}'
+        ).first()
+    
+    if existing_payment:
+        # Payment already processed
+        logger.info(f"Booking payment already exists for Razorpay payment {razorpay_payment.order_id}")
+        return existing_payment, booking
+    
+    # Convert amount from paise to rupees (Decimal)
+    from decimal import Decimal
+    amount_rupees = Decimal(str(razorpay_payment.amount / 100))
+    
+    # Use payment_id as transaction_id if available, otherwise use order_id
+    transaction_id = razorpay_payment.payment_id or razorpay_payment.order_id
+    
+    # Create booking Payment record
+    booking_payment = BookingPayment.objects.create(
+        booking=booking,
+        user=booking.user,
+        amount=amount_rupees,
+        payment_method='online',
+        transaction_id=transaction_id,
+        status='completed',
+        notes=f'Razorpay payment - Order: {razorpay_payment.order_id}',
+    )
+    
+    # Update booking payment status and totals
+    # Note: make_payment() triggers a Celery task which may fail if Redis/RabbitMQ is not available
+    # We handle this gracefully by catching the exception
+    try:
+        booking.make_payment(amount_rupees)
+    except Exception as e:
+        # If Celery task fails, we still want to update the booking
+        # So we manually update the booking totals and status
+        logger.warning(
+            f"Celery task failed for booking {booking.id}, updating booking manually: {e}"
+        )
+        booking.total_paid += amount_rupees
+        booking.remaining_amount = booking.total_amount - booking.total_paid
+        
+        # Update status based on payment
+        # Status becomes 'active' when booking_amount is paid (initial booking fee)
+        if booking.total_paid >= booking.booking_amount:
+            if booking.status == 'pending':
+                booking.status = 'active'
+                if not booking.confirmed_at:
+                    from django.utils import timezone
+                    booking.confirmed_at = timezone.now()
+        
+        if booking.remaining_amount <= 0:
+            booking.status = 'completed'
+            if not booking.completed_at:
+                from django.utils import timezone
+                booking.completed_at = timezone.now()
+        
+        booking.save()
+        
+        # Update user's Active Buyer status
+        try:
+            booking.user.update_active_buyer_status()
+        except Exception as e2:
+            logger.warning(f"Failed to update active buyer status: {e2}")
+        
+        # Complete the stock reservation if it exists (in fallback path too)
+        from core.inventory.utils import complete_reservation
+        try:
+            reservation = booking.stock_reservation
+            if reservation and reservation.status == 'reserved':
+                complete_reservation(reservation)
+                logger.info(
+                    f"Completed stock reservation for booking {booking.id} "
+                    f"(fallback path) from Razorpay payment {razorpay_payment.order_id}"
+                )
+        except Exception as e3:
+            logger.debug(f"No reservation to complete for booking {booking.id} (fallback): {e3}")
+    
+    # Update booking's payment_gateway_ref
+    if not booking.payment_gateway_ref:
+        booking.payment_gateway_ref = razorpay_payment.order_id
+        booking.save(update_fields=['payment_gateway_ref'])
+    
+    # Complete the stock reservation if it exists
+    from core.inventory.utils import complete_reservation
+    try:
+        reservation = booking.stock_reservation
+        if reservation and reservation.status == 'reserved':
+            complete_reservation(reservation)
+            logger.info(
+                f"Completed stock reservation for booking {booking.id} "
+                f"from Razorpay payment {razorpay_payment.order_id}"
+            )
+    except Exception as e:
+        # No reservation exists or error accessing it, skip
+        logger.debug(f"No reservation to complete for booking {booking.id}: {e}")
+    
+    logger.info(
+        f"Created booking payment {booking_payment.id} for booking {booking.id} "
+        f"from Razorpay payment {razorpay_payment.order_id}"
+    )
+    
+    return booking_payment, booking
+
+
+def _calculate_amount_from_entity(entity_type, entity_id, requested_amount=None):
     """
     Calculate payable amount from database entity.
     
     Args:
         entity_type (str): Type of entity ('booking', 'payout', etc.)
         entity_id (int): ID of the entity
+        requested_amount (float, optional): Specific amount requested by user (in rupees)
     
     Returns:
         tuple: (amount_in_rupees, entity_object, content_type)
@@ -46,12 +187,32 @@ def _calculate_amount_from_entity(entity_type, entity_id):
         from core.booking.models import Booking
         try:
             booking = Booking.objects.get(id=entity_id)
-            # If no payment has been made yet, use booking_amount (initial booking fee)
-            # Otherwise, use remaining_amount (outstanding balance)
-            if booking.total_paid == 0:
-                amount = float(booking.booking_amount)
+            
+            # If user provided a specific amount, validate and use it
+            if requested_amount is not None:
+                requested_amount_float = float(requested_amount)
+                # Validate that requested amount doesn't exceed remaining amount
+                if booking.total_paid == 0:
+                    max_amount = float(booking.booking_amount)
+                else:
+                    max_amount = float(booking.remaining_amount)
+                
+                if requested_amount_float > max_amount:
+                    raise ValidationError({
+                        'amount': f'Amount cannot exceed remaining amount (₹{max_amount:.2f})'
+                    })
+                if requested_amount_float <= 0:
+                    raise ValidationError({'amount': 'Amount must be greater than 0'})
+                
+                amount = requested_amount_float
             else:
-                amount = float(booking.remaining_amount)
+                # If no payment has been made yet, use booking_amount (initial booking fee)
+                # Otherwise, use remaining_amount (outstanding balance)
+                if booking.total_paid == 0:
+                    amount = float(booking.booking_amount)
+                else:
+                    amount = float(booking.remaining_amount)
+            
             content_type = ContentType.objects.get_for_model(Booking)
             return amount, booking, content_type
         except Booking.DoesNotExist:
@@ -61,7 +222,19 @@ def _calculate_amount_from_entity(entity_type, entity_id):
         from core.payout.models import Payout
         try:
             payout = Payout.objects.get(id=entity_id)
-            amount = float(payout.net_amount)
+            # For payouts, use requested amount if provided, otherwise use full net_amount
+            if requested_amount is not None:
+                requested_amount_float = float(requested_amount)
+                max_amount = float(payout.net_amount)
+                if requested_amount_float > max_amount:
+                    raise ValidationError({
+                        'amount': f'Amount cannot exceed payout amount (₹{max_amount:.2f})'
+                    })
+                if requested_amount_float <= 0:
+                    raise ValidationError({'amount': 'Amount must be greater than 0'})
+                amount = requested_amount_float
+            else:
+                amount = float(payout.net_amount)
             content_type = ContentType.objects.get_for_model(Payout)
             return amount, payout, content_type
         except Payout.DoesNotExist:
@@ -84,10 +257,14 @@ def create_order(request):
     
     entity_type = serializer.validated_data['entity_type']
     entity_id = serializer.validated_data['entity_id']
+    requested_amount = serializer.validated_data.get('amount')
     
     try:
         # Calculate amount from database (not trusting frontend)
-        amount_rupees, entity_obj, content_type = _calculate_amount_from_entity(entity_type, entity_id)
+        # If requested_amount is provided, validate it against the entity's limits
+        amount_rupees, entity_obj, content_type = _calculate_amount_from_entity(
+            entity_type, entity_id, requested_amount=requested_amount
+        )
         
         if amount_rupees <= 0:
             raise ValidationError({'error': 'Amount must be greater than 0'})
@@ -209,6 +386,17 @@ def verify_payment(request):
                 payment.payment_id = payment_id
                 payment.save()
                 logger.info(f"Payment verified successfully: order_id={order_id}, payment_id={payment_id}")
+                
+                # Process booking payment if this is a booking payment
+                try:
+                    _process_booking_payment(payment)
+                except Exception as e:
+                    logger.error(
+                        f"Error processing booking payment for Razorpay payment {order_id}: {e}",
+                        exc_info=True
+                    )
+                    # Don't fail the verification if booking payment processing fails
+                    # The payment is already verified, booking can be updated manually if needed
             else:
                 payment.status = 'FAILED'
                 payment.save()
@@ -287,6 +475,15 @@ def webhook(request):
                         payment.raw_payload = payload
                         payment.save()
                         logger.info(f"Updated payment to SUCCESS via webhook: order_id={order_id}")
+                        
+                        # Process booking payment if this is a booking payment
+                        try:
+                            _process_booking_payment(payment)
+                        except Exception as e:
+                            logger.error(
+                                f"Error processing booking payment for webhook payment {order_id}: {e}",
+                                exc_info=True
+                            )
                 except Payment.DoesNotExist:
                     logger.warning(f"Payment not found for webhook: order_id={order_id}")
             
@@ -313,8 +510,21 @@ def webhook(request):
                     if payment.status != 'SUCCESS':
                         payment.status = 'SUCCESS'
                         payment.raw_payload = payload
+                        # Try to get payment_id from payload if available
+                        payment_data = payload.get('payload', {}).get('payment', {})
+                        if payment_data and payment_data.get('id'):
+                            payment.payment_id = payment_data.get('id')
                         payment.save()
                         logger.info(f"Updated payment to SUCCESS via order.paid webhook: order_id={order_id}")
+                        
+                        # Process booking payment if this is a booking payment
+                        try:
+                            _process_booking_payment(payment)
+                        except Exception as e:
+                            logger.error(
+                                f"Error processing booking payment for webhook payment {order_id}: {e}",
+                                exc_info=True
+                            )
                 except Payment.DoesNotExist:
                     logger.warning(f"Payment not found for webhook: order_id={order_id}")
             

@@ -507,6 +507,8 @@ Super User: EVAdmin && EVAdmin@123
      "last_name": "Doe",
      "gender": "male",
      "date_of_birth": "1990-01-01",
+     "profile_picture": null,
+     "profile_picture_url": null,
      "address_line1": "123 Main Street",
      "address_line2": "Apt 4B",
      "city": "Mumbai",
@@ -517,7 +519,7 @@ Super User: EVAdmin && EVAdmin@123
      "is_distributor": false,
      "is_active_buyer": true,
      "referral_code": "REF00001",
-     "referred_by": null,
+     "referred_by": null,  // Or nested object with id, fullname, email, profile_picture_url if referrer exists
      "kyc_status": "approved",
      "nominee_exists": true,
      "is_distributor_terms_and_conditions_accepted": true,
@@ -538,17 +540,27 @@ Super User: EVAdmin && EVAdmin@123
     - Normal Users: Can only edit their own profile
     
     Request Body (PATCH - partial update):
+    Content-Type: multipart/form-data (when uploading profile_picture)
+    OR
+    Content-Type: application/json (for other fields)
+    
     {
       "first_name": "John",
       "last_name": "Doe",
       "mobile": "+919876543210",
       "gender": "male",
       "date_of_birth": "1990-01-01",
+      "profile_picture": <file>,  // Optional: Image file (JPEG, PNG, GIF, WEBP, max 5MB)
       "address_line1": "123 Main Street",
       "city": "Mumbai",
       "state": "Maharashtra",
       "pincode": "400001"
     }
+    
+    Profile Picture Validation:
+    - Maximum file size: 5MB
+    - Allowed formats: JPEG, PNG, GIF, WEBP
+    - Field is optional
     
     Response (200 OK):
     {
@@ -559,6 +571,8 @@ Super User: EVAdmin && EVAdmin@123
       "last_name": "Doe",
       "gender": "male",
       "date_of_birth": "1990-01-01",
+      "profile_picture": "profile_pictures/user_1_profile.jpg",
+      "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_1_profile.jpg",
       ...
     }
     
@@ -608,6 +622,7 @@ Super User: EVAdmin && EVAdmin@123
          "email": "user@example.com",
          "role": "user",
          "is_active_buyer": true,
+         "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_1_profile.jpg",
          ...
        }
      ]
@@ -633,6 +648,7 @@ Super User: EVAdmin && EVAdmin@123
       "last_name": "Doe",
       "gender": "male",
       "date_of_birth": "1990-01-01",
+      "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_1_profile.jpg",
       "address_line1": "123 Main Street",
       "city": "Mumbai",
       "state": "Maharashtra",
@@ -666,6 +682,7 @@ Super User: EVAdmin && EVAdmin@123
           "role": "admin",
           "first_name": "Admin",
           "last_name": "User",
+          "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_1_profile.jpg",
           ...
         }
       ]
@@ -701,6 +718,7 @@ Super User: EVAdmin && EVAdmin@123
           "role": "staff",
           "first_name": "Staff",
           "last_name": "User",
+          "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_2_profile.jpg",
           ...
         }
       ]
@@ -759,6 +777,7 @@ Super User: EVAdmin && EVAdmin@123
           "mobile": "+919876543212",
           "role": "user",
           "first_name": "John",
+          "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_3_profile.jpg",
           "last_name": "Doe",
           "is_active_buyer": true,
           "is_distributor": false,
@@ -835,7 +854,7 @@ Super User: EVAdmin && EVAdmin@123
      "pan_number": "ABCDE1234F",
      "submitted_at": "2026-01-06T14:30:00Z",  // Updated timestamp
      "reviewed_at": null,  // Cleared on resubmission
-     "reviewed_by": null,  // Cleared on resubmission
+     "reviewed_by": null,  // Cleared on resubmission (or nested object with id, fullname, email, profile_picture_url if reviewer exists)
      "rejection_reason": "",  // Cleared on resubmission
      ...
    }
@@ -911,7 +930,12 @@ Super User: EVAdmin && EVAdmin@123
       "bank_passbook": "http://localhost:8000/media/kyc/bank_passbook/passbook_123.jpg",
       "submitted_at": "2026-01-06T12:00:00Z",
       "reviewed_at": "2026-01-06T13:00:00Z",
-      "reviewed_by": 2,
+      "reviewed_by": {      // Reviewer user details, null if not reviewed
+        "id": 2,
+        "fullname": "Admin User",
+        "email": "admin@example.com",
+        "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_2_profile.jpg"
+      },
       "rejection_reason": ""
     }
     
@@ -1016,7 +1040,12 @@ Super User: EVAdmin && EVAdmin@123
           "bank_passbook": "http://localhost:8000/media/kyc/bank_passbook/passbook_123.jpg",
           "submitted_at": "2026-01-06T12:00:00Z",
           "reviewed_at": "2026-01-06T13:00:00Z",
-          "reviewed_by": 2,
+          "reviewed_by": {      // Reviewer user details, null if not reviewed
+            "id": 2,
+            "fullname": "Admin User",
+            "email": "admin@example.com",
+            "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_2_profile.jpg"
+          },
           "rejection_reason": ""
         }
       ]
@@ -1043,12 +1072,11 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/users/distributor-application/
     Authentication: Required
-    Description: Submit distributor application form. Approval behavior depends on distributor_application_auto_approve setting in Platform Settings. User must have approved KYC to apply.
+    Description: Submit distributor application form. Approval behavior depends on distributor_application_auto_approve setting in Platform Settings.
     
     Eligibility Requirements:
-    - User must have approved KYC (kyc.status = 'approved')
     - User can only submit one application
-    - Note: Active Buyer requirement removed - only KYC verification needed
+    - Note: KYC approval is not required for distributor application. However, KYC approval is required for payout requests.
     
     Approval Behavior (controlled by distributor_application_auto_approve setting):
     - If distributor_application_auto_approve = True (default):
@@ -1100,7 +1128,7 @@ Super User: EVAdmin && EVAdmin@123
       "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
       "submitted_at": "2026-01-14T10:00:00Z",
       "reviewed_at": "2026-01-14T10:00:00Z",  // Set automatically when auto-approved
-      "reviewed_by": null,  // No reviewer since auto-approved
+      "reviewed_by": null,  // No reviewer since auto-approved (or nested object with id, fullname, email, profile_picture_url if reviewer exists)
       "rejection_reason": ""
     }
     
@@ -1126,7 +1154,7 @@ Super User: EVAdmin && EVAdmin@123
       "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
       "submitted_at": "2026-01-14T10:00:00Z",
       "reviewed_at": null,  // Not set until admin/staff approval
-      "reviewed_by": null,  // Not set until admin/staff approval
+      "reviewed_by": null,  // Not set until admin/staff approval (or nested object with id, fullname, email, profile_picture_url if reviewer exists)
       "rejection_reason": ""
     }
     
@@ -1137,12 +1165,6 @@ Super User: EVAdmin && EVAdmin@123
     - User can only start earning from binary pairs and referrals when is_distributor = True
     
     Error Response (400 Bad Request):
-    {
-      "non_field_errors": [
-        "User must have approved KYC to apply for distributor program."
-      ]
-    }
-    OR
     {
       "non_field_errors": [
         "Application already exists. You can only submit one distributor application."
@@ -1174,7 +1196,7 @@ Super User: EVAdmin && EVAdmin@123
       "is_distributor_terms_and_conditions_accepted": true,
       "submitted_at": "2026-01-14T10:00:00Z",
       "reviewed_at": "2026-01-14T10:00:00Z",  // Set automatically when auto-approved, or when manually approved/rejected
-      "reviewed_by": null,  // null for auto-approved applications, user ID for manually reviewed applications
+      "reviewed_by": null,  // null for auto-approved applications, nested object with id, fullname, email, profile_picture_url for manually reviewed applications
       "rejection_reason": ""
     }
     
@@ -1217,7 +1239,12 @@ Super User: EVAdmin && EVAdmin@123
       "tax_documents": "http://localhost:8000/media/distributor/tax_documents/tax_1.pdf",
       "submitted_at": "2026-01-14T10:00:00Z",
       "reviewed_at": "2026-01-14T11:00:00Z",
-      "reviewed_by": 2,
+      "reviewed_by": {      // Reviewer user details, null if not reviewed
+        "id": 2,
+        "fullname": "Admin User",
+        "email": "admin@example.com",
+        "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_2_profile.jpg"
+      },
       "rejection_reason": ""
     }
     
@@ -1515,7 +1542,12 @@ Super User: EVAdmin && EVAdmin@123
       "total_paid": "0.00",
       "remaining_amount": "50000.00",
       "status": "pending",  // "pending", "active", "completed", "delivered", "cancelled", "expired"
-      "referred_by": 5,     // User ID of referrer (if referral_code was used)
+      "referred_by": {      // Referrer user details (if referral_code was used), null otherwise
+        "id": 5,
+        "fullname": "Jane Smith",
+        "email": "jane@example.com",
+        "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_5_profile.jpg"
+      },
       "delivery_city": "Mumbai",
       "delivery_state": "Maharashtra",
       "delivery_pin": "400001",
@@ -1672,7 +1704,12 @@ Super User: EVAdmin && EVAdmin@123
       "delivery_state": "Maharashtra",
       "delivery_pin": "400001",
       "terms_accepted": true,
-      "referred_by": 5,
+      "referred_by": {      // Referrer user details (if referral_code was used), null otherwise
+        "id": 5,
+        "fullname": "Jane Smith",
+        "email": "jane@example.com",
+        "profile_picture_url": "http://localhost:8000/media/profile_pictures/user_5_profile.jpg"
+      },
       "join_distributor_program": false,
       "expires_at": "2026-02-05T12:00:00Z",
       "reservation_status": "reserved",  // "reserved", "released", "completed" - Stock reservation status
@@ -1904,12 +1941,27 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/payments/create-order/
     Authentication: Required
-    Description: Create a Razorpay order for payment. Amount is calculated server-side from database entity (booking, payout, etc.) to prevent frontend manipulation.
+    Description: Create a Razorpay order for payment. Supports partial payments for bookings. Amount can be specified or calculated automatically from database entity (booking, payout, etc.) to prevent frontend manipulation.
     
     Request Body:
     {
       "entity_type": "booking",  // "booking" or "payout"
-      "entity_id": 123            // ID of the booking or payout
+      "entity_id": 123,           // ID of the booking or payout
+      "amount": 5000              // Optional: Amount in rupees for partial payment. If not provided, uses full remaining amount for bookings or full amount for payouts
+    }
+    
+    Example 1 - Partial Payment (Booking):
+    {
+      "entity_type": "booking",
+      "entity_id": 123,
+      "amount": 5000  // User wants to pay ₹5000 more (partial payment)
+    }
+    
+    Example 2 - Full Remaining Amount (Booking):
+    {
+      "entity_type": "booking",
+      "entity_id": 123
+      // No amount specified - will use full remaining_amount
     }
     
     Response (201 Created):
@@ -1927,6 +1979,10 @@ Super User: EVAdmin && EVAdmin@123
     {
       "error": "Amount must be greater than 0"
     }
+    OR
+    {
+      "amount": ["Amount cannot exceed remaining amount (₹45000.00)"]
+    }
     
     Error Response (500):
     {
@@ -1934,15 +1990,20 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Notes:
-    - Amount is calculated server-side from database (not trusted from frontend)
+    - Amount validation is done server-side (not trusted from frontend)
     - For "booking": 
-      * If total_paid == 0 (first payment): Uses Booking.booking_amount (initial booking fee)
-      * If total_paid > 0 (subsequent payments): Uses Booking.remaining_amount (outstanding balance)
-    - For "payout": Uses Payout.net_amount
+      * If amount is provided: Validates that amount ≤ remaining_amount (or booking_amount if first payment)
+      * If amount is NOT provided (backward compatible):
+        - If total_paid == 0 (first payment): Uses Booking.booking_amount (initial booking fee)
+        - If total_paid > 0 (subsequent payments): Uses Booking.remaining_amount (outstanding balance)
+    - For "payout": 
+      * If amount is provided: Validates that amount ≤ net_amount
+      * If amount is NOT provided: Uses Payout.net_amount
+    - Supports partial payments: Users can pay any amount up to the remaining balance
     - Payment record is created with status='CREATED'
     - Returns Razorpay order_id and key_id for frontend integration
     - Frontend should use these values to initialize Razorpay Checkout
-    - Amount is always in paise (multiply by 100 to convert from rupees)
+    - Amount in request is in rupees, but response amount is in paise (multiply by 100 to convert from rupees)
 
 
 33. VERIFY RAZORPAY PAYMENT
@@ -3666,6 +3727,7 @@ Super User: EVAdmin && EVAdmin@123
       "user_last_name": "Doe",
       "user_city": "Mumbai",
       "user_state": "Maharashtra",
+      "user_profile_picture_url": "http://localhost:8000/media/profile_pictures/user_1_profile.jpg",
       "is_distributor": true,
       "is_active_buyer": true,
       "referral_code": "REF00001",
@@ -3984,7 +4046,7 @@ Super User: EVAdmin && EVAdmin@123
     - max_depth parameter limits how deep the tree is traversed (prevents excessive recursion)
     - Only tree owner can view their own tree structure
     - Each node includes comprehensive member details:
-      * Basic Info: user_id, user_email, user_username, user_full_name, user_mobile
+      * Basic Info: user_id, user_email, user_username, user_full_name, user_mobile, user_profile_picture_url
       * Personal Details: user_first_name, user_last_name, user_city, user_state
       * Status: is_distributor, is_active_buyer, referral_code, date_joined
       * Financial: wallet_balance, total_earnings
@@ -4456,7 +4518,11 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/payout/
     Authentication: Required
-    Description: Request payout from wallet. Processing behavior depends on payout_approval_needed setting.
+    Description: Request payout from wallet. Processing behavior depends on payout_approval_needed setting. User must have approved KYC to request payout.
+    
+    Eligibility Requirements:
+    - User must have approved KYC (kyc.status = 'approved')
+    - User must have sufficient wallet balance
     
     Request Body:
     {
@@ -4485,6 +4551,10 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Error Response (400):
+    {
+      "non_field_errors": ["User must have approved KYC to request payout."]
+    }
+    OR
     {
       "requested_amount": ["Insufficient wallet balance"]
     }
@@ -6224,6 +6294,280 @@ Super User: EVAdmin && EVAdmin@123
 
 
 ================================================================================
+                            GALLERY APIs
+================================================================================
+
+87. LIST GALLERY ITEMS
+    Method: GET
+    URL: /api/gallery/gallery-items/
+    Authentication: Not Required
+    Description: List all active gallery items (company members). Public endpoint - no authentication needed.
+    
+    Query Parameters:
+    - level: Filter by member level (optional, any text value)
+      Example: ?level=executive
+      Example: ?level=senior manager
+    - status: Filter by status (optional, Admin/Staff only)
+      Values: "true", "false", "1", "0", "yes", "no"
+      Example: ?status=true
+    
+    Response (200 OK):
+    [
+      {
+        "id": 1,
+        "title": "John Doe",
+        "image": "/media/gallery/images/photo.jpg",
+        "image_url": "http://localhost:8000/media/gallery/images/photo.jpg",
+        "caption": "CEO and Founder",
+        "level": "executive",
+        "order": 1,
+        "status": true,
+        "created_by": 1,
+        "created_by_username": "admin",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z"
+      },
+      {
+        "id": 2,
+        "title": "Jane Smith",
+        "image": "/media/gallery/images/photo2.jpg",
+        "image_url": "http://localhost:8000/media/gallery/images/photo2.jpg",
+        "caption": "Chief Technology Officer",
+        "level": "executive",
+        "level_display": "Executive",
+        "order": 2,
+        "status": true,
+        "created_by": 1,
+        "created_by_username": "admin",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z"
+      }
+    ]
+    
+    Notes:
+    - Public users only see items with status=true (active items)
+    - Admin/Staff users can see all items (active and inactive)
+    - Results are ordered by level, then order, then created_at
+    - image_url provides full absolute URL for the image
+    - level field accepts any text value (e.g., "executive", "manager", "senior manager", "director", etc.)
+
+
+88. GET GALLERY ITEM BY ID
+    Method: GET
+    URL: /api/gallery/gallery-items/{id}/
+    Authentication: Not Required
+    Description: Retrieve a specific gallery item by ID. Public endpoint - no authentication needed.
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "title": "John Doe",
+      "image": "/media/gallery/images/photo.jpg",
+      "image_url": "http://localhost:8000/media/gallery/images/photo.jpg",
+      "caption": "CEO and Founder",
+      "level": "executive",
+      "level_display": "Executive",
+      "order": 1,
+      "status": true,
+      "created_by": 1,
+      "created_by_username": "admin",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+    
+    Error Response (404):
+    {
+      "detail": "Not found."
+    }
+    
+    Notes:
+    - Public users can only retrieve active items (status=true)
+    - Admin/Staff users can retrieve any item (active or inactive)
+
+
+89. CREATE GALLERY ITEM
+    Method: POST
+    URL: /api/gallery/gallery-items/
+    Authentication: Required (Admin/Staff only)
+    Description: Create a new gallery item (company member). Only Admin/Staff can create items.
+    
+    Content-Type: multipart/form-data
+    
+    Request Body (form-data):
+    - title: "John Doe" (required, max 200 characters)
+    - image: @photo.jpg (required, image file: JPEG, PNG, GIF, WEBP)
+    - caption: "CEO and Founder" (optional, text description)
+    - level: "executive" (required, any text value, max 100 characters)
+    - order: 1 (optional, integer, default: 0, lower numbers appear first)
+    - status: true (optional, boolean, default: true)
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "title": "John Doe",
+      "image": "/media/gallery/images/photo.jpg",
+      "image_url": "http://localhost:8000/media/gallery/images/photo.jpg",
+      "caption": "CEO and Founder",
+      "level": "executive",
+      "level_display": "Executive",
+      "order": 1,
+      "status": true,
+      "created_by": 1,
+      "created_by_username": "admin",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "title": ["This field is required."],
+      "image": ["This field is required."],
+      "level": ["This field is required."]
+    }
+    OR
+    {
+      "image": ["Image must be a JPEG, PNG, GIF, or WEBP file."]
+    }
+    
+    Error Response (403):
+    {
+      "detail": "You do not have permission to perform this action."
+    }
+    
+    Notes:
+    - Only Admin/Staff/Superuser can create gallery items
+    - created_by is automatically set to the authenticated user
+    - Image files must be valid image formats (JPEG, PNG, GIF, WEBP)
+    - Maximum file size: 20MB (Django default)
+    - Level field accepts any text value (e.g., "executive", "manager", "senior manager", "director", "team lead", etc.)
+    - Maximum length for level: 100 characters
+    - Order field determines display order within the same level (lower numbers appear first)
+
+
+90. UPDATE GALLERY ITEM
+    Method: PUT
+    URL: /api/gallery/gallery-items/{id}/
+    Authentication: Required (Admin/Staff only)
+    Description: Update a gallery item. Full update - all fields must be provided. Only Admin/Staff can update items.
+    
+    Content-Type: multipart/form-data
+    
+    Request Body (form-data):
+    - title: "John Doe" (required)
+    - image: @photo.jpg (required, can be same or new image)
+    - caption: "CEO and Founder" (optional)
+    - level: "executive" (required)
+    - order: 1 (optional)
+    - status: true (optional)
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "title": "John Doe",
+      "image": "/media/gallery/images/photo_updated.jpg",
+      "image_url": "http://localhost:8000/media/gallery/images/photo_updated.jpg",
+      "caption": "CEO and Founder - Updated",
+      "level": "executive",
+      "level_display": "Executive",
+      "order": 2,
+      "status": true,
+      "created_by": 1,
+      "created_by_username": "admin",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T12:00:00Z"
+    }
+    
+    Error Response (403):
+    {
+      "detail": "You do not have permission to perform this action."
+    }
+    
+    Error Response (404):
+    {
+      "detail": "Not found."
+    }
+    
+    Notes:
+    - PUT requires all fields to be provided
+    - Use PATCH for partial updates
+    - Only Admin/Staff/Superuser can update gallery items
+
+
+91. PARTIAL UPDATE GALLERY ITEM
+    Method: PATCH
+    URL: /api/gallery/gallery-items/{id}/
+    Authentication: Required (Admin/Staff only)
+    Description: Partially update a gallery item. Only provided fields will be updated. Only Admin/Staff can update items.
+    
+    Content-Type: multipart/form-data
+    
+    Request Body (form-data, all fields optional):
+    - title: "John Doe" (optional)
+    - image: @photo.jpg (optional)
+    - caption: "CEO and Founder" (optional)
+    - level: "executive" (optional)
+    - order: 1 (optional)
+    - status: true (optional)
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "title": "John Doe",
+      "image": "/media/gallery/images/photo.jpg",
+      "image_url": "http://localhost:8000/media/gallery/images/photo.jpg",
+      "caption": "CEO and Founder - Updated",
+      "level": "executive",
+      "level_display": "Executive",
+      "order": 1,
+      "status": true,
+      "created_by": 1,
+      "created_by_username": "admin",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T12:00:00Z"
+    }
+    
+    Error Response (403):
+    {
+      "detail": "You do not have permission to perform this action."
+    }
+    
+    Error Response (404):
+    {
+      "detail": "Not found."
+    }
+    
+    Notes:
+    - PATCH allows partial updates - only provide fields you want to change
+    - Only Admin/Staff/Superuser can update gallery items
+    - Image can be updated without changing other fields
+
+
+92. DELETE GALLERY ITEM
+    Method: DELETE
+    URL: /api/gallery/gallery-items/{id}/
+    Authentication: Required (Admin/Staff only)
+    Description: Delete a gallery item. Only Admin/Staff can delete items.
+    
+    Response (204 No Content):
+    (Empty response body)
+    
+    Error Response (403):
+    {
+      "detail": "You do not have permission to perform this action."
+    }
+    
+    Error Response (404):
+    {
+      "detail": "Not found."
+    }
+    
+    Notes:
+    - Only Admin/Staff/Superuser can delete gallery items
+    - Deletion is permanent - item cannot be recovered
+    - Associated image file will be deleted from storage
+
+
+================================================================================
                          AUTHENTICATION HEADERS
 ================================================================================
 
@@ -6466,6 +6810,6 @@ File upload endpoints accept multipart/form-data:
                          END OF DOCUMENTATION
 ================================================================================
 
-Last Updated: 2026-01-30
-Version: 1.0.0
+Last Updated: 2026-02-02
+Version: 1.1.0
 

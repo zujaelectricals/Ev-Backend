@@ -10,10 +10,20 @@ class ReferredUserSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     fullname = serializers.SerializerMethodField()
     email = serializers.EmailField()
+    profile_picture_url = serializers.SerializerMethodField()
     
     def get_fullname(self, obj):
         """Get full name from first_name and last_name"""
         return obj.get_full_name() if obj else None
+    
+    def get_profile_picture_url(self, obj):
+        """Get absolute URL for profile picture"""
+        if obj and obj.profile_picture:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.profile_picture.url)
+            return obj.profile_picture.url
+        return None
     
     def to_representation(self, instance):
         """Handle None values"""

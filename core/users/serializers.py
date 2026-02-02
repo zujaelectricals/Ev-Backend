@@ -9,10 +9,20 @@ class ReferredByUserSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     fullname = serializers.SerializerMethodField()
     email = serializers.EmailField()
+    profile_picture_url = serializers.SerializerMethodField()
     
     def get_fullname(self, obj):
         """Get full name from first_name and last_name"""
         return obj.get_full_name() if obj else None
+    
+    def get_profile_picture_url(self, obj):
+        """Get absolute URL for profile picture"""
+        if obj and obj.profile_picture:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.profile_picture.url)
+            return obj.profile_picture.url
+        return None
     
     def to_representation(self, instance):
         """Handle None values"""
@@ -26,10 +36,20 @@ class ReviewedByUserSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     fullname = serializers.SerializerMethodField()
     email = serializers.EmailField()
+    profile_picture_url = serializers.SerializerMethodField()
     
     def get_fullname(self, obj):
         """Get full name from first_name and last_name"""
         return obj.get_full_name() if obj else None
+    
+    def get_profile_picture_url(self, obj):
+        """Get absolute URL for profile picture"""
+        if obj and obj.profile_picture:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.profile_picture.url)
+            return obj.profile_picture.url
+        return None
     
     def to_representation(self, instance):
         """Handle None values"""
@@ -40,12 +60,13 @@ class ReviewedByUserSerializer(serializers.Serializer):
 
 class UserSerializer(serializers.ModelSerializer):
     kyc_status = serializers.SerializerMethodField()
+    profile_picture_url = serializers.SerializerMethodField()
     
     class Meta:
         model = User
         fields = ('id', 'email', 'mobile', 'first_name', 'last_name',
-                  'gender', 'date_of_birth', 'address_line1', 'address_line2',
-                  'city', 'state', 'pincode', 'country',
+                  'gender', 'date_of_birth', 'profile_picture_url',
+                  'address_line1', 'address_line2', 'city', 'state', 'pincode', 'country',
                   'role', 'is_distributor', 'is_active_buyer', 'referral_code', 
                   'date_joined', 'last_login', 'kyc_status')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer', 
@@ -57,6 +78,15 @@ class UserSerializer(serializers.ModelSerializer):
         # This avoids triggering unnecessary database queries
         if hasattr(obj, 'kyc') and obj.kyc is not None:
             return obj.kyc.status
+        return None
+    
+    def get_profile_picture_url(self, obj):
+        """Get absolute URL for profile picture"""
+        if obj.profile_picture:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.profile_picture.url)
+            return obj.profile_picture.url
         return None
 
 
@@ -72,12 +102,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
     carry_forward_right = serializers.SerializerMethodField()
     is_distributor_terms_and_conditions_accepted = serializers.SerializerMethodField()
     distributor_application_status = serializers.SerializerMethodField()
+    profile_picture_url = serializers.SerializerMethodField()
     
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'mobile', 'first_name', 'last_name',
-                  'gender', 'date_of_birth', 'address_line1', 'address_line2',
-                  'city', 'state', 'pincode', 'country',
+                  'gender', 'date_of_birth', 'profile_picture', 'profile_picture_url',
+                  'address_line1', 'address_line2', 'city', 'state', 'pincode', 'country',
                   'role', 'is_distributor', 'is_active_buyer', 'referral_code',
                   'referred_by', 'kyc_status', 'nominee_exists', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
@@ -158,6 +189,48 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if hasattr(obj, 'distributor_application') and obj.distributor_application is not None:
             return obj.distributor_application.status
         return None
+    
+    def get_profile_picture_url(self, obj):
+        """Get absolute URL for profile picture"""
+        if obj.profile_picture:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.profile_picture.url)
+            return obj.profile_picture.url
+        return None
+    
+    def validate_profile_picture(self, value):
+        """Validate profile picture file"""
+        if value is None:
+            return value
+        
+        max_size = 5 * 1024 * 1024  # 5MB
+        content_type = getattr(value, 'content_type', '')
+        
+        # Check file size
+        if value.size > max_size:
+            raise serializers.ValidationError('Profile picture file size must be <= 5MB')
+        
+        # Check file type - only allow images
+        valid_image_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+        
+        if content_type:
+            if content_type not in valid_image_types:
+                raise serializers.ValidationError(
+                    'Profile picture must be an image (JPEG, PNG, GIF, WEBP).'
+                )
+        else:
+            # Fallback: check file extension if content_type is not available
+            file_name = getattr(value, 'name', '')
+            if file_name:
+                ext = file_name.lower().split('.')[-1]
+                valid_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp']
+                if ext not in valid_extensions:
+                    raise serializers.ValidationError(
+                        'Profile picture must be an image (JPEG, PNG, GIF, WEBP).'
+                    )
+        
+        return value
 
 
 class KYCSerializer(serializers.ModelSerializer):

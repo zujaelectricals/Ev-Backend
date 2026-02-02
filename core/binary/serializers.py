@@ -47,6 +47,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     right_child = serializers.SerializerMethodField()
     left_side_members = serializers.SerializerMethodField()
     right_side_members = serializers.SerializerMethodField()
+    user_profile_picture_url = serializers.SerializerMethodField()
     
     class Meta:
         model = BinaryNode
@@ -58,7 +59,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             'total_referrals', 'total_amount', 'tds_current', 'net_amount_total',
             'parent', 'parent_name', 'side', 'level', 'left_count', 'right_count',
             'binary_commission_activated', 'activation_timestamp', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
-            'created_at', 'updated_at'
+            'user_profile_picture_url', 'created_at', 'updated_at'
         ]
         read_only_fields = ('user', 'created_at', 'updated_at')
     
@@ -71,11 +72,23 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         self.page_size = kwargs.pop('page_size', None)
         self.request = kwargs.pop('request', None)
         super().__init__(*args, **kwargs)
+        # Ensure request is in context for nested serializers
+        if self.request and 'request' not in self.context:
+            self.context['request'] = self.request
     
     def get_user_full_name(self, obj):
         """Get user's full name"""
         if obj.user:
             return obj.user.get_full_name() or obj.user.username
+        return None
+    
+    def get_user_profile_picture_url(self, obj):
+        """Get absolute URL for user profile picture"""
+        if obj.user and obj.user.profile_picture:
+            request = self.request or self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.user.profile_picture.url)
+            return obj.user.profile_picture.url
         return None
     
     def get_parent_name(self, obj):
