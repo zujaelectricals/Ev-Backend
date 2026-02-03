@@ -400,12 +400,6 @@ class DistributorApplicationSerializer(serializers.ModelSerializer):
         """Validate eligibility before allowing application"""
         user = self.context['request'].user
         
-        # Check if user has approved KYC (Active Buyer requirement removed)
-        if not hasattr(user, 'kyc') or user.kyc.status != 'approved':
-            raise serializers.ValidationError({
-                'non_field_errors': ['User must have approved KYC to apply for distributor program.']
-            })
-        
         # Check if application already exists
         if hasattr(user, 'distributor_application'):
             raise serializers.ValidationError({

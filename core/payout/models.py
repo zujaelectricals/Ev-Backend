@@ -107,3 +107,38 @@ class PayoutTransaction(models.Model):
     def __str__(self):
         return f"Payout Transaction - {self.user.username} (₹{self.amount})"
 
+
+class PayoutWebhookLog(models.Model):
+    """
+    Webhook event log for idempotency and audit trail
+    """
+    STATUS_CHOICES = [
+        ('received', 'Received'),
+        ('processed', 'Processed'),
+        ('failed', 'Failed'),
+    ]
+    
+    event_id = models.CharField(max_length=255, unique=True, db_index=True, help_text="Razorpay event ID")
+    event_type = models.CharField(max_length=100, db_index=True, help_text="Event type: payout.processed, payout.failed, fund_account.verified")
+    payload = models.JSONField(help_text="Full webhook payload")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='received', db_index=True)
+    error_message = models.TextField(blank=True, help_text="Error details if processing failed")
+    
+    processed_at = models.DateTimeField(null=True, blank=True, help_text="When event was processed")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'payout_webhook_logs'
+        verbose_name = 'Payout Webhook Log'
+        verbose_name_plural = 'Payout Webhook Logs'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['event_id']),
+            models.Index(fields=['event_type', 'status']),
+            models.Index(fields=['status', 'created_at']),
+        ]
+    
+    def __str__(self):
+        return f"Webhook {self.event_type} - {self.event_id} ({self.status})"
+

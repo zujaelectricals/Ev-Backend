@@ -2088,13 +2088,13 @@ Super User: EVAdmin && EVAdmin@123
       * payment.failed: Updates Payment status to 'FAILED'
       * order.paid: Updates Payment status to 'SUCCESS'
       * refund.processed: Updates Payment status to 'REFUNDED'
-      * payout.processed: Logs payout completion
     - Stores raw webhook payload in Payment.raw_payload for audit
     - Idempotent: Prevents duplicate processing
     - Always returns 200 OK to prevent Razorpay retries
     - Unknown events are logged for debugging
     - Configure webhook URL in Razorpay Dashboard:
       https://yourdomain.com/api/payments/webhook/
+    - Note: Payout events are handled by separate endpoint: /api/payouts/webhook/
 
 
 35. CREATE RAZORPAY PAYOUT (Admin/Staff Only)
@@ -2209,7 +2209,131 @@ Super User: EVAdmin && EVAdmin@123
     - Refund status will be confirmed via webhook (refund.processed event)
 
 
-37. CANCEL BOOKING
+37. RAZORPAYX PAYOUT WEBHOOK
+    Method: POST
+    URL: /api/payouts/webhook/
+    Authentication: Not Required (CSRF Exempt)
+    Description: Webhook endpoint for RazorpayX to send payout events. Handles payout status updates automatically via Celery tasks.
+    
+    Headers:
+    X-Razorpay-Signature: <webhook_signature>
+    
+    Request Body (JSON) - payout.processed:
+    {
+      "event": "payout.processed",
+      "event_id": "evt_ABC123XYZ",
+      "payload": {
+        "payout": {
+          "id": "pout_DEF456UVW",
+          "entity": "payout",
+          "fund_account_id": "fa_GHI789JKL",
+          "amount": 475000,
+          "currency": "INR",
+          "fees": 0,
+          "tax": 0,
+          "status": "processed",
+          "utr": "UTR123456789",
+          "mode": "NEFT",
+          "purpose": "payout",
+          "reference_id": "payout_123",
+          "narration": "Payout for user testuser",
+          "created_at": 1640995200
+        }
+      }
+    }
+    
+    Request Body (JSON) - payout.failed:
+    {
+      "event": "payout.failed",
+      "event_id": "evt_ABC123XYZ",
+      "payload": {
+        "payout": {
+          "id": "pout_DEF456UVW",
+          "entity": "payout",
+          "fund_account_id": "fa_GHI789JKL",
+          "amount": 475000,
+          "currency": "INR",
+          "status": "failed",
+          "failure_reason": "Insufficient balance",
+          "created_at": 1640995200
+        }
+      }
+    }
+    
+    Request Body (JSON) - fund_account.verified:
+    {
+      "event": "fund_account.verified",
+      "event_id": "evt_ABC123XYZ",
+      "payload": {
+        "fund_account": {
+          "id": "fa_GHI789JKL",
+          "entity": "fund_account",
+          "contact_id": "cont_ABC123",
+          "account_type": "bank_account",
+          "bank_account": {
+            "ifsc": "HDFC0001234",
+            "bank_name": "HDFC Bank",
+            "name": "Test User",
+            "account_number": "1234567890"
+          },
+          "active": true
+        }
+      }
+    }
+    
+    Response (200 OK):
+    {
+      "status": "success"
+    }
+    
+    Response (200 OK) - Duplicate Event:
+    {
+      "status": "success",
+      "message": "Event already processed"
+    }
+    
+    Error Response (400):
+    {
+      "error": "Missing signature"
+    }
+    OR
+    {
+      "error": "Invalid signature"
+    }
+    OR
+    {
+      "error": "Invalid JSON"
+    }
+    OR
+    {
+      "error": "Missing payout ID in payout.processed event"
+    }
+    
+    Notes:
+    - CSRF exempt endpoint (required for webhooks)
+    - Verifies webhook signature using RAZORPAY_PAYOUT_WEBHOOK_SECRET (separate from payments webhook)
+    - Handles multiple event types:
+      * payout.processed: Enqueues Celery task to mark payout as completed
+        - Updates Payout status to 'completed'
+        - Sets completed_at timestamp
+        - Creates PayoutTransaction record
+      * payout.failed: Enqueues Celery task to mark payout as rejected
+        - Updates Payout status to 'rejected'
+        - Stores failure reason
+        - Refunds locked wallet amount (adds back to wallet)
+        - Creates WalletTransaction for refund
+      * fund_account.verified: Logs event (future implementation)
+    - Idempotent: Uses PayoutWebhookLog to prevent duplicate processing
+    - Always returns 200 OK to prevent Razorpay from retrying
+    - Heavy processing (wallet updates, DB operations) handled via Celery tasks
+    - Webhook endpoint returns quickly after enqueuing tasks
+    - Configure webhook URL in RazorpayX Dashboard:
+      https://yourdomain.com/api/payouts/webhook/
+    - Separate from payments webhook (/api/payments/webhook/)
+    - Payout lookup: Matches Razorpay payout ID against Payout.transaction_id field
+
+
+38. CANCEL BOOKING
     Method: POST
     URL: /api/booking/bookings/{id}/cancel/
     Authentication: Required
@@ -3743,6 +3867,8 @@ Super User: EVAdmin && EVAdmin@123
       "right_count": 3,
       "binary_commission_activated": true,
       "activation_timestamp": "2026-01-06T12:00:00Z",
+      "counts_for_activation": true,
+      "eligible_for_pairing": false,
       "left_side_members": {
         "count": 50,
         "page": 1,
@@ -3775,6 +3901,8 @@ Super User: EVAdmin && EVAdmin@123
             "level": 2,
             "left_count": 0,
             "right_count": 0,
+            "counts_for_activation": false,
+            "eligible_for_pairing": false,
             "created_at": "2026-01-08T14:00:00Z",
             "updated_at": "2026-01-08T14:00:00Z"
           }
@@ -3815,6 +3943,8 @@ Super User: EVAdmin && EVAdmin@123
             "level": 2,
             "left_count": 0,
             "right_count": 0,
+            "counts_for_activation": false,
+            "eligible_for_pairing": false,
             "created_at": "2026-01-10T11:00:00Z",
             "updated_at": "2026-01-10T11:00:00Z"
           }
@@ -3845,6 +3975,8 @@ Super User: EVAdmin && EVAdmin@123
         "level": 1,
         "left_count": 2,
         "right_count": 1,
+        "counts_for_activation": true,
+        "eligible_for_pairing": true,
         "left_child": {
           "id": 4,
           "user_id": 4,
@@ -3869,6 +4001,8 @@ Super User: EVAdmin && EVAdmin@123
           "level": 2,
           "left_count": 0,
           "right_count": 0,
+          "counts_for_activation": false,
+          "eligible_for_pairing": false,
           "left_child": null,
           "right_child": null,
           "created_at": "2026-01-08T14:00:00Z",
@@ -3898,6 +4032,8 @@ Super User: EVAdmin && EVAdmin@123
           "level": 2,
           "left_count": 0,
           "right_count": 0,
+          "counts_for_activation": false,
+          "eligible_for_pairing": false,
           "left_child": null,
           "right_child": null,
           "created_at": "2026-01-09T09:00:00Z",
@@ -3930,6 +4066,8 @@ Super User: EVAdmin && EVAdmin@123
         "level": 1,
         "left_count": 1,
         "right_count": 2,
+        "counts_for_activation": true,
+        "eligible_for_pairing": true,
         "left_child": {
           "id": 6,
           "user_id": 6,
@@ -3954,6 +4092,8 @@ Super User: EVAdmin && EVAdmin@123
           "level": 2,
           "left_count": 0,
           "right_count": 0,
+          "counts_for_activation": false,
+          "eligible_for_pairing": false,
           "left_child": null,
           "right_child": null,
           "created_at": "2026-01-10T11:00:00Z",
@@ -3983,6 +4123,8 @@ Super User: EVAdmin && EVAdmin@123
           "level": 2,
           "left_count": 0,
           "right_count": 0,
+          "counts_for_activation": false,
+          "eligible_for_pairing": false,
           "left_child": null,
           "right_child": null,
           "created_at": "2026-01-11T08:00:00Z",
@@ -4053,10 +4195,26 @@ Super User: EVAdmin && EVAdmin@123
       * Activity: total_bookings, total_binary_pairs
       * Tree Position: parent, side, level, left_count, right_count
       * Binary Commission: binary_commission_activated, activation_timestamp (timestamp when activation occurred)
+      * Eligibility Fields:
+        - counts_for_activation (boolean): Indicates if this user counts toward binary activation calculation
+          * true: User has activation payment (total_paid >= activation_amount), counts toward activation
+          * false: User does not have activation payment, does NOT count toward activation
+          * Only active buyers (with activation payment) count toward binary activation threshold
+        - eligible_for_pairing (boolean): Indicates if this user is eligible for binary pair matching
+          * true: User has activation payment AND at least one ancestor has binary commission activated
+          * false: User does not have activation payment OR no ancestor has binary commission activated
+          * Only eligible users are considered when creating binary pairs
       * Children: left_child, right_child (recursive structure)
       * Side Members: left_side_members, right_side_members (paginated or flat lists of all members on each side)
-    - Pair Matching Eligibility: Only members created at or after activation_timestamp are eligible for pairing
-      * Pre-activation members (1st and 2nd) are excluded, 3rd member (activation trigger) and all subsequent members are included
+    - Binary Activation Rules:
+      * Only users with activation payment (counts_for_activation=true) count toward binary activation
+      * Users without activation payment are visible in tree but do NOT count toward activation threshold
+      * When a user later becomes active buyer (makes payment >= activation_amount), retroactive commission processing occurs:
+        - If ancestor hasn't activated: User's direct commission is paid retroactively
+        - If ancestor already activated: User becomes eligible for future pairing
+    - Pair Matching Eligibility: Only members with activation payment (eligible_for_pairing=true) are considered for pairing
+      * Members created at or after activation_timestamp AND with activation payment are eligible
+      * Pre-activation members and members without activation payment are excluded from pairing
     - left_side_members: Paginated object or array containing all members on the left side with full details (all levels)
     - right_side_members: Paginated object or array containing all members on the right side with full details (all levels)
     - left_child/right_child: Recursive tree structure showing parent-child relationships (conditionally included based on side filter)
@@ -6685,7 +6843,7 @@ Standard Error Format:
 10. Stock Reservation: Bookings automatically reserve vehicle stock; released if payment not confirmed within timeout
 11. Reservation Timeout: Configurable via Platform Settings API (stored in minutes, null = never expires)
 12. Distributor Requirement: Only approved distributors can earn from binary pairs, direct user commissions, and referral bonuses
-13. Distributor Eligibility: User must have approved KYC to apply for distributor program (Active Buyer requirement removed)
+13. Distributor Eligibility: Users can apply for distributor program without KYC approval. However, KYC approval is required for payout requests.
 14. Distributor Application: Each user can submit only one distributor application. Approval behavior is controlled by distributor_application_auto_approve setting in Platform Settings. If true (default): application is automatically approved upon creation and user becomes distributor immediately. If false: application remains pending and requires admin/staff approval via update-status endpoint. Admin/staff can reject applications regardless of setting.
 15. Binary Tree Placement: Users are NOT automatically placed in binary tree during booking creation. Placement APIs can ONLY be called AFTER user has successful payment. Referrers must place users AFTER payment via /api/binary/nodes/auto_place_pending/ (automatic) or /api/binary/nodes/place_user/ (manual). Commission is paid when placement happens (regardless of when payment was completed). Auto-placement uses left-priority algorithm: 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain. Referral-based override: If using specific parent's code, place in that parent's tree. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side). Parents can choose side for direct referrals and swap/move direct children via API endpoints.
 16. Manual Tree Placement: Tree owners can manually place/move users in their tree via placement APIs; only users who used referrer's code can be placed

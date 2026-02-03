@@ -48,6 +48,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     left_side_members = serializers.SerializerMethodField()
     right_side_members = serializers.SerializerMethodField()
     user_profile_picture_url = serializers.SerializerMethodField()
+    counts_for_activation = serializers.SerializerMethodField()
+    eligible_for_pairing = serializers.SerializerMethodField()
     
     class Meta:
         model = BinaryNode
@@ -59,7 +61,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             'total_referrals', 'total_amount', 'tds_current', 'net_amount_total',
             'parent', 'parent_name', 'side', 'level', 'left_count', 'right_count',
             'binary_commission_activated', 'activation_timestamp', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
-            'user_profile_picture_url', 'created_at', 'updated_at'
+            'user_profile_picture_url', 'counts_for_activation', 'eligible_for_pairing', 'created_at', 'updated_at'
         ]
         read_only_fields = ('user', 'created_at', 'updated_at')
     
@@ -90,6 +92,39 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.user.profile_picture.url)
             return obj.user.profile_picture.url
         return None
+    
+    def get_counts_for_activation(self, obj):
+        """
+        Indicates if this user counts toward binary activation calculation
+        Only users with activation payment count toward activation
+        """
+        if not obj.user:
+            return False
+        from core.binary.utils import has_activation_payment
+        return has_activation_payment(obj.user)
+    
+    def get_eligible_for_pairing(self, obj):
+        """
+        Indicates if this user is eligible for binary pair matching
+        User must have activation payment AND ancestor must have binary commission activated
+        """
+        if not obj.user:
+            return False
+        
+        # Check if user has activation payment
+        from core.binary.utils import has_activation_payment
+        if not has_activation_payment(obj.user):
+            return False
+        
+        # Check if any ancestor has binary commission activated
+        # Traverse up the tree to find root or activated ancestor
+        current = obj.parent
+        while current:
+            if current.binary_commission_activated:
+                return True
+            current = current.parent
+        
+        return False
     
     def get_parent_name(self, obj):
         """Get parent's full name"""
@@ -345,6 +380,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                     'level': child.level,
                     'left_count': child.left_count,
                     'right_count': child.right_count,
+                    'counts_for_activation': self._get_counts_for_activation(child),
+                    'eligible_for_pairing': self._get_eligible_for_pairing(child),
                     'created_at': child.created_at,
                     'updated_at': child.updated_at
                 }
@@ -495,6 +532,32 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             total = binary_net + direct_commissions_net + initial_bonus_net
             return str(total)
         return "0.00"
+    
+    def _get_counts_for_activation(self, node):
+        """Helper method to check if user counts toward binary activation"""
+        if not node or not node.user:
+            return False
+        from core.binary.utils import has_activation_payment
+        return has_activation_payment(node.user)
+    
+    def _get_eligible_for_pairing(self, node):
+        """Helper method to check if user is eligible for binary pair matching"""
+        if not node or not node.user:
+            return False
+        
+        # Check if user has activation payment
+        from core.binary.utils import has_activation_payment
+        if not has_activation_payment(node.user):
+            return False
+        
+        # Check if any ancestor has binary commission activated
+        current = node.parent
+        while current:
+            if current.binary_commission_activated:
+                return True
+            current = current.parent
+        
+        return False
     
     def _paginate_side_members(self, members, side_name):
         """

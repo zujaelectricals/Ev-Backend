@@ -2,9 +2,12 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 from django.conf import settings
+import logging
 from .models import Payout
 from core.wallet.utils import deduct_wallet_balance
 from core.booking.models import Booking
+
+logger = logging.getLogger(__name__)
 
 
 def auto_fill_emi_from_payout(user, payout_amount):
@@ -105,14 +108,80 @@ def process_payout(payout):
         payout.processed_at = timezone.now()
         payout.save()
         
-        # TODO: Future payment gateway integration
-        # After this point, integrate with payment gateway:
-        # 1. Call payment gateway API with payout details
-        # 2. Store gateway transaction reference
-        # 3. Handle gateway response:
-        #    - If synchronous success: call complete_payout() automatically
-        #    - If asynchronous: wait for webhook to call complete_payout()
-        #    - If failure: set status to 'rejected' and refund wallet
+        # Automatically trigger Razorpay payout API
+        try:
+            from core.payments.utils.razorpay_client import get_razorpay_client
+            
+            # Extract bank details from payout model
+            account_number = payout.account_number
+            ifsc_code = payout.ifsc_code
+            account_holder_name = payout.account_holder_name
+            
+            # Convert net_amount to paise (Razorpay uses paise)
+            amount_paise = int(float(payout.net_amount) * 100)
+            
+            # Create Razorpay client
+            client = get_razorpay_client()
+            
+            # Create fund account
+            fund_account_data = {
+                'account_type': 'bank_account',
+                'bank_account': {
+                    'name': account_holder_name,
+                    'ifsc': ifsc_code,
+                    'account_number': account_number,
+                }
+            }
+            
+            try:
+                # Create fund account
+                fund_account = client.fund_account.create(fund_account_data)
+                fund_account_id = fund_account['id']
+                
+                # Create payout
+                payout_data = {
+                    'account_number': settings.RAZORPAY_ACCOUNT_NUMBER if hasattr(settings, 'RAZORPAY_ACCOUNT_NUMBER') else None,
+                    'fund_account': {
+                        'id': fund_account_id,
+                        'account_type': 'bank_account',
+                    },
+                    'amount': amount_paise,
+                    'currency': 'INR',
+                    'mode': 'NEFT',  # or 'RTGS', 'IMPS' based on amount
+                    'purpose': 'payout',
+                    'queue_if_low_balance': True,
+                    'reference_id': f'payout_{payout.id}',
+                    'narration': f'Payout for user {payout.user.username}',
+                }
+                
+                razorpay_payout = client.payout.create(payout_data)
+                razorpay_payout_id = razorpay_payout['id']
+                
+                # Update payout transaction_id with Razorpay payout ID
+                payout.transaction_id = razorpay_payout_id
+                payout.save(update_fields=['transaction_id'])
+                
+                logger.info(
+                    f"Created Razorpay payout {razorpay_payout_id} for Payout {payout.id}, "
+                    f"amount={amount_paise} paise (auto-processed)"
+                )
+                
+            except Exception as razorpay_error:
+                logger.error(
+                    f"Razorpay API error creating payout for Payout {payout.id}: {razorpay_error}",
+                    exc_info=True
+                )
+                # Don't fail the payout processing - status remains 'processing' for manual retry
+                # Admin can retry via /api/payments/create-payout/ endpoint
+                # Log the error but continue
+                
+        except Exception as e:
+            # If Razorpay client initialization fails or any other error occurs
+            logger.error(
+                f"Error initializing Razorpay payout for Payout {payout.id}: {e}",
+                exc_info=True
+            )
+            # Don't fail the payout processing - status remains 'processing' for manual retry
         
         return payout
 

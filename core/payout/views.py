@@ -5,12 +5,20 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from django.db import transaction
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
+from django.http import JsonResponse
 from datetime import timedelta, datetime
-from .models import Payout, PayoutTransaction
+import json
+import logging
+from .models import Payout, PayoutTransaction, PayoutWebhookLog
 from .serializers import PayoutSerializer, PayoutTransactionSerializer
 from .utils import process_payout, complete_payout, auto_fill_emi_from_payout
+from .utils.signature import verify_payout_webhook_signature
+from .tasks import process_payout_success, process_payout_failure
 from core.wallet.utils import get_or_create_wallet
 from core.settings.models import PlatformSettings
+
+logger = logging.getLogger(__name__)
 
 
 class PayoutPagination(PageNumberPagination):
@@ -473,4 +481,142 @@ class PayoutTransactionViewSet(viewsets.ReadOnlyModelViewSet):
         if user.is_superuser or user.role == 'admin':
             return PayoutTransaction.objects.all()
         return PayoutTransaction.objects.filter(user=user)
+
+
+@csrf_exempt
+def webhook(request):
+    """
+    Handle RazorpayX payout webhook events.
+    
+    POST /api/payouts/webhook/
+    CSRF exempt for webhook endpoint
+    
+    Handles events:
+    - payout.processed: Payout successfully completed
+    - payout.failed: Payout failed
+    - fund_account.verified: Fund account verified (logged for future use)
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    
+    try:
+        # Read raw body (required for signature verification)
+        body = request.body
+        
+        # Extract signature from header
+        header_signature = request.META.get('HTTP_X_RAZORPAY_SIGNATURE', '')
+        
+        if not header_signature:
+            logger.warning("Payout webhook request missing X-Razorpay-Signature header")
+            return JsonResponse({'error': 'Missing signature'}, status=400)
+        
+        # Verify webhook signature
+        is_valid = verify_payout_webhook_signature(body, header_signature)
+        
+        if not is_valid:
+            logger.warning("Invalid payout webhook signature")
+            return JsonResponse({'error': 'Invalid signature'}, status=400)
+        
+        # Parse JSON body
+        try:
+            payload = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in payout webhook body: {e}")
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        
+        event_type = payload.get('event')
+        event_id = payload.get('event_id') or payload.get('id', 'unknown')
+        
+        logger.info(f"Received payout webhook event: {event_type} (event_id: {event_id})")
+        
+        # Check idempotency - see if event was already processed
+        webhook_log = None
+        try:
+            webhook_log = PayoutWebhookLog.objects.get(event_id=event_id)
+            if webhook_log.status == 'processed':
+                logger.info(f"Payout webhook event {event_id} already processed, skipping")
+                return JsonResponse({'status': 'success', 'message': 'Event already processed'}, status=200)
+        except PayoutWebhookLog.DoesNotExist:
+            # Create new webhook log entry
+            webhook_log = PayoutWebhookLog.objects.create(
+                event_id=event_id,
+                event_type=event_type,
+                payload=payload,
+                status='received'
+            )
+        
+        # Route events to appropriate handlers
+        try:
+            if event_type == 'payout.processed':
+                # Extract payout ID from payload
+                payout_data = payload.get('payload', {}).get('payout', {})
+                razorpay_payout_id = payout_data.get('id')
+                
+                if not razorpay_payout_id:
+                    error_msg = "Missing payout ID in payout.processed event"
+                    logger.error(error_msg)
+                    webhook_log.status = 'failed'
+                    webhook_log.error_message = error_msg
+                    webhook_log.save()
+                    return JsonResponse({'error': error_msg}, status=400)
+                
+                # Enqueue Celery task for async processing
+                process_payout_success.delay(razorpay_payout_id, payload)
+                
+                # Update webhook log
+                webhook_log.status = 'processed'
+                webhook_log.processed_at = timezone.now()
+                webhook_log.save()
+                
+                logger.info(f"Enqueued payout success task for Razorpay payout ID: {razorpay_payout_id}")
+                
+            elif event_type == 'payout.failed':
+                # Extract payout ID from payload
+                payout_data = payload.get('payload', {}).get('payout', {})
+                razorpay_payout_id = payout_data.get('id')
+                
+                if not razorpay_payout_id:
+                    error_msg = "Missing payout ID in payout.failed event"
+                    logger.error(error_msg)
+                    webhook_log.status = 'failed'
+                    webhook_log.error_message = error_msg
+                    webhook_log.save()
+                    return JsonResponse({'error': error_msg}, status=400)
+                
+                # Enqueue Celery task for async processing
+                process_payout_failure.delay(razorpay_payout_id, payload)
+                
+                # Update webhook log
+                webhook_log.status = 'processed'
+                webhook_log.processed_at = timezone.now()
+                webhook_log.save()
+                
+                logger.info(f"Enqueued payout failure task for Razorpay payout ID: {razorpay_payout_id}")
+                
+            elif event_type == 'fund_account.verified':
+                # Log event for future implementation
+                logger.info(f"Fund account verified event received: {payload}")
+                webhook_log.status = 'processed'
+                webhook_log.processed_at = timezone.now()
+                webhook_log.save()
+                
+            else:
+                logger.warning(f"Unknown payout webhook event type: {event_type}")
+                webhook_log.status = 'failed'
+                webhook_log.error_message = f"Unknown event type: {event_type}"
+                webhook_log.save()
+        
+        except Exception as e:
+            logger.error(f"Error processing payout webhook event {event_id}: {e}", exc_info=True)
+            webhook_log.status = 'failed'
+            webhook_log.error_message = str(e)
+            webhook_log.save()
+        
+        # Always return 200 OK to prevent Razorpay from retrying
+        return JsonResponse({'status': 'success'}, status=200)
+    
+    except Exception as e:
+        logger.error(f"Error processing payout webhook: {e}", exc_info=True)
+        # Still return 200 to prevent retries
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=200)
 

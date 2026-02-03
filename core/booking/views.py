@@ -7,6 +7,7 @@ from rest_framework.pagination import PageNumberPagination
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Q
+from django.db import transaction
 from decimal import Decimal
 from core.users.models import User
 from core.inventory.utils import create_reservation
@@ -402,24 +403,174 @@ class BookingViewSet(viewsets.ModelViewSet):
         
         # Process refund if refund_amount > 0
         if refund_amount > 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # Try Razorpay refund first (if payments were made via Razorpay)
+            razorpay_refund_success = False
+            razorpay_refund_total = Decimal('0')
+            
             try:
-                # Refund to user's wallet
-                add_wallet_balance(
-                    user=booking.user,
-                    amount=float(refund_amount),
-                    transaction_type='REFUND',
-                    description=f"Refund for cancelled booking {booking.booking_number} (₹{total_paid} paid - ₹{min(activation_amount_decimal, total_paid)} activation_amount = ₹{refund_amount} refunded)",
-                    reference_id=booking.id,
-                    reference_type='booking'
-                )
+                from django.contrib.contenttypes.models import ContentType
+                from core.payments.models import Payment as RazorpayPayment
+                from core.payments.utils.razorpay_client import get_razorpay_client
+                from core.booking.models import Payment as BookingPayment
+                
+                # Find all Razorpay Payment records linked to this booking
+                booking_content_type = ContentType.objects.get_for_model(booking.__class__)
+                razorpay_payments = RazorpayPayment.objects.filter(
+                    content_type=booking_content_type,
+                    object_id=booking.id,
+                    status='SUCCESS'
+                ).exclude(
+                    status='REFUNDED'
+                ).order_by('-created_at')  # Latest first
+                
+                if razorpay_payments.exists():
+                    client = get_razorpay_client()
+                    remaining_refund = refund_amount
+                    
+                    # Refund from latest payment first
+                    for razorpay_payment in razorpay_payments:
+                        if remaining_refund <= 0:
+                            break
+                        
+                        # Calculate how much to refund from this payment
+                        payment_amount_rupees = Decimal(str(razorpay_payment.amount / 100))
+                        refund_from_this_payment = min(remaining_refund, payment_amount_rupees)
+                        refund_amount_paise = int(float(refund_from_this_payment) * 100)
+                        
+                        # Skip if amount is 0 or negative
+                        if refund_amount_paise <= 0:
+                            continue
+                        
+                        try:
+                            # Create Razorpay refund
+                            refund_data = {
+                                'payment_id': razorpay_payment.payment_id,
+                                'amount': refund_amount_paise,
+                                'notes': {
+                                    'refund_reason': 'Booking cancellation',
+                                    'original_order_id': razorpay_payment.order_id,
+                                    'booking_number': booking.booking_number,
+                                }
+                            }
+                            
+                            razorpay_refund = client.payment.refund(razorpay_payment.payment_id, refund_data)
+                            refund_id = razorpay_refund['id']
+                            
+                            # Update Razorpay Payment status
+                            with transaction.atomic():
+                                razorpay_payment = RazorpayPayment.objects.select_for_update().get(
+                                    payment_id=razorpay_payment.payment_id
+                                )
+                                
+                                # Double-check status
+                                if razorpay_payment.status != 'REFUNDED':
+                                    # If full refund, mark as REFUNDED; otherwise keep as SUCCESS
+                                    if refund_from_this_payment >= payment_amount_rupees:
+                                        razorpay_payment.status = 'REFUNDED'
+                                    
+                                    # Store refund details in raw_payload
+                                    if razorpay_payment.raw_payload:
+                                        if 'refunds' not in razorpay_payment.raw_payload:
+                                            razorpay_payment.raw_payload['refunds'] = []
+                                        razorpay_payment.raw_payload['refunds'].append(razorpay_refund)
+                                    else:
+                                        razorpay_payment.raw_payload = {'refunds': [razorpay_refund]}
+                                    
+                                    razorpay_payment.save()
+                            
+                            # Update corresponding booking Payment status if exists
+                            try:
+                                booking_payment = BookingPayment.objects.filter(
+                                    booking=booking,
+                                    transaction_id=razorpay_payment.payment_id
+                                ).first()
+                                
+                                if booking_payment and booking_payment.status != 'refunded':
+                                    # If full refund, mark as refunded; otherwise keep as completed
+                                    if refund_from_this_payment >= payment_amount_rupees:
+                                        booking_payment.status = 'refunded'
+                                        booking_payment.save(update_fields=['status'])
+                            except Exception as e:
+                                logger.warning(f"Could not update booking payment status: {e}")
+                            
+                            razorpay_refund_total += refund_from_this_payment
+                            remaining_refund -= refund_from_this_payment
+                            
+                            logger.info(
+                                f"Created Razorpay refund {refund_id} for payment {razorpay_payment.payment_id}, "
+                                f"amount={refund_amount_paise} paise (₹{refund_from_this_payment}) for booking {booking.booking_number}"
+                            )
+                            
+                        except Exception as refund_error:
+                            logger.error(
+                                f"Error creating Razorpay refund for payment {razorpay_payment.payment_id}: {refund_error}",
+                                exc_info=True
+                            )
+                            # Continue to next payment or fallback to wallet
+                    
+                    # Check if we successfully refunded the full amount via Razorpay
+                    if razorpay_refund_total >= refund_amount:
+                        razorpay_refund_success = True
+                        logger.info(
+                            f"Successfully refunded ₹{razorpay_refund_total} via Razorpay for booking {booking.booking_number} "
+                            f"(requested: ₹{refund_amount})"
+                        )
+                    elif razorpay_refund_total > 0:
+                        # Partial Razorpay refund - refund remaining to wallet
+                        remaining_wallet_refund = refund_amount - razorpay_refund_total
+                        logger.info(
+                            f"Partially refunded ₹{razorpay_refund_total} via Razorpay, "
+                            f"refunding remaining ₹{remaining_wallet_refund} to wallet for booking {booking.booking_number}"
+                        )
+                        try:
+                            add_wallet_balance(
+                                user=booking.user,
+                                amount=float(remaining_wallet_refund),
+                                transaction_type='REFUND',
+                                description=f"Partial refund for cancelled booking {booking.booking_number} (₹{razorpay_refund_total} refunded via Razorpay, ₹{remaining_wallet_refund} refunded to wallet)",
+                                reference_id=booking.id,
+                                reference_type='booking'
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Error processing partial wallet refund for booking {booking.id}: {e}",
+                                exc_info=True
+                            )
+                    
             except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(
-                    f"Error processing refund for booking {booking.id}: {e}",
+                logger.warning(
+                    f"Error processing Razorpay refunds for booking {booking.id}: {e}. "
+                    f"Falling back to wallet refund.",
                     exc_info=True
                 )
-                # Continue even if refund fails - booking is already cancelled
+            
+            # Fallback to wallet refund if Razorpay refund didn't cover the full amount
+            if not razorpay_refund_success:
+                try:
+                    # Calculate remaining refund amount (if partial Razorpay refund was made)
+                    remaining_refund = refund_amount - razorpay_refund_total
+                    if remaining_refund > 0:
+                        add_wallet_balance(
+                            user=booking.user,
+                            amount=float(remaining_refund),
+                            transaction_type='REFUND',
+                            description=f"Refund for cancelled booking {booking.booking_number} (₹{total_paid} paid - ₹{min(activation_amount_decimal, total_paid)} activation_amount = ₹{refund_amount} refunded)",
+                            reference_id=booking.id,
+                            reference_type='booking'
+                        )
+                        logger.info(
+                            f"Refunded ₹{remaining_refund} to wallet for booking {booking.booking_number} "
+                            f"(Razorpay refund: ₹{razorpay_refund_total})"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Error processing wallet refund for booking {booking.id}: {e}",
+                        exc_info=True
+                    )
+                    # Continue even if refund fails - booking is already cancelled
         
         serializer = BookingSerializer(booking)
         response_data = serializer.data

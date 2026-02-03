@@ -10,6 +10,8 @@ from django.http import JsonResponse
 from django.conf import settings
 import json
 import logging
+import hashlib
+import time
 
 from .models import Payment
 from .serializers import (
@@ -429,7 +431,9 @@ def webhook(request):
     CSRF exempt for webhook endpoint
     """
     if request.method != 'POST':
-        return JsonResponse({'error': 'Method not allowed'}, status=405)
+        error_response = {'error': 'Method not allowed'}
+        logger.warning(f"📤 Webhook response (405): {error_response}")
+        return JsonResponse(error_response, status=405)
     
     try:
         # Read raw body (required for signature verification)
@@ -440,41 +444,198 @@ def webhook(request):
         
         if not header_signature:
             logger.warning("Webhook request missing X-Razorpay-Signature header")
-            return JsonResponse({'error': 'Missing signature'}, status=400)
+            error_response = {'error': 'Missing signature'}
+            logger.warning(f"📤 Webhook response (400): {error_response}")
+            return JsonResponse(error_response, status=400)
         
         # Verify webhook signature
         is_valid = verify_webhook_signature(body, header_signature)
         
         if not is_valid:
             logger.warning("Invalid webhook signature")
-            return JsonResponse({'error': 'Invalid signature'}, status=400)
+            error_response = {'error': 'Invalid signature'}
+            logger.warning(f"📤 Webhook response (400): {error_response}")
+            return JsonResponse(error_response, status=400)
         
         # Parse JSON body
         try:
             payload = json.loads(body.decode('utf-8'))
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in webhook body: {e}")
-            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+            error_response = {'error': 'Invalid JSON'}
+            logger.error(f"📤 Webhook response (400): {error_response}")
+            return JsonResponse(error_response, status=400)
         
         event_type = payload.get('event')
-        event_data = payload.get('payload', {}).get('payment', {}) or payload.get('payload', {}).get('order', {}) or payload.get('payload', {})
+        # Try multiple locations for event_id (Razorpay may use different structures)
+        # Standard Razorpay webhook has 'id' at top level, but check multiple locations
+        event_id = payload.get('id') or payload.get('event_id')
         
-        logger.info(f"Received webhook event: {event_type}")
+        # Check in payload if it's a dict
+        if not event_id:
+            payload_data = payload.get('payload', {})
+            if isinstance(payload_data, dict):
+                event_id = payload_data.get('id')
         
-        # Handle different event types
+        # Check in entity if it's a dict
+        if not event_id:
+            entity_data = payload.get('entity', {})
+            if isinstance(entity_data, dict):
+                event_id = entity_data.get('id')
+        
+        # If still no event_id, try to generate one from available data for tracking
+        if not event_id:
+            # Try to create a unique identifier from available data
+            payment_id = payload.get('payload', {}).get('payment', {}).get('entity', {}).get('id') or \
+                        payload.get('payload', {}).get('payment', {}).get('id')
+            order_id = payload.get('payload', {}).get('payment', {}).get('entity', {}).get('order_id') or \
+                      payload.get('payload', {}).get('order', {}).get('id')
+            
+            # Generate a fallback event_id for tracking
+            if payment_id or order_id:
+                # Create a hash-based ID from payload content + timestamp
+                payload_str = json.dumps(payload, sort_keys=True)
+                event_id = f"evt_{hashlib.md5((payload_str + str(time.time())).encode()).hexdigest()[:16]}"
+                logger.warning(
+                    f"⚠️ Webhook payload missing event 'id' field. Generated fallback event_id: {event_id}. "
+                    f"event_type={event_type}, payment_id={payment_id}, order_id={order_id}"
+                )
+            else:
+                # Last resort: use timestamp-based ID
+                payload_str = json.dumps(payload, sort_keys=True)
+                event_id = f"evt_{int(time.time())}_{hashlib.md5(payload_str.encode()).hexdigest()[:8]}"
+                logger.warning(
+                    f"⚠️ Webhook payload missing event 'id' field and no payment/order identifiers. "
+                    f"Generated fallback event_id: {event_id}. event_type={event_type}"
+                )
+        
+        # Extract event_data - handle nested 'entity' structure
+        raw_event_data = payload.get('payload', {}).get('payment', {}) or payload.get('payload', {}).get('order', {}) or payload.get('payload', {})
+        # If event_data has 'entity' key, use that, otherwise use event_data directly
+        if isinstance(raw_event_data, dict) and 'entity' in raw_event_data:
+            event_data = raw_event_data.get('entity', raw_event_data)
+        else:
+            event_data = raw_event_data
+        
+        # Log full payload + event_id
+        logger.info(
+            f"📥 Webhook received: event_type={event_type}, event_id={event_id}, "
+            f"payload={json.dumps(payload, indent=2)}"
+        )
+        
+        # Track webhook processing status
+        webhook_processed = False
+        webhook_error = None
+        
+        # Handle different event types with idempotency check
         with transaction.atomic():
+            from .models import WebhookEvent
+            
+            # Check if this event_id has already been processed (idempotency)
+            try:
+                existing_event = WebhookEvent.objects.select_for_update().get(event_id=event_id)
+                if existing_event.processed:
+                    logger.info(
+                        f"✅ Webhook event {event_id} already processed at {existing_event.processed_at}. "
+                        f"Skipping duplicate processing (idempotent)."
+                    )
+                    webhook_processed = True
+                    # Return success response without processing again
+                    response_data = {
+                        'status': 'success',
+                        'event': event_type,
+                        'event_id': event_id,
+                        'processed': True,
+                        'message': 'Event already processed (idempotent)',
+                        'error': None
+                    }
+                    logger.info(f"📤 Webhook response sent (idempotent): {response_data}")
+                    return JsonResponse(response_data, status=200)
+                else:
+                    # Event exists but not processed - update it
+                    webhook_event = existing_event
+                    logger.warning(
+                        f"⚠️ Webhook event {event_id} exists but was not marked as processed. "
+                        f"Will attempt to process again."
+                    )
+            except WebhookEvent.DoesNotExist:
+                # Create new webhook event record
+                webhook_event = WebhookEvent.objects.create(
+                    event_id=event_id,
+                    event_type=event_type,
+                    payload=payload,
+                    processed=False
+                )
+                logger.info(f"📝 Created new webhook event record: {event_id}")
+            
+            # Initialize payment variable to avoid UnboundLocalError
+            payment = None
+            
             if event_type == 'payment.captured':
                 payment_id = event_data.get('id')
                 order_id = event_data.get('order_id')
                 
-                try:
-                    payment = Payment.objects.select_for_update().get(order_id=order_id)
+                # Skip if both order_id and payment_id are missing
+                if not order_id and not payment_id:
+                    logger.warning(
+                        f"⚠️ payment.captured webhook received with missing order_id and payment_id. "
+                        f"Event data: {event_data}, Event ID: {event_id}"
+                    )
+                    webhook_error = "Both order_id and payment_id are missing"
+                else:
+                    # First, try to find Payment by payment_id (if already set)
+                    # This prevents duplicates when the same payment_id is assigned to multiple orders
+                    if payment_id:
+                        existing_payments = Payment.objects.filter(payment_id=payment_id).select_for_update()
+                        if existing_payments.exists():
+                            payment = existing_payments.first()
+                            if existing_payments.count() > 1:
+                                logger.warning(
+                                    f"Multiple Payment records found with payment_id={payment_id}. "
+                                    f"Using the first one for webhook update."
+                                )
+                            # If found by payment_id but order_id doesn't match, log warning
+                            if order_id and payment.order_id != order_id:
+                                logger.warning(
+                                    f"Payment found by payment_id={payment_id} has different order_id. "
+                                    f"Expected: {order_id}, Found: {payment.order_id}"
+                                )
+                    
+                    # If not found by payment_id, try by order_id
+                    if not payment and order_id:
+                        try:
+                            payment = Payment.objects.select_for_update().get(order_id=order_id)
+                        except Payment.DoesNotExist:
+                            logger.warning(
+                                f"Payment not found for webhook: order_id={order_id}, payment_id={payment_id}, "
+                                f"event_id={event_id}"
+                            )
+                            payment = None
+                            webhook_error = f"Payment not found for order_id={order_id}, payment_id={payment_id}"
+                    elif not payment and not order_id:
+                        logger.warning(
+                            f"⚠️ Cannot process payment.captured webhook: order_id is missing. "
+                            f"payment_id={payment_id}, event_id={event_id}"
+                        )
+                        webhook_error = "order_id is missing from webhook payload"
+                
+                if payment:
+                    # Check if payment_id is already set and different
+                    if payment.payment_id and payment.payment_id != payment_id:
+                        logger.warning(
+                            f"Payment {payment.order_id} already has payment_id={payment.payment_id}, "
+                            f"but webhook has payment_id={payment_id}. Not updating payment_id."
+                        )
+                    elif not payment.payment_id:
+                        # Only set payment_id if it's not already set
+                        payment.payment_id = payment_id
+                    
                     if payment.status != 'SUCCESS':
                         payment.status = 'SUCCESS'
-                        payment.payment_id = payment_id
                         payment.raw_payload = payload
                         payment.save()
-                        logger.info(f"Updated payment to SUCCESS via webhook: order_id={order_id}")
+                        webhook_processed = True
+                        logger.info(f"✅ Updated payment to SUCCESS via webhook: order_id={order_id}, payment_id={payment_id}")
                         
                         # Process booking payment if this is a booking payment
                         try:
@@ -484,38 +645,121 @@ def webhook(request):
                                 f"Error processing booking payment for webhook payment {order_id}: {e}",
                                 exc_info=True
                             )
-                except Payment.DoesNotExist:
-                    logger.warning(f"Payment not found for webhook: order_id={order_id}")
+                            # Don't mark as failed if booking payment processing fails - payment was still updated
+                    else:
+                        # Payment already has SUCCESS status
+                        webhook_processed = True
+                        logger.info(f"✅ Payment already has SUCCESS status: order_id={order_id}, payment_id={payment_id}")
             
             elif event_type == 'payment.failed':
                 payment_id = event_data.get('id')
                 order_id = event_data.get('order_id')
                 
-                try:
-                    payment = Payment.objects.select_for_update().get(order_id=order_id)
+                # Skip if both order_id and payment_id are missing
+                if not order_id and not payment_id:
+                    logger.warning(
+                        f"⚠️ payment.failed webhook received with missing order_id and payment_id. "
+                        f"Event data: {event_data}, Event ID: {event_id}"
+                    )
+                    webhook_error = "Both order_id and payment_id are missing"
+                    payment = None
+                else:
+                    # First, try to find Payment by payment_id (if already set)
+                    payment = None
+                    if payment_id:
+                        existing_payments = Payment.objects.filter(payment_id=payment_id).select_for_update()
+                        if existing_payments.exists():
+                            payment = existing_payments.first()
+                            if existing_payments.count() > 1:
+                                logger.warning(
+                                    f"Multiple Payment records found with payment_id={payment_id}. "
+                                    f"Using the first one for webhook update."
+                                )
+                    
+                    # If not found by payment_id, try by order_id
+                    if not payment and order_id:
+                        try:
+                            payment = Payment.objects.select_for_update().get(order_id=order_id)
+                        except Payment.DoesNotExist:
+                            logger.warning(
+                                f"Payment not found for webhook: order_id={order_id}, payment_id={payment_id}, "
+                                f"event_id={event_id}"
+                            )
+                            payment = None
+                            webhook_error = f"Payment not found for order_id={order_id}, payment_id={payment_id}"
+                    elif not payment and not order_id:
+                        logger.warning(
+                            f"⚠️ Cannot process payment.failed webhook: order_id is missing. "
+                            f"payment_id={payment_id}, event_id={event_id}"
+                        )
+                        webhook_error = "order_id is missing from webhook payload"
+                
+                if payment:
+                    # Check if payment_id is already set and different
+                    if payment.payment_id and payment.payment_id != payment_id:
+                        logger.warning(
+                            f"Payment {payment.order_id} already has payment_id={payment.payment_id}, "
+                            f"but webhook has payment_id={payment_id}. Not updating payment_id."
+                        )
+                    elif not payment.payment_id:
+                        # Only set payment_id if it's not already set
+                        payment.payment_id = payment_id
+                    
                     if payment.status != 'FAILED':
                         payment.status = 'FAILED'
-                        payment.payment_id = payment_id
                         payment.raw_payload = payload
                         payment.save()
-                        logger.info(f"Updated payment to FAILED via webhook: order_id={order_id}")
-                except Payment.DoesNotExist:
-                    logger.warning(f"Payment not found for webhook: order_id={order_id}")
+                        webhook_processed = True
+                        logger.info(f"✅ Updated payment to FAILED via webhook: order_id={order_id}, payment_id={payment_id}")
+                    else:
+                        # Payment already has FAILED status
+                        webhook_processed = True
+                        logger.info(f"✅ Payment already has FAILED status: order_id={order_id}, payment_id={payment_id}")
             
             elif event_type == 'order.paid':
                 order_id = event_data.get('id')
+                payment_data = payload.get('payload', {}).get('payment', {})
+                payment_id = payment_data.get('id') if payment_data else None
                 
-                try:
-                    payment = Payment.objects.select_for_update().get(order_id=order_id)
+                # First, try to find Payment by payment_id (if available)
+                payment = None
+                if payment_id:
+                    existing_payments = Payment.objects.filter(payment_id=payment_id).select_for_update()
+                    if existing_payments.exists():
+                        payment = existing_payments.first()
+                        if existing_payments.count() > 1:
+                            logger.warning(
+                                f"Multiple Payment records found with payment_id={payment_id}. "
+                                f"Using the first one for webhook update."
+                            )
+                
+                # If not found by payment_id, try by order_id
+                if not payment:
+                    try:
+                        payment = Payment.objects.select_for_update().get(order_id=order_id)
+                    except Payment.DoesNotExist:
+                        logger.warning(f"Payment not found for webhook: order_id={order_id}, payment_id={payment_id}")
+                        payment = None
+                
+                if payment:
+                    # Try to get payment_id from payload if available
+                    if payment_id:
+                        # Check if payment_id is already set and different
+                        if payment.payment_id and payment.payment_id != payment_id:
+                            logger.warning(
+                                f"Payment {payment.order_id} already has payment_id={payment.payment_id}, "
+                                f"but webhook has payment_id={payment_id}. Not updating payment_id."
+                            )
+                        elif not payment.payment_id:
+                            # Only set payment_id if it's not already set
+                            payment.payment_id = payment_id
+                    
                     if payment.status != 'SUCCESS':
                         payment.status = 'SUCCESS'
                         payment.raw_payload = payload
-                        # Try to get payment_id from payload if available
-                        payment_data = payload.get('payload', {}).get('payment', {})
-                        if payment_data and payment_data.get('id'):
-                            payment.payment_id = payment_data.get('id')
                         payment.save()
-                        logger.info(f"Updated payment to SUCCESS via order.paid webhook: order_id={order_id}")
+                        webhook_processed = True
+                        logger.info(f"✅ Updated payment to SUCCESS via order.paid webhook: order_id={order_id}, payment_id={payment_id}")
                         
                         # Process booking payment if this is a booking payment
                         try:
@@ -525,27 +769,99 @@ def webhook(request):
                                 f"Error processing booking payment for webhook payment {order_id}: {e}",
                                 exc_info=True
                             )
-                except Payment.DoesNotExist:
-                    logger.warning(f"Payment not found for webhook: order_id={order_id}")
+                            # Don't mark as failed if booking payment processing fails - payment was still updated
+                    else:
+                        # Payment already has SUCCESS status
+                        webhook_processed = True
+                        logger.info(f"✅ Payment already has SUCCESS status: order_id={order_id}, payment_id={payment_id}")
             
             elif event_type == 'refund.processed':
-                payment_id = event_data.get('payment_id')
+                # For refund.processed events, payment_id is in the refund entity, not in event_data
+                # Try multiple locations where payment_id might be
+                refund_data = payload.get('payload', {}).get('refund', {})
+                payment_id = None
+                refund_id = None
+                webhook_processed = False
+                webhook_error = None
                 
-                try:
-                    payment = Payment.objects.select_for_update().get(payment_id=payment_id)
-                    if payment.status != 'REFUNDED':
-                        payment.status = 'REFUNDED'
-                        payment.raw_payload = payload
-                        payment.save()
-                        logger.info(f"Updated payment to REFUNDED via webhook: payment_id={payment_id}")
-                except Payment.DoesNotExist:
-                    logger.warning(f"Payment not found for webhook: payment_id={payment_id}")
-            
-            elif event_type == 'payout.processed':
-                # Handle payout webhook if needed
-                payout_id = event_data.get('id')
-                logger.info(f"Payout processed webhook received: payout_id={payout_id}")
-                # Could update Payout model here if needed
+                # Extract refund_id for tracking
+                if refund_data:
+                    if isinstance(refund_data, dict):
+                        if 'entity' in refund_data and isinstance(refund_data['entity'], dict):
+                            refund_id = refund_data['entity'].get('id')
+                            payment_id = refund_data['entity'].get('payment_id')
+                        if not refund_id:
+                            refund_id = refund_data.get('id')
+                        if not payment_id:
+                            payment_id = refund_data.get('payment_id')
+                
+                # Fallback: try to get from payment entity if available
+                if not payment_id:
+                    payment_entity = payload.get('payload', {}).get('payment', {})
+                    if payment_entity:
+                        if isinstance(payment_entity, dict):
+                            if 'entity' in payment_entity and isinstance(payment_entity['entity'], dict):
+                                payment_id = payment_entity['entity'].get('id')
+                            if not payment_id:
+                                payment_id = payment_entity.get('id')
+                
+                # Only process if we have a valid payment_id
+                if payment_id:
+                    try:
+                        payment = Payment.objects.select_for_update().get(payment_id=payment_id)
+                        if payment.status != 'REFUNDED':
+                            payment.status = 'REFUNDED'
+                            payment.raw_payload = payload
+                            payment.save()
+                            webhook_processed = True
+                            logger.info(
+                                f"✅ Refund webhook processed successfully: "
+                                f"payment_id={payment_id}, refund_id={refund_id}, "
+                                f"order_id={payment.order_id}, event_id={payload.get('id', 'N/A')}"
+                            )
+                        else:
+                            webhook_processed = True
+                            logger.info(
+                                f"✅ Refund webhook received (already processed): "
+                                f"payment_id={payment_id}, refund_id={refund_id}, "
+                                f"order_id={payment.order_id}, event_id={payload.get('id', 'N/A')}"
+                            )
+                    except Payment.DoesNotExist:
+                        webhook_error = f"Payment not found for payment_id={payment_id}"
+                        logger.warning(
+                            f"❌ {webhook_error}. "
+                            f"refund_id={refund_id}, event_id={payload.get('id', 'N/A')}"
+                        )
+                    except Payment.MultipleObjectsReturned:
+                        # Handle duplicate payment_ids - update the latest payment
+                        logger.warning(
+                            f"⚠️ Multiple Payment records found for payment_id={payment_id}. "
+                            f"Updating the latest payment to REFUNDED."
+                        )
+                        payment = Payment.objects.filter(payment_id=payment_id).select_for_update().latest('created_at')
+                        if payment.status != 'REFUNDED':
+                            payment.status = 'REFUNDED'
+                            payment.raw_payload = payload
+                            payment.save()
+                            webhook_processed = True
+                            logger.info(
+                                f"✅ Refund webhook processed (duplicate handled): "
+                                f"payment_id={payment_id}, refund_id={refund_id}, "
+                                f"order_id={payment.order_id}, event_id={payload.get('id', 'N/A')}"
+                            )
+                        else:
+                            webhook_processed = True
+                            logger.info(
+                                f"✅ Refund webhook received (duplicate, already processed): "
+                                f"payment_id={payment_id}, refund_id={refund_id}, "
+                                f"order_id={payment.order_id}, event_id={payload.get('id', 'N/A')}"
+                            )
+                else:
+                    webhook_error = "payment_id is missing from webhook payload"
+                    logger.error(
+                        f"❌ Cannot process refund.processed webhook: {webhook_error}. "
+                        f"Refund data: {refund_data}, event_id={payload.get('id', 'N/A')}"
+                    )
             
             else:
                 logger.warning(f"Unknown webhook event type: {event_type}")
@@ -556,14 +872,44 @@ def webhook(request):
                     order_id=f"webhook_{event_type}_{payload.get('payload', {}).get('payment', {}).get('id', 'unknown')}",
                     amount=0,
                 )
+            
+            # Mark webhook event as processed (inside transaction)
+            webhook_event.processed = webhook_processed
+            webhook_event.error_message = webhook_error if webhook_error else None
+            if webhook_processed:
+                from django.utils import timezone
+                webhook_event.processed_at = timezone.now()
+            webhook_event.save()
+            logger.info(
+                f"💾 Webhook event {event_id} marked as processed={webhook_processed} "
+                f"(error: {webhook_error if webhook_error else 'None'})"
+            )
         
         # Always return 200 OK to prevent Razorpay from retrying
-        return JsonResponse({'status': 'success'}, status=200)
+        # Include processing status in response for debugging
+        response_data = {
+            'status': 'success',
+            'event': event_type,
+            'event_id': event_id,
+            'processed': webhook_processed,
+            'error': webhook_error if webhook_error else None
+        }
+        
+        # Log the response being sent
+        logger.info(
+            f"📤 Webhook response sent: event={event_type}, event_id={event_id}, "
+            f"processed={webhook_processed}, error={webhook_error if webhook_error else 'None'}, "
+            f"response_data={response_data}"
+        )
+        
+        return JsonResponse(response_data, status=200)
     
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
         # Still return 200 to prevent retries
-        return JsonResponse({'status': 'error', 'message': str(e)}, status=200)
+        error_response = {'status': 'error', 'message': str(e)}
+        logger.info(f"📤 Webhook error response sent: {error_response}")
+        return JsonResponse(error_response, status=200)
 
 
 @api_view(['POST'])
@@ -719,6 +1065,13 @@ def create_refund(request):
                 {'error': f'Payment with payment_id {payment_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
+        except Payment.MultipleObjectsReturned:
+            # Handle duplicate payment_ids - use the latest payment
+            logger.warning(
+                f"Multiple Payment records found for payment_id={payment_id}. "
+                f"Using the latest payment for refund."
+            )
+            payment = Payment.objects.filter(payment_id=payment_id).latest('created_at')
         
         # Verify payment status is SUCCESS (can only refund successful payments)
         if payment.status != 'SUCCESS':
@@ -763,7 +1116,15 @@ def create_refund(request):
         
         # Update Payment model
         with transaction.atomic():
-            payment = Payment.objects.select_for_update().get(payment_id=payment_id)
+            try:
+                payment = Payment.objects.select_for_update().get(payment_id=payment_id)
+            except Payment.MultipleObjectsReturned:
+                # Handle duplicate payment_ids - use the latest payment
+                logger.warning(
+                    f"Multiple Payment records found for payment_id={payment_id} in transaction. "
+                    f"Using the latest payment for refund."
+                )
+                payment = Payment.objects.filter(payment_id=payment_id).select_for_update().latest('created_at')
             
             # Double-check status
             if payment.status == 'REFUNDED':

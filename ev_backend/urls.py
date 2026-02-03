@@ -14,7 +14,7 @@ urlpatterns = [
     path('api/booking/', include('core.booking.urls')),
     path('api/wallet/', include('core.wallet.urls')),
     path('api/binary/', include('core.binary.urls')),
-    path('api/payout/', include('core.payout.urls')),
+    path('api/payouts/', include('core.payout.urls')),
     path('api/notifications/', include('core.notification.urls')),
     path('api/compliance/', include('core.compliance.urls')),
     path('api/reports/', include('core.reports.urls')),

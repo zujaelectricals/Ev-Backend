@@ -26,7 +26,7 @@ class Payment(models.Model):
     
     # Razorpay identifiers
     order_id = models.CharField(max_length=255, unique=True, db_index=True)
-    payment_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    payment_id = models.CharField(max_length=255, null=True, blank=True, unique=True, db_index=True)
     
     # Amount in paise (Razorpay uses paise, not rupees)
     amount = models.IntegerField()
@@ -65,4 +65,33 @@ class Payment(models.Model):
     def amount_in_rupees(self):
         """Convert amount from paise to rupees"""
         return self.amount / 100
+
+
+class WebhookEvent(models.Model):
+    """
+    Track processed webhook events for idempotency
+    """
+    event_id = models.CharField(max_length=255, unique=True, db_index=True, help_text="Razorpay event ID")
+    event_type = models.CharField(max_length=100, db_index=True, help_text="Event type (e.g., payment.captured)")
+    payload = models.JSONField(help_text="Full webhook payload")
+    processed = models.BooleanField(default=False, db_index=True, help_text="Whether event was successfully processed")
+    processed_at = models.DateTimeField(null=True, blank=True, help_text="When event was processed")
+    error_message = models.TextField(null=True, blank=True, help_text="Error message if processing failed")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'webhook_events'
+        verbose_name = 'Webhook Event'
+        verbose_name_plural = 'Webhook Events'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['event_id']),
+            models.Index(fields=['event_type', 'processed']),
+            models.Index(fields=['created_at']),
+        ]
+    
+    def __str__(self):
+        return f"Webhook {self.event_id} - {self.event_type} - {'Processed' if self.processed else 'Pending'}"
 
