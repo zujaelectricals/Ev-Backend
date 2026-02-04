@@ -76,3 +76,33 @@ class WalletTransactionSerializer(serializers.ModelSerializer):
         # For other transaction types, no TDS
         return "0.00"
 
+
+class CreateWalletRefundSerializer(serializers.Serializer):
+    """Serializer for creating wallet refund (Admin/Staff only)"""
+    user_id = serializers.IntegerField(
+        required=True,
+        help_text="User ID to refund to"
+    )
+    amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=True,
+        help_text="Refund amount in rupees"
+    )
+    description = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Optional description for the refund"
+    )
+    reference_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text="Optional reference ID (e.g., booking ID)"
+    )
+    reference_type = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=50,
+        help_text="Optional reference type (e.g., 'booking', 'order')"
+    )
+

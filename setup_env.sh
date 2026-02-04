@@ -31,7 +31,8 @@ RABBITMQ_USER=guest
 RABBITMQ_PASSWORD=guest
 
 # JWT Settings
-JWT_SECRET_KEY=\$SECRET_KEY
+# Generate a 32+ byte key for JWT (HS256 requires minimum 32 bytes)
+JWT_SECRET_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_LIFETIME=60
 REFRESH_TOKEN_LIFETIME=1440

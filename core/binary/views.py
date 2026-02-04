@@ -160,6 +160,9 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                         page_size = 100
                     if page_size < 1:
                         page_size = None
+                    # If page_size is provided but page is not, default to page 1
+                    elif page is None:
+                        page = 1
                 except (ValueError, TypeError):
                     page_size = None
             
@@ -171,9 +174,19 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             if min_depth > max_depth:
                 min_depth = 0
             
+            # When pagination is enabled, limit max_depth to prevent fetching thousands of descendants
+            # Batch queries are efficient, but fetching 10,000+ nodes still takes time
+            # We use stored counts for accurate pagination metadata, so we don't need ALL descendants
+            effective_max_depth = max_depth
+            if page is not None and page_size is not None:
+                # Limit to reasonable depth (10 levels) when pagination is enabled
+                # This prevents fetching thousands of nodes while still showing deep trees
+                # Count uses stored counts, so pagination metadata is accurate regardless
+                effective_max_depth = min(max_depth, 10)
+            
             serializer = BinaryTreeNodeSerializer(
                 node,
-                max_depth=max_depth,
+                max_depth=effective_max_depth,
                 min_depth=min_depth,
                 current_depth=0,
                 side_filter=side_filter,

@@ -32,6 +32,35 @@ class ReferredUserSerializer(serializers.Serializer):
         return super().to_representation(instance)
 
 
+class PaymentUserSerializer(serializers.Serializer):
+    """Nested serializer for user details in payment responses"""
+    id = serializers.IntegerField()
+    fullname = serializers.SerializerMethodField()
+    email = serializers.EmailField()
+    mobile = serializers.CharField(allow_null=True)
+    username = serializers.CharField(allow_null=True)
+    profile_picture_url = serializers.SerializerMethodField()
+    
+    def get_fullname(self, obj):
+        """Get full name from first_name and last_name"""
+        return obj.get_full_name() if obj else None
+    
+    def get_profile_picture_url(self, obj):
+        """Get absolute URL for profile picture"""
+        if obj and obj.profile_picture:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.profile_picture.url)
+            return obj.profile_picture.url
+        return None
+    
+    def to_representation(self, instance):
+        """Handle None values"""
+        if instance is None:
+            return None
+        return super().to_representation(instance)
+
+
 class VehicleDetailSerializer(serializers.Serializer):
     """Nested serializer for Vehicle details in read operations"""
     id = serializers.IntegerField()
@@ -239,13 +268,123 @@ class BookingSerializer(serializers.ModelSerializer):
         return 'no_payment'
 
 
+class RefundDetailSerializer(serializers.Serializer):
+    """Nested serializer for refund details"""
+    refund_id = serializers.CharField()
+    refund_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    refund_status = serializers.CharField()
+    refund_created_at = serializers.DateTimeField(allow_null=True)
+    refund_notes = serializers.DictField(allow_null=True)
+    refund_speed = serializers.CharField(allow_null=True)
+
+
 class PaymentSerializer(serializers.ModelSerializer):
     booking_number = serializers.CharField(source='booking.booking_number', read_only=True)
+    user_details = PaymentUserSerializer(source='user', read_only=True)
+    refund_details = serializers.SerializerMethodField()
     
     class Meta:
         model = Payment
         fields = '__all__'
         read_only_fields = ('user', 'payment_date', 'completed_at')
+    
+    def get_refund_details(self, obj):
+        """Get refund information from related Razorpay Payment if available"""
+        # Only check for refunds if payment is online and has transaction_id
+        if obj.payment_method != 'online' or not obj.transaction_id:
+            return None
+        
+        try:
+            from core.payments.models import Payment as RazorpayPayment
+            from decimal import Decimal
+            
+            # Find Razorpay Payment by payment_id (stored in transaction_id for online payments)
+            try:
+                razorpay_payment = RazorpayPayment.objects.get(payment_id=obj.transaction_id)
+            except RazorpayPayment.DoesNotExist:
+                return None
+            
+            # Check if payment has refund data in raw_payload
+            if not razorpay_payment.raw_payload:
+                return None
+            
+            # Get original payment amount in rupees
+            original_amount_paise = razorpay_payment.amount
+            original_amount_rupees = Decimal(str(original_amount_paise / 100))
+            
+            refunds_data = []
+            total_refunded = Decimal('0')
+            
+            # Check for API-initiated refunds (stored in 'refunds' array)
+            refunds = razorpay_payment.raw_payload.get('refunds', [])
+            if refunds and isinstance(refunds, list):
+                for refund in refunds:
+                    if isinstance(refund, dict):
+                        refund_amount_paise = refund.get('amount', 0)
+                        refund_amount_rupees = Decimal(str(refund_amount_paise / 100)) if refund_amount_paise else Decimal('0')
+                        total_refunded += refund_amount_rupees
+                        
+                        # Calculate balance after this refund
+                        balance_after_refund = original_amount_rupees - total_refunded
+                        
+                        refunds_data.append({
+                            'refund_id': refund.get('id', 'N/A'),
+                            'refund_amount': f"{refund_amount_rupees:.2f}",
+                            'refund_status': refund.get('status', 'N/A'),
+                            'refund_created_at': refund.get('created_at'),
+                            'refund_notes': refund.get('notes', {}),
+                            'refund_speed': refund.get('speed'),
+                            'original_amount': f"{original_amount_rupees:.2f}",
+                            'balance_amount': f"{balance_after_refund:.2f}",
+                        })
+            
+            # Check for webhook-initiated refunds (stored in 'payload.refund')
+            if not refunds_data:
+                refund_data = razorpay_payment.raw_payload.get('payload', {}).get('refund', {})
+                if refund_data:
+                    refund_entity = refund_data.get('entity', refund_data)
+                    refund_amount_paise = refund_entity.get('amount', 0)
+                    refund_amount_rupees = Decimal(str(refund_amount_paise / 100)) if refund_amount_paise else Decimal('0')
+                    total_refunded = refund_amount_rupees
+                    
+                    # Calculate balance after refund
+                    balance_after_refund = original_amount_rupees - total_refunded
+                    
+                    refunds_data.append({
+                        'refund_id': refund_entity.get('id', 'N/A'),
+                        'refund_amount': f"{refund_amount_rupees:.2f}",
+                        'refund_status': refund_entity.get('status', 'N/A'),
+                        'refund_created_at': refund_entity.get('created_at'),
+                        'refund_notes': refund_entity.get('notes', {}),
+                        'refund_speed': refund_entity.get('speed'),
+                        'original_amount': f"{original_amount_rupees:.2f}",
+                        'balance_amount': f"{balance_after_refund:.2f}",
+                    })
+            
+            # If multiple refunds, also add total summary
+            if len(refunds_data) > 1:
+                # Recalculate total refunded for all refunds
+                total_refunded = sum(Decimal(r['refund_amount']) for r in refunds_data)
+                final_balance = original_amount_rupees - total_refunded
+                
+                # Add summary to the response
+                return {
+                    'refunds': refunds_data,
+                    'total_refunded': f"{total_refunded:.2f}",
+                    'original_amount': f"{original_amount_rupees:.2f}",
+                    'balance_amount': f"{final_balance:.2f}",
+                }
+            elif len(refunds_data) == 1:
+                return refunds_data[0]
+            else:
+                return None
+                
+        except Exception as e:
+            # Log error but don't break the response
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Error fetching refund details for payment {obj.id}: {e}")
+            return None
     
     def validate_status(self, value):
         """Validate payment status transitions"""

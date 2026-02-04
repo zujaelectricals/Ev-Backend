@@ -28,9 +28,9 @@ For user_id 125:
 1. Gross commission: ₹1,000
 2. TDS calculation: ₹1,000 × 20% = ₹200
 3. Net amount credited to wallet: ₹1,000 - ₹200 = ₹800
-4. **TDS is deducted from booking balance** and creates a `TDS_DEDUCTION` wallet transaction
+4. **TDS is NOT deducted from booking balance** - TDS is calculated and reduces net amount only
 
-**Code location:** `core/binary/utils.py` lines 216-237
+**Code location:** `core/binary/utils.py` lines 284-297
 
 ### 2. TDS for Binary Pair Commissions (After Activation)
 
@@ -43,10 +43,10 @@ For user_id 125:
 1. Gross commission: ₹2,000
 2. TDS calculation: ₹2,000 × 20% = ₹400
 3. Net amount credited to wallet: ₹2,000 - ₹400 = ₹1,600
-4. **TDS is deducted from booking balance** and creates a `TDS_DEDUCTION` wallet transaction
-5. For pairs 6+: Additional 20% extra deduction is also deducted from booking balance
+4. **TDS is NOT deducted from booking balance** - TDS is calculated and reduces net amount only (for all pairs)
+5. For pairs 6+: Additional 20% extra deduction (binary_extra_deduction_percentage) is deducted from booking balance
 
-**Code location:** `core/binary/utils.py` lines 875-877, 941-949
+**Code location:** `core/binary/utils.py` lines 1231-1332
 
 **Implementation:**
 ```python
@@ -54,13 +54,14 @@ For user_id 125:
 tds_amount = commission_amount * (tds_percentage / Decimal('100'))
 net_amount = commission_amount - tds_amount
 
-# Deduct TDS from booking balance (for all pairs)
-if tds_amount > 0:
+# TDS is NOT deducted from booking balance - only extra deduction for pairs 6+ is deducted
+# Deduct extra deduction from booking balance (for 6th+ pairs only)
+if extra_deduction > 0:
     deduct_from_booking_balance(
         user=user,
-        deduction_amount=tds_amount,
-        deduction_type='TDS_DEDUCTION',
-        description=f"TDS ({tds_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})"
+        deduction_amount=extra_deduction,
+        deduction_type='EXTRA_DEDUCTION',
+        description=f"Extra deduction ({extra_deduction_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})"
     )
 ```
 

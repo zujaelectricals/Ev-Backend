@@ -296,15 +296,8 @@ def process_direct_user_commission(referrer, new_user):
                             reference_type='user'
                         )
                         
-                        # Deduct TDS from booking balance
-                        deduct_from_booking_balance(
-                            user=ancestor_user,
-                            deduction_amount=tds_amount,
-                            deduction_type='TDS_DEDUCTION',
-                            description=f"TDS ({tds_percentage}%) on user commission for {new_user.username}",
-                            reference_id=new_user.id,
-                            reference_type='user'
-                        )
+                        # TDS is calculated and reduces net amount, but NOT deducted from booking balance
+                        # Only extra deduction for pairs 6+ is deducted from booking balance
                         
                         commissions_paid = True
                     except Exception as e:
@@ -550,6 +543,25 @@ def process_retroactive_commissions(user):
                 commissions_processed = True
     
     return commissions_processed
+
+
+def has_active_booking_balance(user):
+    """
+    Check if user has an active booking with remaining amount > 0
+    
+    Args:
+        user: User to check
+        
+    Returns:
+        bool: True if user has active booking with remaining balance, False otherwise
+    """
+    from core.booking.models import Booking
+    
+    return Booking.objects.filter(
+        user=user,
+        status__in=['pending', 'active'],
+        remaining_amount__gt=0
+    ).exists()
 
 
 def deduct_from_booking_balance(user, deduction_amount, deduction_type='EXTRA_DEDUCTION', description='', reference_id=None, reference_type='booking'):
@@ -1220,9 +1232,14 @@ def check_and_create_pair(user):
         net_amount = commission_amount - tds_amount
         
         # Calculate extra deduction for 6th+ pairs
+        # Only apply if user has active booking with remaining balance
         if pair_number_after_activation > tds_threshold:
-            extra_deduction = commission_amount * (extra_deduction_percentage / Decimal('100'))
-            net_amount = net_amount - extra_deduction
+            if has_active_booking_balance(user):
+                extra_deduction = commission_amount * (extra_deduction_percentage / Decimal('100'))
+                net_amount = net_amount - extra_deduction
+            else:
+                # No booking balance available - skip extra deduction
+                extra_deduction = Decimal('0')
     
     # Get unmatched users for pairing
     # STRICT RULE: Must have one from left AND one from right (no same-leg pairing)
@@ -1294,19 +1311,10 @@ def check_and_create_pair(user):
             net_amount=net_amount if not commission_blocked else Decimal('0')  # Net amount after TDS and extra deduction (0 if blocked)
         )
         
-        # Deduct TDS and extra deduction from booking balance if commission is not blocked
+        # Deduct extra deduction from booking balance if commission is not blocked
+        # TDS is calculated and reduces net amount, but NOT deducted from booking balance
+        # Only extra deduction (binary_extra_deduction_percentage) for pairs 6+ is deducted from booking balance
         if not commission_blocked:
-            # Deduct TDS from booking balance (for all pairs)
-            if tds_amount > 0:
-                deduct_from_booking_balance(
-                    user=user,
-                    deduction_amount=tds_amount,
-                    deduction_type='TDS_DEDUCTION',
-                    description=f"TDS ({tds_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})",
-                    reference_id=pair.id,
-                    reference_type='binary_pair'
-                )
-            
             # Deduct extra amount from booking balance (for 6th+ pairs only)
             if extra_deduction > 0:
                 deduct_from_booking_balance(

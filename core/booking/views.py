@@ -592,9 +592,11 @@ class PaymentViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        # Use select_related for foreign keys and prefetch_related for reverse lookups
+        queryset = Payment.objects.select_related('user', 'booking')
         if user.is_superuser or user.role in ['admin', 'staff']:
-            return Payment.objects.all()
-        return Payment.objects.filter(user=user)
+            return queryset.all()
+        return queryset.filter(user=user)
     
     def get_serializer_class(self):
         """Return serializer class based on action"""

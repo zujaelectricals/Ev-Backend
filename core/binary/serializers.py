@@ -78,6 +78,21 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         if self.request and 'request' not in self.context:
             self.context['request'] = self.request
     
+    def to_representation(self, instance):
+        """
+        Override to exclude null fields from the response
+        Removes null values for: left_child, right_child, left_side_members, right_side_members, user_profile_picture_url
+        """
+        data = super().to_representation(instance)
+        
+        # Remove null fields to keep response clean
+        null_fields_to_remove = ['left_child', 'right_child', 'left_side_members', 'right_side_members', 'user_profile_picture_url']
+        for field in null_fields_to_remove:
+            if field in data and data[field] is None:
+                del data[field]
+        
+        return data
+    
     def get_user_full_name(self, obj):
         """Get user's full name"""
         if obj.user:
@@ -277,9 +292,16 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             if not left_child:
                 return None
             
+            # When pagination is enabled, limit recursion to only show direct child (no nested children)
+            # Nested children will be accessible through paginated left_side_members and right_side_members
+            effective_max_depth = self.max_depth
+            if self.page is not None and self.page_size is not None:
+                # Only show direct child, stop recursion here
+                effective_max_depth = self.current_depth + 1
+            
             serializer = BinaryTreeNodeSerializer(
                 left_child,
-                max_depth=self.max_depth,
+                max_depth=effective_max_depth,
                 min_depth=self.min_depth,
                 current_depth=self.current_depth + 1,
                 side_filter=self.side_filter,
@@ -314,9 +336,16 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             if not right_child:
                 return None
             
+            # When pagination is enabled, limit recursion to only show direct child (no nested children)
+            # Nested children will be accessible through paginated left_side_members and right_side_members
+            effective_max_depth = self.max_depth
+            if self.page is not None and self.page_size is not None:
+                # Only show direct child, stop recursion here
+                effective_max_depth = self.current_depth + 1
+            
             serializer = BinaryTreeNodeSerializer(
                 right_child,
-                max_depth=self.max_depth,
+                max_depth=effective_max_depth,
                 min_depth=self.min_depth,
                 current_depth=self.current_depth + 1,
                 side_filter=self.side_filter,
@@ -341,8 +370,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         if current_depth >= max_depth:
             return []
         
-        descendants = []
-        # Get direct children on the specified side
+        # First, collect all nodes and their users (without expensive queries)
+        nodes_to_process = []
         children = BinaryNode.objects.select_related(
             'user', 'user__wallet', 'parent', 'parent__user'
         ).filter(parent=node, side=side)
@@ -350,48 +379,248 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         for child in children:
             # Only add direct children if not excluding them and depth is within range
             if (not exclude_direct_children or current_depth > 0) and current_depth >= min_depth:
-                # Create a simplified serializer for list view (without nested children to avoid duplication)
-                child_data = {
-                    'node_id': child.id,
-                    'user_id': child.user.id,
-                    'user_email': child.user.email,
-                    'user_username': child.user.username,
-                    'user_full_name': child.user.get_full_name() or child.user.username,
-                    'user_mobile': child.user.mobile,
-                    'user_first_name': child.user.first_name,
-                    'user_last_name': child.user.last_name,
-                    'user_city': child.user.city,
-                    'user_state': child.user.state,
-                    'is_distributor': child.user.is_distributor,
-                    'is_active_buyer': child.user.is_active_buyer,
-                    'referral_code': child.user.referral_code,
-                    'date_joined': child.user.date_joined,
-                    'wallet_balance': self._get_wallet_balance(child.user),
-                    'total_bookings': self._get_total_bookings(child.user),
-                    'total_binary_pairs': self._get_total_binary_pairs(child.user),
-                    'total_earnings': self._get_net_amount_total(child.user),
-                    'total_referrals': self._get_total_referrals(child.user),
-                    'total_amount': self._get_total_amount(child.user),
-                    'tds_current': self._get_tds_current(child.user),
-                    'net_amount_total': self._get_net_amount_total(child.user),
-                    'parent': child.parent.id if child.parent else None,
-                    'parent_name': child.parent.user.get_full_name() or child.parent.user.username if child.parent and child.parent.user else None,
-                    'side': child.side,
-                    'level': child.level,
-                    'left_count': child.left_count,
-                    'right_count': child.right_count,
-                    'counts_for_activation': self._get_counts_for_activation(child),
-                    'eligible_for_pairing': self._get_eligible_for_pairing(child),
-                    'created_at': child.created_at,
-                    'updated_at': child.updated_at
-                }
-                descendants.append(child_data)
+                nodes_to_process.append(child)
             
             # Recursively get descendants of this child (always include grandchildren and below)
-            descendants.extend(self._get_all_descendants(child, 'left', max_depth, current_depth + 1, exclude_direct_children=False, min_depth=min_depth))
-            descendants.extend(self._get_all_descendants(child, 'right', max_depth, current_depth + 1, exclude_direct_children=False, min_depth=min_depth))
+            nodes_to_process.extend(self._get_all_descendants_nodes(child, 'left', max_depth, current_depth + 1, exclude_direct_children=False, min_depth=min_depth))
+            nodes_to_process.extend(self._get_all_descendants_nodes(child, 'right', max_depth, current_depth + 1, exclude_direct_children=False, min_depth=min_depth))
+        
+        # If no nodes to process, return empty
+        if not nodes_to_process:
+            return []
+        
+        # Batch query all data for all users at once
+        user_ids = [node.user.id for node in nodes_to_process if node.user]
+        batch_data = self._batch_query_user_data(user_ids, [node.id for node in nodes_to_process])
+        
+        # Build response using batch data
+        descendants = []
+        for child in nodes_to_process:
+            if not child.user:
+                continue
+                
+            user_id = child.user.id
+            node_id = child.id
+            
+            child_data = {
+                'node_id': node_id,
+                'user_id': user_id,
+                'user_email': child.user.email,
+                'user_username': child.user.username,
+                'user_full_name': child.user.get_full_name() or child.user.username,
+                'user_mobile': child.user.mobile,
+                'user_first_name': child.user.first_name,
+                'user_last_name': child.user.last_name,
+                'user_city': child.user.city,
+                'user_state': child.user.state,
+                'is_distributor': child.user.is_distributor,
+                'is_active_buyer': child.user.is_active_buyer,
+                'referral_code': child.user.referral_code,
+                'date_joined': child.user.date_joined,
+                'wallet_balance': batch_data['wallet_balances'].get(user_id, "0.00"),
+                'total_bookings': batch_data['bookings_count'].get(user_id, 0),
+                'total_binary_pairs': batch_data['binary_pairs_count'].get(user_id, 0),
+                'total_earnings': batch_data['net_amount_total'].get(user_id, "0.00"),
+                'total_referrals': batch_data['referrals_count'].get(user_id, 0),
+                'total_amount': batch_data['total_amount'].get(user_id, "0.00"),
+                'tds_current': batch_data['tds_current'].get(user_id, "0.00"),
+                'net_amount_total': batch_data['net_amount_total'].get(user_id, "0.00"),
+                'parent': child.parent.id if child.parent else None,
+                'parent_name': child.parent.user.get_full_name() or child.parent.user.username if child.parent and child.parent.user else None,
+                'side': child.side,
+                'level': child.level,
+                'left_count': child.left_count,
+                'right_count': child.right_count,
+                'counts_for_activation': batch_data['counts_for_activation'].get(node_id, False),
+                'eligible_for_pairing': batch_data['eligible_for_pairing'].get(node_id, False),
+                'created_at': child.created_at,
+                'updated_at': child.updated_at
+            }
+            descendants.append(child_data)
         
         return descendants
+    
+    def _get_all_descendants_nodes(self, node, side, max_depth, current_depth=0, exclude_direct_children=False, min_depth=0):
+        """
+        Helper method to collect all descendant nodes (without expensive queries)
+        Returns list of BinaryNode objects
+        """
+        if current_depth >= max_depth:
+            return []
+        
+        nodes = []
+        children = BinaryNode.objects.select_related(
+            'user', 'user__wallet', 'parent', 'parent__user'
+        ).filter(parent=node, side=side)
+        
+        for child in children:
+            if (not exclude_direct_children or current_depth > 0) and current_depth >= min_depth:
+                nodes.append(child)
+            
+            nodes.extend(self._get_all_descendants_nodes(child, 'left', max_depth, current_depth + 1, exclude_direct_children=False, min_depth=min_depth))
+            nodes.extend(self._get_all_descendants_nodes(child, 'right', max_depth, current_depth + 1, exclude_direct_children=False, min_depth=min_depth))
+        
+        return nodes
+    
+    def _batch_query_user_data(self, user_ids, node_ids):
+        """
+        Batch query all user-related data in a few queries instead of N queries
+        Returns a dictionary with all the data keyed by user_id or node_id
+        """
+        from django.db.models import Sum, Count, Q
+        from decimal import Decimal
+        
+        if not user_ids:
+            return {
+                'wallet_balances': {},
+                'bookings_count': {},
+                'binary_pairs_count': {},
+                'net_amount_total': {},
+                'referrals_count': {},
+                'total_amount': {},
+                'tds_current': {},
+                'counts_for_activation': {},
+                'eligible_for_pairing': {}
+            }
+        
+        # Batch query wallet balances (excluding certain transaction types)
+        from core.wallet.models import WalletTransaction
+        wallet_data = WalletTransaction.objects.filter(
+            user_id__in=user_ids
+        ).exclude(
+            transaction_type__in=['REFERRAL_BONUS', 'TDS_DEDUCTION', 'EXTRA_DEDUCTION']
+        ).values('user_id').annotate(total=Sum('amount'))
+        wallet_balances = {item['user_id']: str(item['total'] or Decimal('0')) for item in wallet_data}
+        
+        # Batch query bookings count
+        from core.booking.models import Booking
+        bookings_data = Booking.objects.filter(user_id__in=user_ids).values('user_id').annotate(count=Count('id'))
+        bookings_count = {item['user_id']: item['count'] for item in bookings_data}
+        
+        # Batch query binary pairs count
+        from .models import BinaryPair
+        binary_pairs_data = BinaryPair.objects.filter(user_id__in=user_ids).values('user_id').annotate(count=Count('id'))
+        binary_pairs_count = {item['user_id']: item['count'] for item in binary_pairs_data}
+        
+        # Batch query binary pair commissions (net)
+        binary_commissions = WalletTransaction.objects.filter(
+            user_id__in=user_ids,
+            transaction_type='BINARY_PAIR_COMMISSION'
+        ).values('user_id').annotate(total=Sum('amount'))
+        binary_commissions_dict = {item['user_id']: item['total'] or Decimal('0') for item in binary_commissions}
+        
+        # Batch query direct user commissions (net)
+        direct_commissions = WalletTransaction.objects.filter(
+            user_id__in=user_ids,
+            transaction_type='DIRECT_USER_COMMISSION'
+        ).values('user_id').annotate(total=Sum('amount'))
+        direct_commissions_dict = {item['user_id']: item['total'] or Decimal('0') for item in direct_commissions}
+        
+        # Batch query binary initial bonus
+        initial_bonus = WalletTransaction.objects.filter(
+            user_id__in=user_ids,
+            transaction_type='BINARY_INITIAL_BONUS'
+        ).values('user_id').annotate(total=Sum('amount'))
+        initial_bonus_dict = {item['user_id']: item['total'] or Decimal('0') for item in initial_bonus}
+        
+        # Calculate net_amount_total for each user
+        net_amount_total = {}
+        for user_id in user_ids:
+            total = (binary_commissions_dict.get(user_id, Decimal('0')) + 
+                    direct_commissions_dict.get(user_id, Decimal('0')) + 
+                    initial_bonus_dict.get(user_id, Decimal('0')))
+            net_amount_total[user_id] = str(total)
+        
+        # Batch query referrals count
+        from core.users.models import User
+        # Get all users referred by our users
+        direct_referrals_users = User.objects.filter(referred_by_id__in=user_ids).values_list('referred_by_id', 'id')
+        direct_referrals_dict = {}
+        for referrer_id, referred_id in direct_referrals_users:
+            if referrer_id not in direct_referrals_dict:
+                direct_referrals_dict[referrer_id] = set()
+            direct_referrals_dict[referrer_id].add(referred_id)
+        
+        # Get all bookings with our users as referrers
+        booking_referrals_users = Booking.objects.filter(referred_by_id__in=user_ids).values_list('referred_by_id', 'user_id').distinct()
+        for referrer_id, user_id in booking_referrals_users:
+            if referrer_id not in direct_referrals_dict:
+                direct_referrals_dict[referrer_id] = set()
+            direct_referrals_dict[referrer_id].add(user_id)
+        
+        referrals_count = {user_id: len(direct_referrals_dict.get(user_id, set())) for user_id in user_ids}
+        
+        # Batch query total amount (gross)
+        from .models import BinaryEarning
+        binary_earnings = BinaryEarning.objects.filter(user_id__in=user_ids).values('user_id').annotate(total=Sum('amount'))
+        binary_earnings_dict = {item['user_id']: item['total'] or Decimal('0') for item in binary_earnings}
+        
+        tds_for_direct = WalletTransaction.objects.filter(
+            user_id__in=user_ids,
+            transaction_type='TDS_DEDUCTION',
+            description__icontains='on user commission'
+        ).values('user_id').annotate(total=Sum('amount'))
+        tds_for_direct_dict = {item['user_id']: item['total'] or Decimal('0') for item in tds_for_direct}
+        
+        total_amount = {}
+        for user_id in user_ids:
+            direct_gross = direct_commissions_dict.get(user_id, Decimal('0')) - tds_for_direct_dict.get(user_id, Decimal('0'))
+            total_amount[user_id] = str(binary_earnings_dict.get(user_id, Decimal('0')) + direct_gross)
+        
+        # Batch query TDS current
+        tds_data = WalletTransaction.objects.filter(
+            user_id__in=user_ids,
+            transaction_type='TDS_DEDUCTION'
+        ).values('user_id').annotate(total=Sum('amount'))
+        tds_current = {item['user_id']: str(abs(item['total'] or Decimal('0'))) for item in tds_data}
+        
+        # Batch query counts_for_activation (check if user has activation payment)
+        from core.booking.models import Payment
+        activation_payments = Payment.objects.filter(
+            user_id__in=user_ids,
+            status='completed'
+        ).values('user_id').annotate(count=Count('id'))
+        has_activation = {item['user_id']: item['count'] > 0 for item in activation_payments}
+        
+        # For counts_for_activation and eligible_for_pairing, we need node data
+        # Get nodes with their users to check activation
+        nodes = BinaryNode.objects.filter(id__in=node_ids).select_related('user', 'parent')
+        counts_for_activation = {}
+        eligible_for_pairing = {}
+        
+        for node in nodes:
+            user_id = node.user.id if node.user else None
+            if user_id:
+                counts_for_activation[node.id] = has_activation.get(user_id, False)
+                
+                # Check eligible_for_pairing (user has activation AND ancestor has binary_commission_activated)
+                if has_activation.get(user_id, False):
+                    # Check if any ancestor has binary_commission_activated
+                    current = node.parent
+                    has_activated_ancestor = False
+                    while current:
+                        if current.binary_commission_activated:
+                            has_activated_ancestor = True
+                            break
+                        current = current.parent
+                    eligible_for_pairing[node.id] = has_activated_ancestor
+                else:
+                    eligible_for_pairing[node.id] = False
+            else:
+                counts_for_activation[node.id] = False
+                eligible_for_pairing[node.id] = False
+        
+        return {
+            'wallet_balances': wallet_balances,
+            'bookings_count': bookings_count,
+            'binary_pairs_count': binary_pairs_count,
+            'net_amount_total': net_amount_total,
+            'referrals_count': referrals_count,
+            'total_amount': total_amount,
+            'tds_current': tds_current,
+            'counts_for_activation': counts_for_activation,
+            'eligible_for_pairing': eligible_for_pairing
+        }
     
     def _get_total_bookings(self, user):
         """Helper method to get total bookings count"""
@@ -559,9 +788,15 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         
         return False
     
-    def _paginate_side_members(self, members, side_name):
+    def _paginate_side_members(self, members, side_name, node=None):
         """
         Paginate side members array and return paginated response structure
+        Applies pagination at all levels to reduce JSON payload size
+        
+        Args:
+            members: List of member dictionaries
+            side_name: 'left' or 'right'
+            node: BinaryNode object (optional, used to get accurate total count from stored counts)
         """
         if not members:
             return None
@@ -580,8 +815,27 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             if page_size < 1:
                 page_size = 20
             
-            # Calculate pagination
-            total_count = len(members)
+            # Calculate total count
+            # If node is provided, use stored counts for accurate total (accounts for all descendants regardless of depth limit)
+            # Otherwise, use the length of fetched members
+            if node:
+                # Get total count from stored counts
+                if side_name == 'left':
+                    total_count = node.left_count
+                    # Subtract 1 if direct left child exists (since we exclude direct children)
+                    from .models import BinaryNode
+                    if BinaryNode.objects.filter(parent=node, side='left').exists():
+                        total_count = max(0, total_count - 1)
+                else:  # right
+                    total_count = node.right_count
+                    # Subtract 1 if direct right child exists (since we exclude direct children)
+                    from .models import BinaryNode
+                    if BinaryNode.objects.filter(parent=node, side='right').exists():
+                        total_count = max(0, total_count - 1)
+            else:
+                # Fallback to length of fetched members (may be inaccurate if depth limited)
+                total_count = len(members)
+            
             total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
             
             # Validate page number
@@ -642,7 +896,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             return None
         
         members = self._get_all_descendants(obj, 'left', self.max_depth, 0, exclude_direct_children=True, min_depth=self.min_depth)
-        return self._paginate_side_members(members, 'left')
+        return self._paginate_side_members(members, 'left', node=obj)
     
     def get_right_side_members(self, obj):
         """
@@ -655,7 +909,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             return None
         
         members = self._get_all_descendants(obj, 'right', self.max_depth, 0, exclude_direct_children=True, min_depth=self.min_depth)
-        return self._paginate_side_members(members, 'right')
+        return self._paginate_side_members(members, 'right', node=obj)
 
 
 class BinaryPairSerializer(serializers.ModelSerializer):

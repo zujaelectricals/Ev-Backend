@@ -163,13 +163,31 @@ REST_FRAMEWORK = {
 
 # JWT Settings
 from datetime import timedelta
+import hashlib
+
+# Get JWT signing key - ensure it's at least 32 bytes for HS256
+jwt_secret_key = config('JWT_SECRET_KEY', default=SECRET_KEY)
+jwt_key_bytes = jwt_secret_key.encode('utf-8')
+if len(jwt_key_bytes) < 32:
+    # Pad the key deterministically to 32+ bytes using SHA256
+    # This ensures the same key is always generated from the same input
+    import warnings
+    warnings.warn(
+        f"JWT_SECRET_KEY is only {len(jwt_key_bytes)} bytes. "
+        "HS256 requires at least 32 bytes. Padding to 32 bytes using SHA256. "
+        "Please update your .env file with a proper 32+ byte JWT_SECRET_KEY for production.",
+        UserWarning
+    )
+    # Use SHA256 hash to create a deterministic 32-byte key from the short key
+    jwt_secret_key = hashlib.sha256(jwt_key_bytes).hexdigest()
+
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=config('ACCESS_TOKEN_LIFETIME', default=60, cast=int)),
     'REFRESH_TOKEN_LIFETIME': timedelta(minutes=config('REFRESH_TOKEN_LIFETIME', default=1440, cast=int)),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'ALGORITHM': config('JWT_ALGORITHM', default='HS256'),
-    'SIGNING_KEY': config('JWT_SECRET_KEY', default=SECRET_KEY),
+    'SIGNING_KEY': jwt_secret_key,
     'AUTH_HEADER_TYPES': ('Bearer',),
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
     'TOKEN_TYPE_CLAIM': 'token_type',

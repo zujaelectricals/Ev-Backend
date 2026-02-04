@@ -17,7 +17,7 @@ The system implements a two-phase commission structure:
 
 ### Commission Details
 - **Amount**: ₹1000 (configurable via `direct_user_commission_amount`)
-- **TDS**: 20% (₹200) deducted from booking balance
+- **TDS**: 20% (₹200) calculated and reduces net amount, but **NOT deducted from booking balance**
 - **Net Amount**: ₹800 credited to wallet
 - **Recipients**: ALL ancestors in the referral chain (not just direct parent)
 
@@ -31,8 +31,7 @@ New User Added → Has Payment? → YES → Process Commission for All Ancestors
                     ├─ Total Descendants >= 3? → YES → Skip (No Commission)
                     └─ Total Descendants < 3? → YES → Pay Commission
                                                       ├─ Calculate TDS (20%)
-                                                      ├─ Credit ₹800 to Wallet
-                                                      └─ Deduct ₹200 TDS from Booking
+                                                      └─ Credit ₹800 to Wallet (TDS not deducted from booking)
 ```
 
 ### Example Scenario
@@ -92,14 +91,16 @@ The eligibility depends on whether `binary_commission_activation_count` is **eve
 
 1. **TDS (Tax Deducted at Source)**
    - **Rate**: 20% (₹400)
-   - **Applied to**: All pairs
-   - **Deducted from**: Booking balance (not wallet)
+   - **Applied to**: All pairs (calculated for all pairs, reduces net amount)
+   - **Deducted from booking balance**: **NO** - TDS is never deducted from booking balance
+   - **For all pairs**: TDS is calculated and reduces net amount, but **NOT deducted from booking balance**
 
 2. **Extra Deduction (6th+ Pairs)**
    - **Rate**: 20% (₹400)
    - **Applied to**: 6th pair and onwards
-   - **Deducted from**: Booking balance (not wallet)
-   - **Condition**: Only if user is **NOT Active Buyer**
+   - **Deducted from**: Booking balance (not wallet) - **ONLY this deduction is applied to booking balance**
+   - **Condition**: Only applied if user has an **active booking with remaining balance**
+   - **Note**: If no booking balance exists, extra deduction is skipped and user receives full commission after TDS (₹1,600)
 
 3. **Active Buyer Requirement**
    - **Rule**: Non-Active Buyer distributors can only earn for **first 5 pairs**
@@ -111,19 +112,31 @@ The eligibility depends on whether `binary_commission_activation_count` is **eve
 ```
 Pair 1-5 (Active Buyer):
   Gross: ₹2000
-  TDS: ₹400
+  TDS: ₹400 (calculated, reduces net amount)
+  TDS deducted from booking: NO ❌
   Net: ₹1600 ✅
+  Booking total_paid: NO CHANGE ✅
 
 Pair 1-5 (Non-Active Buyer):
   Gross: ₹2000
-  TDS: ₹400
+  TDS: ₹400 (calculated, reduces net amount)
+  TDS deducted from booking: NO ❌
   Net: ₹1600 ✅
+  Booking total_paid: NO CHANGE ✅
 
-Pair 6+ (Active Buyer):
+Pair 6+ (Active Buyer, with booking balance):
   Gross: ₹2000
-  TDS: ₹400
-  Extra Deduction: ₹400
+  TDS: ₹400 (deducted from booking balance)
+  Extra Deduction: ₹400 (deducted from booking balance)
   Net: ₹1200 ✅
+  Booking total_paid: INCREASES by ₹800 (₹400 TDS + ₹400 extra) ✅
+
+Pair 6+ (Active Buyer, no booking balance):
+  Gross: ₹2000
+  TDS: ₹400 (deducted from booking balance, but no booking available)
+  Extra Deduction: ₹0 (skipped - no booking balance)
+  Net: ₹1600 ✅
+  Booking total_paid: NO CHANGE (no booking to deduct from) ✅
 
 Pair 6+ (Non-Active Buyer):
   Gross: ₹2000
