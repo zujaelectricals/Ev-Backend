@@ -77,7 +77,7 @@ class BookingSerializer(serializers.ModelSerializer):
     vehicle_details = VehicleDetailSerializer(source='vehicle_model', read_only=True)
     vehicle_model_code = serializers.CharField(write_only=True, required=False)
     model_code = serializers.CharField(source='vehicle_model.model_code', read_only=True)
-    referral_code = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    referral_code = serializers.CharField(write_only=True, required=True)
     manual_placement = serializers.BooleanField(write_only=True, required=False, default=False)
     reservation_status = serializers.CharField(source='stock_reservation.status', read_only=True)
     reservation_expires_at = serializers.DateTimeField(source='stock_reservation.expires_at', read_only=True)
@@ -101,17 +101,29 @@ class BookingSerializer(serializers.ModelSerializer):
         return value
     
     def validate_referral_code(self, value):
-        """Validate referral code if provided"""
-        if value:
-            value = value.strip().upper()
-            # Check if referral code exists
-            try:
-                referring_user = User.objects.get(referral_code=value)
-            except User.DoesNotExist:
-                raise serializers.ValidationError("Invalid referral code")
-            
-            # Prevent self-referral (will be checked in perform_create with user context)
+        """Validate referral code (now mandatory)"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Referral code is required")
+        
+        value = value.strip().upper()
+        
+        # Check if this is the company referral code from settings
+        # If it matches, allow it even if user doesn't exist yet (will be created in perform_create)
+        from core.settings.models import PlatformSettings
+        platform_settings = PlatformSettings.get_settings()
+        company_referral_code = platform_settings.company_referral_code.strip().upper() if platform_settings.company_referral_code else None
+        
+        if company_referral_code and value == company_referral_code:
+            # Company referral code is allowed even if user doesn't exist yet
             return value
+        
+        # For other referral codes, check if user exists
+        try:
+            referring_user = User.objects.get(referral_code=value)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("Invalid referral code")
+        
+        # Prevent self-referral (will be checked in perform_create with user context)
         return value
     
     def validate_vehicle_model_code(self, value):

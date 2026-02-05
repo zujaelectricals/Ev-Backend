@@ -223,6 +223,20 @@ def process_direct_user_commission(referrer, new_user):
             locked_node = BinaryNode.objects.select_for_update().get(id=ancestor_node.id)
             ancestor_user = locked_node.user
             
+            # Skip commission for company referral code user
+            company_referral_code = platform_settings.company_referral_code
+            if company_referral_code and ancestor_user.referral_code:
+                company_referral_code_normalized = company_referral_code.strip().upper()
+                ancestor_referral_code_normalized = ancestor_user.referral_code.strip().upper()
+                if ancestor_referral_code_normalized == company_referral_code_normalized:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(
+                        f"Commission blocked for {ancestor_user.username}: "
+                        f"Company referral code user (no commission)"
+                    )
+                    continue  # Skip commission payment for company user
+            
             # EXPLICIT CHECK: If binary commission is already activated, skip ALL commission processing
             # Referral bonus (DIRECT_USER_COMMISSION) MUST STOP completely after activation
             if locked_node.binary_commission_activated:

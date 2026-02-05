@@ -25,6 +25,7 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
             'distributor_application_auto_approve',
             'payout_approval_needed',
             'payout_tds_percentage',
+            'company_referral_code',
             'updated_at',
             'updated_by',
             'updated_by_username',
@@ -106,5 +107,17 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
         """Validate that activation amount is non-negative"""
         if value < 0:
             raise serializers.ValidationError("activation_amount must be non-negative")
+        return value
+    
+    def validate_company_referral_code(self, value):
+        """Validate that company referral code is not empty and is a valid string"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("company_referral_code cannot be empty")
+        # Strip whitespace and convert to uppercase
+        value = value.strip().upper()
+        if len(value) < 3:
+            raise serializers.ValidationError("company_referral_code must be at least 3 characters long")
+        if len(value) > 20:
+            raise serializers.ValidationError("company_referral_code cannot exceed 20 characters")
         return value
 

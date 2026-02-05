@@ -7,9 +7,10 @@ from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from django.utils import timezone
+from datetime import datetime
 from rest_framework.exceptions import ValidationError
 from .models import User, KYC, Nominee, DistributorApplication
-from .serializers import UserSerializer, UserProfileSerializer, KYCSerializer, NomineeSerializer, DistributorApplicationSerializer
+from .serializers import UserSerializer, UserProfileSerializer, KYCSerializer, NomineeSerializer, DistributorApplicationSerializer, UnifiedKYCSerializer
 from core.settings.models import PlatformSettings
 
 
@@ -108,9 +109,9 @@ class UserViewSet(viewsets.ModelViewSet):
     def profile(self, request):
         """Get current user's profile"""
         # Refresh user from database to ensure all fields are loaded
-        # Use select_related for ForeignKey (referred_by) and OneToOneField (binary_node)
-        user = User.objects.select_related('referred_by', 'binary_node').get(pk=request.user.pk)
-        # The serializer will handle OneToOneField reverse relationships (kyc, nominee) safely
+        # Use select_related for ForeignKey (referred_by) and OneToOneField (binary_node, nominee)
+        user = User.objects.select_related('referred_by', 'binary_node', 'nominee').get(pk=request.user.pk)
+        # The serializer will handle OneToOneField reverse relationships (kyc) safely
         serializer = UserProfileSerializer(user, context={'request': request})
         return Response(serializer.data)
     
@@ -329,58 +330,127 @@ class KYCViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], permission_classes=[IsAdminUser])
     def list_all(self, request):
         """
-        List all KYC documents with filtering (Admin only)
-        Supports filtering by status, date ranges, user_id, user_role, and ordering
+        List all KYC documents (both User KYC and Nominee KYC) with filtering (Admin only)
+        Supports filtering by status, date ranges, user_id, user_role, kyc_type, and ordering
         """
-        queryset = KYC.objects.all().select_related('user', 'reviewed_by')
+        # Get User KYC queryset
+        kyc_queryset = KYC.objects.all().select_related('user', 'reviewed_by')
+        
+        # Get Nominee queryset (only those with KYC submitted)
+        nominee_queryset = Nominee.objects.filter(
+            kyc_submitted_at__isnull=False
+        ).select_related('user', 'kyc_verified_by')
         
         # Filter by status
-        status = request.query_params.get('status')
-        if status:
-            queryset = queryset.filter(status=status)
+        status_param = request.query_params.get('status')
+        if status_param:
+            # Map status for KYC (approved) vs Nominee (verified)
+            if status_param == 'approved':
+                kyc_queryset = kyc_queryset.filter(status='approved')
+                nominee_queryset = nominee_queryset.filter(kyc_status='verified')
+            elif status_param == 'pending':
+                kyc_queryset = kyc_queryset.filter(status='pending')
+                nominee_queryset = nominee_queryset.filter(kyc_status='pending')
+            elif status_param == 'rejected':
+                kyc_queryset = kyc_queryset.filter(status='rejected')
+                nominee_queryset = nominee_queryset.filter(kyc_status='rejected')
         
         # Filter by submission date range
         submitted_date_from = request.query_params.get('submitted_date_from')
         submitted_date_to = request.query_params.get('submitted_date_to')
         if submitted_date_from:
-            # Use date lookup to handle date string properly with DateTimeField
-            queryset = queryset.filter(submitted_at__date__gte=submitted_date_from)
+            kyc_queryset = kyc_queryset.filter(submitted_at__date__gte=submitted_date_from)
+            nominee_queryset = nominee_queryset.filter(kyc_submitted_at__date__gte=submitted_date_from)
         if submitted_date_to:
-            queryset = queryset.filter(submitted_at__date__lte=submitted_date_to)
+            kyc_queryset = kyc_queryset.filter(submitted_at__date__lte=submitted_date_to)
+            nominee_queryset = nominee_queryset.filter(kyc_submitted_at__date__lte=submitted_date_to)
         
         # Filter by review date range
         reviewed_date_from = request.query_params.get('reviewed_date_from')
         reviewed_date_to = request.query_params.get('reviewed_date_to')
         if reviewed_date_from:
-            queryset = queryset.filter(reviewed_at__date__gte=reviewed_date_from)
+            kyc_queryset = kyc_queryset.filter(reviewed_at__date__gte=reviewed_date_from)
+            nominee_queryset = nominee_queryset.filter(kyc_verified_at__date__gte=reviewed_date_from)
         if reviewed_date_to:
-            queryset = queryset.filter(reviewed_at__date__lte=reviewed_date_to)
+            kyc_queryset = kyc_queryset.filter(reviewed_at__date__lte=reviewed_date_to)
+            nominee_queryset = nominee_queryset.filter(kyc_verified_at__date__lte=reviewed_date_to)
         
         # Filter by user ID
         user_id = request.query_params.get('user_id')
         if user_id:
             try:
-                queryset = queryset.filter(user_id=int(user_id))
+                user_id_int = int(user_id)
+                kyc_queryset = kyc_queryset.filter(user_id=user_id_int)
+                nominee_queryset = nominee_queryset.filter(user_id=user_id_int)
             except (ValueError, TypeError):
                 pass  # Invalid user_id, ignore filter
         
         # Filter by user role
         user_role = request.query_params.get('user_role')
         if user_role:
-            queryset = queryset.filter(user__role=user_role)
+            kyc_queryset = kyc_queryset.filter(user__role=user_role)
+            nominee_queryset = nominee_queryset.filter(user__role=user_role)
+        
+        # Filter by kyc_type (user or nominee)
+        kyc_type = request.query_params.get('kyc_type')
+        if kyc_type == 'user':
+            nominee_queryset = Nominee.objects.none()
+        elif kyc_type == 'nominee':
+            kyc_queryset = KYC.objects.none()
+        
+        # Convert to unified format
+        unified_data = []
+        
+        # Add User KYC records
+        for kyc in kyc_queryset:
+            unified_data.append(UnifiedKYCSerializer.from_kyc(kyc, request))
+        
+        # Add Nominee KYC records
+        for nominee in nominee_queryset:
+            unified_data.append(UnifiedKYCSerializer.from_nominee(nominee, request))
         
         # Ordering
         ordering = request.query_params.get('ordering', '-submitted_at')
         if ordering:
-            queryset = queryset.order_by(ordering)
+            reverse = ordering.startswith('-')
+            field = ordering.lstrip('-')
+            
+            # Map field names for sorting
+            # Use a very old datetime for None values to sort them last
+            min_datetime = timezone.make_aware(datetime.min)
+            if field == 'submitted_at':
+                unified_data.sort(
+                    key=lambda x: x['submitted_at'] if x['submitted_at'] else min_datetime,
+                    reverse=reverse
+                )
+            elif field == 'reviewed_at':
+                unified_data.sort(
+                    key=lambda x: x['reviewed_at'] if x['reviewed_at'] else min_datetime,
+                    reverse=reverse
+                )
+            elif field == 'status':
+                unified_data.sort(key=lambda x: x['status'], reverse=reverse)
+            else:
+                # Default to submitted_at
+                unified_data.sort(
+                    key=lambda x: x['submitted_at'] if x['submitted_at'] else min_datetime,
+                    reverse=True
+                )
+        else:
+            # Default ordering by submitted_at descending
+            min_datetime = timezone.make_aware(datetime.min)
+            unified_data.sort(
+                key=lambda x: x['submitted_at'] if x['submitted_at'] else min_datetime,
+                reverse=True
+            )
         
         # Pagination
-        page = self.paginate_queryset(queryset)
+        page = self.paginate_queryset(unified_data)
         if page is not None:
-            serializer = self.get_serializer(page, many=True)
+            serializer = UnifiedKYCSerializer(page, many=True)
             return self.get_paginated_response(serializer.data)
         
-        serializer = self.get_serializer(queryset, many=True)
+        serializer = UnifiedKYCSerializer(unified_data, many=True)
         return Response(serializer.data)
 
 
@@ -436,6 +506,27 @@ class NomineeViewSet(viewsets.ModelViewSet):
             return Response(serializer.data, status=status_code)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser], url_path='approve')
+    def approve(self, request, pk=None):
+        """Approve nominee KYC (Admin only) - Convenience endpoint"""
+        nominee = self.get_object()
+        
+        # Check if already verified
+        if nominee.kyc_status == 'verified':
+            return Response(
+                {'error': 'Nominee KYC is already verified'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update nominee KYC status to verified
+        nominee.kyc_status = 'verified'
+        nominee.kyc_verified_by = request.user
+        nominee.kyc_verified_at = timezone.now()
+        nominee.kyc_rejection_reason = ''
+        
+        nominee.save()
+        return Response({'status': 'verified', 'message': 'Nominee KYC approved successfully'})
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAdminUser], url_path='update-kyc-status')
     def update_kyc_status(self, request, pk=None):
         """Update nominee KYC status - verify or reject (Admin only)"""

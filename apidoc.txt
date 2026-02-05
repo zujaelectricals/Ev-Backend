@@ -1511,7 +1511,7 @@ Super User: EVAdmin && EVAdmin@123
       "delivery_state": "Maharashtra",    // Required
       "delivery_pin": "400001",           // Required
       "terms_accepted": true,             // Required
-      "referral_code": "ABC12345",        // Optional - Referral code of referring user
+      "referral_code": "ABC12345",        // Required - Referral code of referring user
       "manual_placement": false,           // Optional - If true, skip automatic binary tree placement (default: false)
       "join_distributor_program": false,  // Optional
       "payment_gateway_ref": "TXN123",    // Optional
@@ -1566,10 +1566,13 @@ Super User: EVAdmin && EVAdmin@123
     - Reservation is completed when first payment is confirmed (status='completed')
     
     Note on Referral Code:
-    - If referral_code is provided, the system validates it and sets referred_by automatically
+    - referral_code is REQUIRED for all bookings
+    - The system validates the referral code and sets referred_by automatically
     - User cannot use their own referral code (self-referral prevention)
     - If user.referred_by is not set, it will be set from the referral_code
     - The system stores whether the referrer was a distributor when the booking was created (referrer_was_distributor field)
+    - First Booking Behavior: When the very first booking is created in the system (no bookings exist yet), the system automatically uses the company referral code from Platform Settings (GET /api/settings/ → company_referral_code field) regardless of what referral_code is provided. This ensures the first user is always referred by the company.
+    - Company Referral Code: The company referral code is configurable via Platform Settings API and represents the company/superadmin account. Users who use the company referral code will be linked to the company user, but NO commission will be paid to the company user (commission exclusion for company referral code).
     - Commission is granted to the referrer after successful payment capture ONLY if referrer_was_distributor is True
       * Commission = payment_amount × REFERRAL_COMMISSION_PERCENTAGE / 100
       * Commission is granted on every successful payment for the booking
@@ -1606,6 +1609,7 @@ Super User: EVAdmin && EVAdmin@123
     - Net amount (₹800 = ₹1000 - ₹200 TDS) is credited to referrer's wallet immediately upon placement
     - TDS is deducted from referrer's oldest active booking remaining amount
     - Only distributors can receive commissions
+    - Company Referral Code Exclusion: Users with referral_code matching the company_referral_code from Platform Settings will NOT receive any commission. This ensures the company account does not earn commissions when users use the company referral code.
     - Note: Direct user commissions are NOT restricted for non-Active Buyer distributors (can earn unlimited before binary activation)
     
     Error Response (400):
@@ -5757,6 +5761,7 @@ Super User: EVAdmin && EVAdmin@123
      "distributor_application_auto_approve": true,  // If true, distributor applications are auto-approved; if false, require admin/staff approval (default: true)
      "payout_approval_needed": true,  // If true, payout requests require admin approval; if false, payouts are automatically processed (default: true)
      "payout_tds_percentage": "0.00",  // TDS percentage applied on payout withdrawals (default: 0, meaning no payout TDS, range: 0-100)
+     "company_referral_code": "COMPANY",  // Static referral code representing the company (used for first booking in the system, default: "COMPANY")
      "updated_at": "2026-01-14T09:00:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -5797,7 +5802,8 @@ Super User: EVAdmin && EVAdmin@123
      "activation_amount": 5000,  // Minimum payment amount per booking required for seniors to earn commission. If payment is less than this amount, no commission is credited, but user is still counted in descendants calculation. On cancellation, this amount is withheld for future point redemption (default: ₹5000, min: 0)
      "distributor_application_auto_approve": true,  // If true, auto-approve distributor applications; if false, require admin/staff approval (default: true)
      "payout_approval_needed": true,  // If true, payout requests require admin approval; if false, payouts are automatically processed upon creation (default: true)
-     "payout_tds_percentage": 0  // TDS percentage applied on payout withdrawals (default: 0, meaning no payout TDS, range: 0-100)
+     "payout_tds_percentage": 0,  // TDS percentage applied on payout withdrawals (default: 0, meaning no payout TDS, range: 0-100)
+     "company_referral_code": "COMPANY"  // Static referral code representing the company (used for first booking in the system, default: "COMPANY", min length: 3, max length: 20)
    }
    
    Response (200 OK):
@@ -5817,6 +5823,7 @@ Super User: EVAdmin && EVAdmin@123
      "distributor_application_auto_approve": true,
      "payout_approval_needed": true,
      "payout_tds_percentage": "0.00",
+     "company_referral_code": "COMPANY",
      "updated_at": "2026-01-14T09:15:00Z",
      "updated_by": 1,
      "updated_by_username": "admin@example.com",
@@ -5835,7 +5842,8 @@ Super User: EVAdmin && EVAdmin@123
      "binary_daily_pair_limit": ["binary_daily_pair_limit must be at least 1"],
      "max_earnings_before_active_buyer": ["max_earnings_before_active_buyer must be at least 1"],
      "binary_commission_initial_bonus": ["binary_commission_initial_bonus must be non-negative"],
-     "payout_tds_percentage": ["payout_tds_percentage must be between 0 and 100"]
+     "payout_tds_percentage": ["payout_tds_percentage must be between 0 and 100"],
+     "company_referral_code": ["company_referral_code cannot be empty", "company_referral_code must be at least 3 characters long", "company_referral_code cannot exceed 20 characters"]
    }
    
    Error Response (403):
@@ -5878,6 +5886,12 @@ Super User: EVAdmin && EVAdmin@123
      * If non-zero: TDS is calculated as requested_amount × (payout_tds_percentage / 100) with maximum ₹10,000 ceiling
      * This setting is separate from binary commission TDS (binary_commission_tds_percentage)
      * See CREATE PAYOUT REQUEST endpoint for detailed TDS calculation behavior
+   - company_referral_code: Static referral code representing the company/superadmin account (default: "COMPANY", min length: 3, max length: 20)
+     * Used automatically for the very first booking in the system (when no bookings exist yet)
+     * When users pre-book using this referral code, they are linked to the company user
+     * IMPORTANT: Users with this referral code will NOT receive any commission (commission exclusion)
+     * The company referral code is case-insensitive and whitespace is automatically normalized
+     * This ensures the company account does not earn commissions when users use the company referral code
    - updated_by is automatically set to the current user making the update
    - Settings are stored as a singleton (only one instance exists)
    - Timeout is stored in minutes (converted from hours for backward compatibility)
@@ -6888,6 +6902,7 @@ Standard Error Format:
 18. Referral Commission Timing: Commission is only granted for bookings created AFTER the referrer becomes a distributor (no retroactive commissions)
     - System stores referrer_was_distributor flag at booking creation time
     - Commission is granted only if referrer_was_distributor is True when payment is completed
+19. Company Referral Code: The company referral code (configurable via Platform Settings → company_referral_code) is used automatically for the very first booking in the system. Users who use the company referral code are linked to the company user, but NO commission is paid to the company user (commission exclusion). This ensures the company account does not earn commissions when users use the company referral code.
 19. Tree Counting: left_count and right_count now count ALL descendants recursively (entire subtree, not just direct children)
 20. Distributor Eligibility: Active Buyer requirement removed - only KYC verification needed to apply for distributor program
 21. Commission Restriction for Non-Active Buyer Distributors (configurable via max_earnings_before_active_buyer in Platform Settings, default: 5):

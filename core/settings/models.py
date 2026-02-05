@@ -92,6 +92,13 @@ class PlatformSettings(models.Model):
         help_text="TDS percentage applied on payout withdrawals (default: 0, meaning no payout TDS)"
     )
     
+    # Company Referral Code
+    company_referral_code = models.CharField(
+        max_length=20,
+        default='COMPANY',
+        help_text="Static referral code representing the company (used for first booking in the system). Default: 'COMPANY'"
+    )
+    
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(
         User,
@@ -135,6 +142,7 @@ class PlatformSettings(models.Model):
                 'distributor_application_auto_approve': True,
                 'payout_approval_needed': True,
                 'payout_tds_percentage': 0,
+                'company_referral_code': 'COMPANY',
             }
         )
         return settings

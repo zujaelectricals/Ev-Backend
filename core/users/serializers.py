@@ -93,6 +93,7 @@ class UserSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     kyc_status = serializers.SerializerMethodField()
     nominee_exists = serializers.SerializerMethodField()
+    nominee_kyc_status = serializers.SerializerMethodField()
     referred_by = ReferredByUserSerializer(read_only=True, allow_null=True)
     binary_commission_active = serializers.SerializerMethodField()
     binary_pairs_matched = serializers.SerializerMethodField()
@@ -110,7 +111,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
                   'gender', 'date_of_birth', 'profile_picture', 'profile_picture_url',
                   'address_line1', 'address_line2', 'city', 'state', 'pincode', 'country',
                   'role', 'is_distributor', 'is_active_buyer', 'referral_code',
-                  'referred_by', 'kyc_status', 'nominee_exists', 'date_joined',
+                  'referred_by', 'kyc_status', 'nominee_exists', 'nominee_kyc_status', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
                   'is_distributor_terms_and_conditions_accepted', 'distributor_application_status')
@@ -129,6 +130,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
         """Check if nominee exists for the user"""
         # For OneToOneField reverse relationships, use hasattr which safely checks existence
         return hasattr(obj, 'nominee') and obj.nominee is not None
+    
+    def get_nominee_kyc_status(self, obj):
+        """Get nominee KYC status if nominee exists for the user"""
+        # For OneToOneField reverse relationships, use hasattr which safely checks existence
+        # This avoids triggering unnecessary database queries
+        if hasattr(obj, 'nominee') and obj.nominee is not None:
+            return obj.nominee.kyc_status
+        return None
     
     def get_binary_commission_active(self, obj):
         """Get binary_commission_activated status from BinaryNode"""
@@ -421,4 +430,175 @@ class DistributorApplicationSerializer(serializers.ModelSerializer):
         validated_data['user'] = user
         # Status will be set to 'approved' in the view
         return super().create(validated_data)
+
+
+class UnifiedKYCSerializer(serializers.Serializer):
+    """
+    Unified serializer for both User KYC and Nominee KYC records
+    Includes user information for both types, with clear indication of the relationship
+    """
+    kyc_type = serializers.CharField()  # 'user' or 'nominee'
+    id = serializers.IntegerField()
+    
+    # User information (the account owner)
+    user_id = serializers.IntegerField()
+    user_email = serializers.EmailField(required=False, allow_null=True)
+    user_username = serializers.CharField(required=False, allow_null=True)
+    user_full_name = serializers.CharField(required=False, allow_null=True)
+    
+    # Status fields (normalized)
+    status = serializers.CharField()  # pending/approved/rejected for user, pending/verified/rejected for nominee
+    submitted_at = serializers.DateTimeField(required=False, allow_null=True)
+    reviewed_at = serializers.DateTimeField(required=False, allow_null=True)
+    reviewed_by = serializers.DictField(required=False, allow_null=True)  # Already serialized dict from static methods
+    rejection_reason = serializers.CharField(required=False, allow_blank=True)
+    
+    # User KYC specific fields
+    pan_number = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    aadhaar_number = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    address_line1 = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    address_line2 = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    city = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    state = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    pincode = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    country = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    pan_document = serializers.URLField(required=False, allow_null=True, allow_blank=True)
+    aadhaar_front = serializers.URLField(required=False, allow_null=True, allow_blank=True)
+    aadhaar_back = serializers.URLField(required=False, allow_null=True, allow_blank=True)
+    bank_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    account_number = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    ifsc_code = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    account_holder_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    bank_passbook = serializers.URLField(required=False, allow_null=True, allow_blank=True)
+    
+    # Nominee KYC specific fields
+    nominee_full_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    relationship = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    date_of_birth = serializers.DateField(required=False, allow_null=True)
+    mobile = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
+    id_proof_type = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    id_proof_number = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    id_proof_document = serializers.URLField(required=False, allow_null=True, allow_blank=True)
+    
+    @staticmethod
+    def from_kyc(kyc, request=None):
+        """Convert KYC instance to unified format"""
+        user = kyc.user
+        
+        # Build reviewed_by data manually
+        reviewed_by_data = None
+        if kyc.reviewed_by:
+            reviewed_by_data = {
+                'id': kyc.reviewed_by.id,
+                'fullname': kyc.reviewed_by.get_full_name(),
+                'email': kyc.reviewed_by.email,
+                'profile_picture_url': None
+            }
+            if kyc.reviewed_by.profile_picture and request:
+                reviewed_by_data['profile_picture_url'] = request.build_absolute_uri(kyc.reviewed_by.profile_picture.url)
+            elif kyc.reviewed_by.profile_picture:
+                reviewed_by_data['profile_picture_url'] = kyc.reviewed_by.profile_picture.url
+        
+        data = {
+            'kyc_type': 'user',
+            'id': kyc.id,
+            'user_id': user.id,
+            'user_email': user.email,
+            'user_username': user.username,
+            'user_full_name': user.get_full_name(),
+            'status': kyc.status,
+            'submitted_at': kyc.submitted_at,
+            'reviewed_at': kyc.reviewed_at,
+            'reviewed_by': reviewed_by_data,
+            'rejection_reason': kyc.rejection_reason,
+            'pan_number': kyc.pan_number,
+            'aadhaar_number': kyc.aadhaar_number,
+            'address_line1': kyc.address_line1,
+            'address_line2': kyc.address_line2,
+            'city': kyc.city,
+            'state': kyc.state,
+            'pincode': kyc.pincode,
+            'country': kyc.country,
+            'pan_document': None,
+            'aadhaar_front': None,
+            'aadhaar_back': None,
+            'bank_name': kyc.bank_name,
+            'account_number': kyc.account_number,
+            'ifsc_code': kyc.ifsc_code,
+            'account_holder_name': kyc.account_holder_name,
+            'bank_passbook': None,
+        }
+        # Add absolute URLs if request is available
+        if request:
+            if kyc.pan_document:
+                data['pan_document'] = request.build_absolute_uri(kyc.pan_document.url)
+            if kyc.aadhaar_front:
+                data['aadhaar_front'] = request.build_absolute_uri(kyc.aadhaar_front.url)
+            if kyc.aadhaar_back:
+                data['aadhaar_back'] = request.build_absolute_uri(kyc.aadhaar_back.url)
+            if kyc.bank_passbook:
+                data['bank_passbook'] = request.build_absolute_uri(kyc.bank_passbook.url)
+        return data
+    
+    @staticmethod
+    def from_nominee(nominee, request=None):
+        """Convert Nominee instance to unified format
+        Includes the original user's information (the account owner who has this nominee)
+        """
+        user = nominee.user  # This is the original user who has the nominee
+        # Map nominee status to match KYC status format
+        status_mapping = {
+            'pending': 'pending',
+            'verified': 'approved',  # Map verified to approved for consistency
+            'rejected': 'rejected'
+        }
+        mapped_status = status_mapping.get(nominee.kyc_status, nominee.kyc_status)
+        
+        # Build reviewed_by data manually
+        reviewed_by_data = None
+        if nominee.kyc_verified_by:
+            reviewed_by_data = {
+                'id': nominee.kyc_verified_by.id,
+                'fullname': nominee.kyc_verified_by.get_full_name(),
+                'email': nominee.kyc_verified_by.email,
+                'profile_picture_url': None
+            }
+            if nominee.kyc_verified_by.profile_picture and request:
+                reviewed_by_data['profile_picture_url'] = request.build_absolute_uri(nominee.kyc_verified_by.profile_picture.url)
+            elif nominee.kyc_verified_by.profile_picture:
+                reviewed_by_data['profile_picture_url'] = nominee.kyc_verified_by.profile_picture.url
+        
+        data = {
+            'kyc_type': 'nominee',
+            'id': nominee.id,
+            # User information - the original account owner who has this nominee
+            'user_id': user.id,
+            'user_email': user.email,
+            'user_username': user.username,
+            'user_full_name': user.get_full_name(),
+            'status': mapped_status,
+            'submitted_at': nominee.kyc_submitted_at,
+            'reviewed_at': nominee.kyc_verified_at,
+            'reviewed_by': reviewed_by_data,
+            'rejection_reason': nominee.kyc_rejection_reason,
+            # Nominee's own information
+            'nominee_full_name': nominee.full_name,
+            'relationship': nominee.relationship,
+            'date_of_birth': nominee.date_of_birth,
+            'mobile': nominee.mobile,
+            'email': nominee.email,
+            'address_line1': nominee.address_line1,
+            'address_line2': nominee.address_line2,
+            'city': nominee.city,
+            'state': nominee.state,
+            'pincode': nominee.pincode,
+            'id_proof_type': nominee.id_proof_type,
+            'id_proof_number': nominee.id_proof_number,
+            'id_proof_document': None,
+        }
+        # Add absolute URL if request is available
+        if request and nominee.id_proof_document:
+            data['id_proof_document'] = request.build_absolute_uri(nominee.id_proof_document.url)
+        return data
 

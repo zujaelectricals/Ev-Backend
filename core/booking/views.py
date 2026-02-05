@@ -10,9 +10,53 @@ from django.db.models import Q
 from django.db import transaction
 from decimal import Decimal
 from core.users.models import User
+from core.settings.models import PlatformSettings
 from core.inventory.utils import create_reservation
 from .models import Booking, Payment
 from .serializers import BookingSerializer, PaymentSerializer
+
+
+def ensure_company_referral_user(company_referral_code):
+    """
+    Ensure a superadmin user exists with the company referral code.
+    Returns the user with the company referral code.
+    """
+    # First, try to find an existing user with this referral code
+    try:
+        company_user = User.objects.get(referral_code=company_referral_code)
+        # If found, ensure it's a superadmin
+        if not company_user.is_superuser:
+            company_user.is_superuser = True
+            company_user.is_staff = True
+            company_user.role = 'admin'
+            company_user.save(update_fields=['is_superuser', 'is_staff', 'role'])
+        return company_user
+    except User.DoesNotExist:
+        # Create a new superadmin user with the company referral code
+        # Use a default username/email for the company user
+        username = f"company_{company_referral_code.lower()}"
+        email = f"company@{company_referral_code.lower()}.local"
+        
+        # Check if username or email already exists, adjust if needed
+        base_username = username
+        base_email = email
+        counter = 1
+        while User.objects.filter(username=username).exists() or User.objects.filter(email=email).exists():
+            username = f"{base_username}{counter}"
+            email = f"company{counter}@{company_referral_code.lower()}.local"
+            counter += 1
+        
+        company_user = User.objects.create(
+            username=username,
+            email=email,
+            first_name='Company',
+            last_name='Admin',
+            role='admin',
+            is_staff=True,
+            is_superuser=True,
+            referral_code=company_referral_code
+        )
+        return company_user
 
 
 class BookingPagination(PageNumberPagination):
@@ -78,15 +122,46 @@ class BookingViewSet(viewsets.ModelViewSet):
         manual_placement = serializer.validated_data.pop('manual_placement', False)
         referring_user = None
         
+        # Check if this is the first booking in the system
+        is_first_booking = not Booking.objects.exists()
+        
+        # Get company referral code from settings
+        platform_settings = PlatformSettings.get_settings()
+        company_referral_code = platform_settings.company_referral_code.strip().upper() if platform_settings.company_referral_code else None
+        
+        # Normalize the provided referral code
         if referral_code:
             referral_code = referral_code.strip().upper()
-            try:
-                referring_user = User.objects.get(referral_code=referral_code)
-                # Prevent self-referral
-                if referring_user == self.request.user:
-                    raise serializers.ValidationError({'referral_code': 'You cannot use your own referral code'})
-            except User.DoesNotExist:
-                raise serializers.ValidationError({'referral_code': 'Invalid referral code'})
+        
+        # Check if provided referral code matches company referral code
+        is_company_referral_code = company_referral_code and referral_code == company_referral_code
+        
+        if is_first_booking:
+            # For the first booking, always use company referral code from settings
+            # (ignore what user provided)
+            if company_referral_code:
+                # Ensure company user exists with this referral code
+                referring_user = ensure_company_referral_user(company_referral_code)
+                referral_code = company_referral_code
+            else:
+                raise serializers.ValidationError({'referral_code': 'Company referral code not configured in settings'})
+        elif is_company_referral_code:
+            # User is using company referral code for subsequent booking
+            # Ensure company user exists with this referral code
+            referring_user = ensure_company_referral_user(company_referral_code)
+        else:
+            # For other referral codes, validate that user exists
+            if referral_code:
+                try:
+                    referring_user = User.objects.get(referral_code=referral_code)
+                    # Prevent self-referral
+                    if referring_user == self.request.user:
+                        raise serializers.ValidationError({'referral_code': 'You cannot use your own referral code'})
+                except User.DoesNotExist:
+                    raise serializers.ValidationError({'referral_code': 'Invalid referral code'})
+            else:
+                # This shouldn't happen since referral_code is now mandatory, but handle it just in case
+                raise serializers.ValidationError({'referral_code': 'Referral code is required'})
         
         # Remove vehicle_model_code from validated_data as it's already converted to vehicle_model
         serializer.validated_data.pop('vehicle_model_code', None)
