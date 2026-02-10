@@ -35,6 +35,7 @@ db.sqlite3-journal
 # Environment
 .env
 .venv
+Credentials.txt
 
 # IDE
 .vscode/
