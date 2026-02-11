@@ -11,16 +11,19 @@ jobs:
 
     steps:
 
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Login to Azure
-        uses: azure/login@v1
+      - uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Login to ACR
         run: az acr login --name ${{ secrets.ACR_NAME }}
+
+      - name: Debug ACR vars
+        run: |
+          echo "ACR_NAME=${{ secrets.ACR_NAME }}"
+          echo "ACR_LOGIN_SERVER=${{ secrets.ACR_LOGIN_SERVER }}"
 
       - name: Build Docker Image
         run: |
