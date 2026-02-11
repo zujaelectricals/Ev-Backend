@@ -3,7 +3,6 @@ Django settings for ev_backend project (Azure Production Ready)
 """
 
 from pathlib import Path
-from decouple import config
 import environ
 import os
 from datetime import timedelta
@@ -18,13 +17,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env(DEBUG=(bool, False))
 environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 
-SECRET_KEY = config("SECRET_KEY")
-DEBUG = config("DEBUG", cast=bool, default=False)
+SECRET_KEY = env("SECRET_KEY")
+DEBUG = env.bool("DEBUG", default=False)
 
-ALLOWED_HOSTS = config(
+ALLOWED_HOSTS = env.list(
     "ALLOWED_HOSTS",
-    default="localhost,127.0.0.1",
-).split(",")
+    default=["localhost", "127.0.0.1"],
+)
 
 # --------------------------------------------------
 # APPLICATIONS
@@ -66,9 +65,13 @@ INSTALLED_APPS = [
 # MIDDLEWARE
 # --------------------------------------------------
 
+USE_AZURE_STORAGE = env.bool("USE_AZURE_STORAGE", default=False)
+
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
+
+    *(["whitenoise.middleware.WhiteNoiseMiddleware"] if not USE_AZURE_STORAGE else []),
+
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -82,10 +85,30 @@ ROOT_URLCONF = "ev_backend.urls"
 WSGI_APPLICATION = "ev_backend.wsgi.application"
 
 # --------------------------------------------------
+# TEMPLATES
+# --------------------------------------------------
+
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.debug",
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
+
+# --------------------------------------------------
 # DATABASE
 # --------------------------------------------------
 
-DB_ENGINE = config("DB_ENGINE", default="sqlite")
+DB_ENGINE = env("DB_ENGINE", default="sqlite")
 
 if DB_ENGINE == "mysql":
     DATABASES = {
@@ -95,9 +118,12 @@ if DB_ENGINE == "mysql":
             "USER": env("DB_USER"),
             "PASSWORD": env("DB_PASSWORD"),
             "HOST": env("DB_HOST"),
-            "PORT": "3306",
+            "PORT": env("DB_PORT", default="3306"),
             "OPTIONS": {
-                "ssl": {"ca": "/etc/ssl/certs/ca-certificates.crt"}
+                "ssl": {
+                    "ca": "/etc/ssl/certs/ca-certificates.crt"
+                },
+                "ssl_mode": "VERIFY_CA",
             },
         }
     }
@@ -128,25 +154,38 @@ AUTH_USER_MODEL = "users.User"
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "Asia/Kolkata"
+
 USE_I18N = True
 USE_TZ = True
 
 # --------------------------------------------------
-# STATIC / MEDIA (AZURE)
+# STATIC / MEDIA (AZURE OR LOCAL)
 # --------------------------------------------------
-
-USE_AZURE_STORAGE = config("USE_AZURE_STORAGE", cast=bool, default=False)
 
 AZURE_ACCOUNT_NAME = env("AZURE_STORAGE_NAME", default="")
 AZURE_ACCOUNT_KEY = env("AZURE_STORAGE_KEY", default="")
 
+AZURE_STATIC_CONTAINER = env("AZURE_STATIC_CONTAINER", default="static")
+AZURE_MEDIA_CONTAINER = env("AZURE_MEDIA_CONTAINER", default="media")
+
 if USE_AZURE_STORAGE:
+
     DEFAULT_FILE_STORAGE = "storages.backends.azure_storage.AzureStorage"
     STATICFILES_STORAGE = "storages.backends.azure_storage.AzureStorage"
 
-    MEDIA_URL = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/media/"
-    STATIC_URL = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/static/"
+    # REQUIRED BY django-storages
+    AZURE_CONTAINER = AZURE_STATIC_CONTAINER
+
+    STATIC_URL = (
+        f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/{AZURE_STATIC_CONTAINER}/"
+    )
+
+    MEDIA_URL = (
+        f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/{AZURE_MEDIA_CONTAINER}/"
+    )
+
 else:
+
     STATIC_URL = "/static/"
     STATIC_ROOT = BASE_DIR / "staticfiles"
 
@@ -166,29 +205,20 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
-    "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
-    ],
-    "DEFAULT_THROTTLE_RATES": {
-        "anon": "100/hour",
-        "user": "1000/hour",
-        "otp": "5/minute",
-        "otp_identifier": "5/minute",
-    },
 }
 
 # --------------------------------------------------
 # JWT
 # --------------------------------------------------
 
-jwt_secret_key = config("JWT_SECRET_KEY", default=SECRET_KEY)
+jwt_secret_key = env("JWT_SECRET_KEY", default=SECRET_KEY)
+
 if len(jwt_secret_key.encode()) < 32:
     jwt_secret_key = hashlib.sha256(jwt_secret_key.encode()).hexdigest()
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=config("ACCESS_TOKEN_LIFETIME", default=45, cast=int)),
-    "REFRESH_TOKEN_LIFETIME": timedelta(minutes=config("REFRESH_TOKEN_LIFETIME", default=300, cast=int)),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=env.int("ACCESS_TOKEN_LIFETIME", 45)),
+    "REFRESH_TOKEN_LIFETIME": timedelta(minutes=env.int("REFRESH_TOKEN_LIFETIME", 300)),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "SIGNING_KEY": jwt_secret_key,
@@ -199,21 +229,19 @@ SIMPLE_JWT = {
 # --------------------------------------------------
 
 REDIS_URL = env("REDIS_URL")
-REDIS_PASSWORD = env("REDIS_KEY")
 
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
         "LOCATION": REDIS_URL,
         "OPTIONS": {
-            "PASSWORD": REDIS_PASSWORD,
-            "SSL": True,
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
         },
     }
 }
 
 # --------------------------------------------------
-# CELERY (REDIS BROKER)
+# CELERY
 # --------------------------------------------------
 
 CELERY_BROKER_URL = REDIS_URL
@@ -225,34 +253,19 @@ CELERY_RESULT_SERIALIZER = "json"
 
 CELERY_TIMEZONE = TIME_ZONE
 
-CELERY_TASK_TRACK_STARTED = True
-CELERY_TASK_TIME_LIMIT = 30 * 60
-CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60
-
 # --------------------------------------------------
 # CORS
 # --------------------------------------------------
 
-CORS_ALLOWED_ORIGINS = config(
-    "CORS_ALLOWED_ORIGINS",
-    default="",
-).split(",")
-
+CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
 CORS_ALLOW_CREDENTIALS = True
-
-# --------------------------------------------------
-# BUSINESS RULES
-# --------------------------------------------------
-
-PRE_BOOKING_MIN_AMOUNT = config("PRE_BOOKING_MIN_AMOUNT", default=500, cast=int)
-ACTIVE_BUYER_THRESHOLD = config("ACTIVE_BUYER_THRESHOLD", default=5000, cast=int)
 
 # --------------------------------------------------
 # PAYMENTS
 # --------------------------------------------------
 
-RAZORPAY_KEY_ID = config("RAZORPAY_KEY_ID")
-RAZORPAY_KEY_SECRET = config("RAZORPAY_KEY_SECRET")
+RAZORPAY_KEY_ID = env("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = env("RAZORPAY_KEY_SECRET")
 
-RAZORPAY_WEBHOOK_SECRET = config("RAZORPAY_WEBHOOK_SECRET")
-RAZORPAY_PAYOUT_WEBHOOK_SECRET = config("RAZORPAY_PAYOUT_WEBHOOK_SECRET")
+RAZORPAY_WEBHOOK_SECRET = env("RAZORPAY_WEBHOOK_SECRET")
+RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET")

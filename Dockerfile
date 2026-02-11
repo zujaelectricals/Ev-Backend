@@ -11,17 +11,21 @@ RUN apt-get update && apt-get install -y \
     default-libmysqlclient-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates
 
 COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip \
+ && pip install --no-cache-dir --default-timeout=300 -r requirements.txt
+
 
 COPY . /app/
 
-RUN python manage.py collectstatic --noinput
+
 
 RUN useradd -m django
 USER django
 
 EXPOSE 8000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "120", "ev_backend.wsgi:application"]
+
+CMD ["/bin/sh","-c","python manage.py migrate && python manage.py collectstatic --noinput && gunicorn --bind 0.0.0.0:8000 --workers 3 ev_backend.wsgi:application"]
