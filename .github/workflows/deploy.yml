@@ -18,14 +18,19 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Login to Azure Container Registry
-        run: az acr login --name ${{ secrets.ACR_NAME }}
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ secrets.ACR_NAME }}
 
       - name: Build Docker Image
-        run: docker build . -t ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
+        run: |
+          docker build \
+            -t ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest \
+            .
 
       - name: Push Docker Image
-        run: docker push ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
+        run: |
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
 
       - name: Restart App Service
         run: |
