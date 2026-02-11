@@ -10,28 +10,41 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # -------------------------
+      # Checkout repository
+      # -------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # -------------------------
+      # Login to Azure
+      # -------------------------
       - name: Login to Azure
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      # -------------------------
+      # Login to Azure Container Registry
+      # -------------------------
       - name: Login to ACR
-        run: |
-          az acr login --name ${{ secrets.ACR_NAME }}
+        run: az acr login --name ${{ secrets.ACR_NAME }}
 
+      # -------------------------
+      # Build Docker Image
+      # -------------------------
       - name: Build Docker Image
-        run: |
-          docker build \
-            -t ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest \
-            .
+        run: docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest .
 
+      # -------------------------
+      # Push Docker Image
+      # -------------------------
       - name: Push Docker Image
-        run: |
-          docker push ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
+        run: docker push ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
 
+      # -------------------------
+      # Restart Azure App Service
+      # -------------------------
       - name: Restart App Service
         run: |
           az webapp restart \
