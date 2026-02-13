@@ -49,6 +49,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     date_joined = models.DateTimeField(default=timezone.now)
     last_login = models.DateTimeField(null=True, blank=True)
     
+    # PAN Card field (from signup)
+    pan_card = models.CharField(max_length=10, unique=True, null=True, blank=True)
+    
     # Referral fields
     referral_code = models.CharField(max_length=20, unique=True, null=True, blank=True)
     referred_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='referrals')

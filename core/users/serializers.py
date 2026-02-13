@@ -104,13 +104,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
     is_distributor_terms_and_conditions_accepted = serializers.SerializerMethodField()
     distributor_application_status = serializers.SerializerMethodField()
     profile_picture_url = serializers.SerializerMethodField()
+    referral_link = serializers.SerializerMethodField()
     
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'mobile', 'first_name', 'last_name',
                   'gender', 'date_of_birth', 'profile_picture', 'profile_picture_url',
                   'address_line1', 'address_line2', 'city', 'state', 'pincode', 'country',
-                  'role', 'is_distributor', 'is_active_buyer', 'referral_code',
+                  'role', 'is_distributor', 'is_active_buyer', 'referral_code', 'referral_link',
                   'referred_by', 'kyc_status', 'nominee_exists', 'nominee_kyc_status', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
@@ -208,6 +209,22 @@ class UserProfileSerializer(serializers.ModelSerializer):
             return obj.profile_picture.url
         return None
     
+    def get_referral_link(self, obj):
+        """Generate referral link using FRONTEND_BASE_URL and referral_code"""
+        from django.conf import settings
+        
+        if not obj.referral_code:
+            return None
+        
+        frontend_base_url = getattr(settings, 'FRONTEND_BASE_URL', '')
+        if not frontend_base_url:
+            return None
+        
+        # Remove trailing slash if present
+        frontend_base_url = frontend_base_url.rstrip('/')
+        
+        return f"{frontend_base_url}/ref/{obj.referral_code}"
+    
     def validate_profile_picture(self, value):
         """Validate profile picture file"""
         if value is None:
@@ -281,6 +298,44 @@ class KYCSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         f'{field_name} must be an image (JPEG, PNG, GIF, WEBP) or PDF file.'
                     )
+        
+        return value
+    
+    def validate_pan_number(self, value):
+        """Validate PAN number and check conflicts with User.pan_card"""
+        if not value:
+            return value
+        
+        import re
+        from django.contrib.auth import get_user_model
+        
+        User = get_user_model()
+        
+        # Convert to uppercase for consistency
+        value = value.upper().strip()
+        
+        # Validate PAN format: 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F)
+        pan_pattern = r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
+        if not re.match(pan_pattern, value):
+            raise serializers.ValidationError("Invalid PAN card format. PAN must be in format: ABCDE1234F (5 letters, 4 digits, 1 letter)")
+        
+        # Get the current user from the instance (if updating) or from context (if creating)
+        user = None
+        if self.instance:
+            user = self.instance.user
+        elif hasattr(self, 'context') and 'request' in self.context:
+            user = self.context['request'].user
+        
+        # Allow user to use their own pan_card value in KYC
+        if user and user.pan_card == value:
+            return value
+        
+        # Check if PAN conflicts with any other User's pan_card (excluding current user's own pan_card)
+        conflicting_user = User.objects.filter(pan_card=value).exclude(id=user.id if user else None).first()
+        if conflicting_user:
+            raise serializers.ValidationError(
+                f"PAN number '{value}' is already registered by another user. Please use a different PAN number."
+            )
         
         return value
     

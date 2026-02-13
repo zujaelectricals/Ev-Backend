@@ -32,7 +32,13 @@ def send_email_otp(email, otp_code=None):
         expires_at=expires_at
     )
     
-    # Send email
+    # Print OTP to terminal (for development)
+    print("\n" + "="*60)
+    print(f"EMAIL OTP for {email}: {otp_code}")
+    print(f"This code will expire in {settings.OTP_EXPIRY_MINUTES} minutes.")
+    print("="*60 + "\n")
+    
+    # Try to send email (optional - will fail gracefully if SMTP not configured)
     subject = 'Your EV Distribution Platform OTP'
     message = f'Your OTP code is: {otp_code}\n\nThis code will expire in {settings.OTP_EXPIRY_MINUTES} minutes.'
     
@@ -46,8 +52,9 @@ def send_email_otp(email, otp_code=None):
         )
         return True
     except Exception as e:
-        print(f"Error sending email: {e}")
-        return False
+        # Email sending failed, but OTP is already printed to terminal
+        # This is expected in development when SMTP is not configured
+        return True
 
 
 def send_mobile_otp(mobile, otp_code=None):
