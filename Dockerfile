@@ -13,13 +13,16 @@ ENV DJANGO_SETTINGS_MODULE=ev_backend.settings
 WORKDIR /app
 
 # --------------------------------------------------
-# System dependencies
+# System dependencies (IMPORTANT for Azure SSH)
 # --------------------------------------------------
 RUN apt-get update && apt-get install -y \
     gcc \
     default-libmysqlclient-dev \
     pkg-config \
     ca-certificates \
+    bash \
+    procps \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # --------------------------------------------------
@@ -35,9 +38,10 @@ RUN pip install --upgrade pip \
 COPY . .
 
 # --------------------------------------------------
-# Non-root user (security best practice)
+# Non-root user (Azure + security friendly)
 # --------------------------------------------------
-RUN useradd -m django
+RUN useradd -m django \
+    && chown -R django:django /app
 USER django
 
 # --------------------------------------------------
@@ -46,11 +50,12 @@ USER django
 EXPOSE 8000
 
 # --------------------------------------------------
-# Start command
+# Startup command
 # --------------------------------------------------
-CMD ["/bin/sh", "-c", \
+CMD ["/bin/bash", "-c", \
      "python manage.py migrate && \
       python manage.py collectstatic --noinput && \
       gunicorn ev_backend.wsgi:application \
       --bind 0.0.0.0:8000 \
-      --workers 3"]
+      --workers 3 \
+      --timeout 120"]
