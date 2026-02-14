@@ -1,5 +1,5 @@
 """
-Django settings for ev_backend project (Azure Production Ready)
+Django settings for ev_backend (Azure Production)
 """
 
 from pathlib import Path
@@ -22,7 +22,7 @@ DEBUG = env.bool("DEBUG", default=False)
 
 ALLOWED_HOSTS = env.list(
     "ALLOWED_HOSTS",
-    default=["localhost", "127.0.0.1"],
+    default=["*"],  # Azure App Service
 )
 
 # --------------------------------------------------
@@ -37,7 +37,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
 
-    # Third party
+    # Third-party
     "rest_framework",
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
@@ -45,7 +45,7 @@ INSTALLED_APPS = [
     "storages",
     "django_celery_results",
 
-    # Local
+    # Local apps
     "core.auth",
     "core.users",
     "core.inventory",
@@ -65,13 +65,8 @@ INSTALLED_APPS = [
 # MIDDLEWARE
 # --------------------------------------------------
 
-USE_AZURE_STORAGE = env.bool("USE_AZURE_STORAGE", default=False)
-
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-
-    *(["whitenoise.middleware.WhiteNoiseMiddleware"] if not USE_AZURE_STORAGE else []),
-
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -122,8 +117,7 @@ if DB_ENGINE == "mysql":
             "OPTIONS": {
                 "ssl": {
                     "ca": "/etc/ssl/certs/ca-certificates.crt"
-                },
-                "ssl_mode": "VERIFY_CA",
+                }
             },
         }
     }
@@ -139,6 +133,8 @@ else:
 # AUTH
 # --------------------------------------------------
 
+AUTH_USER_MODEL = "users.User"
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -146,53 +142,32 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-AUTH_USER_MODEL = "users.User"
-
 # --------------------------------------------------
 # INTERNATIONAL
 # --------------------------------------------------
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "Asia/Kolkata"
-
 USE_I18N = True
 USE_TZ = True
 
 # --------------------------------------------------
-# STATIC / MEDIA (AZURE OR LOCAL)
+# STATIC & MEDIA (AZURE BLOB STORAGE)
 # --------------------------------------------------
 
-AZURE_ACCOUNT_NAME = env("AZURE_STORAGE_NAME", default="")
-AZURE_ACCOUNT_KEY = env("AZURE_STORAGE_KEY", default="")
+DEFAULT_FILE_STORAGE = "storages.backends.azure_storage.AzureStorage"
+STATICFILES_STORAGE = "storages.backends.azure_storage.AzureStorage"
+
+AZURE_ACCOUNT_NAME = env("AZURE_STORAGE_NAME")
+AZURE_ACCOUNT_KEY = env("AZURE_STORAGE_KEY")
 
 AZURE_STATIC_CONTAINER = env("AZURE_STATIC_CONTAINER", default="static")
 AZURE_MEDIA_CONTAINER = env("AZURE_MEDIA_CONTAINER", default="media")
 
-if USE_AZURE_STORAGE:
+AZURE_CONTAINER = AZURE_STATIC_CONTAINER
 
-    DEFAULT_FILE_STORAGE = "storages.backends.azure_storage.AzureStorage"
-    STATICFILES_STORAGE = "storages.backends.azure_storage.AzureStorage"
-
-    # REQUIRED BY django-storages
-    AZURE_CONTAINER = AZURE_STATIC_CONTAINER
-
-    STATIC_URL = (
-        f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/{AZURE_STATIC_CONTAINER}/"
-    )
-
-    MEDIA_URL = (
-        f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/{AZURE_MEDIA_CONTAINER}/"
-    )
-
-else:
-
-    STATIC_URL = "/static/"
-    STATIC_ROOT = BASE_DIR / "staticfiles"
-
-    MEDIA_URL = "/media/"
-    MEDIA_ROOT = BASE_DIR / "media"
-
-DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+STATIC_URL = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/{AZURE_STATIC_CONTAINER}/"
+MEDIA_URL = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/{AZURE_MEDIA_CONTAINER}/"
 
 # --------------------------------------------------
 # REST FRAMEWORK
@@ -225,7 +200,7 @@ SIMPLE_JWT = {
 }
 
 # --------------------------------------------------
-# REDIS / CACHE
+# REDIS / CELERY
 # --------------------------------------------------
 
 REDIS_URL = env("REDIS_URL")
@@ -234,23 +209,15 @@ CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
         "LOCATION": REDIS_URL,
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
-        },
+        "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
     }
 }
 
-# --------------------------------------------------
-# CELERY
-# --------------------------------------------------
-
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
-
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
-
 CELERY_TIMEZONE = TIME_ZONE
 
 # --------------------------------------------------
@@ -261,11 +228,7 @@ CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
 CORS_ALLOW_CREDENTIALS = True
 
 # --------------------------------------------------
-# PAYMENTS
+# DEFAULT
 # --------------------------------------------------
 
-RAZORPAY_KEY_ID = env("RAZORPAY_KEY_ID")
-RAZORPAY_KEY_SECRET = env("RAZORPAY_KEY_SECRET")
-
-RAZORPAY_WEBHOOK_SECRET = env("RAZORPAY_WEBHOOK_SECRET")
-RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET")
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
