@@ -105,6 +105,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     distributor_application_status = serializers.SerializerMethodField()
     profile_picture_url = serializers.SerializerMethodField()
     referral_link = serializers.SerializerMethodField()
+    days_remaining_for_full_payment = serializers.SerializerMethodField()
+    active_buyer_warning = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -115,7 +117,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
                   'referred_by', 'kyc_status', 'nominee_exists', 'nominee_kyc_status', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
-                  'is_distributor_terms_and_conditions_accepted', 'distributor_application_status')
+                  'is_distributor_terms_and_conditions_accepted', 'distributor_application_status',
+                  'days_remaining_for_full_payment', 'active_buyer_warning')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer',
                            'referral_code', 'referred_by', 'date_joined')
     
@@ -224,6 +227,69 @@ class UserProfileSerializer(serializers.ModelSerializer):
         frontend_base_url = frontend_base_url.rstrip('/')
         
         return f"{frontend_base_url}/ref/{obj.referral_code}"
+    
+    def get_days_remaining_for_full_payment(self, obj):
+        """
+        Calculate days remaining to complete full payment (30-day window from booking creation).
+        Returns null if:
+        - No active booking exists
+        - 30 days have passed
+        - Booking is fully paid
+        """
+        from core.booking.models import Booking
+        from django.utils import timezone
+        
+        # Find the most recent active booking (status in ['pending', 'active'])
+        booking = Booking.objects.filter(
+            user=obj,
+            status__in=['pending', 'active']
+        ).order_by('-created_at').first()
+        
+        if not booking:
+            return None
+        
+        # Check if booking is fully paid
+        if booking.remaining_amount <= 0 or booking.status == 'completed':
+            return None
+        
+        # Calculate days remaining (30 days from created_at)
+        days_elapsed = (timezone.now().date() - booking.created_at.date()).days
+        days_remaining = 30 - days_elapsed
+        
+        # Return null if 30 days have passed
+        if days_remaining <= 0:
+            return None
+        
+        return max(0, days_remaining)
+    
+    def get_active_buyer_warning(self, obj):
+        """
+        Check if user has any active booking with payment less than activation_amount.
+        Returns warning message if user is not an active buyer, null otherwise.
+        """
+        from core.booking.models import Booking
+        from core.settings.models import PlatformSettings
+        
+        # Get activation amount from settings
+        platform_settings = PlatformSettings.get_settings()
+        activation_amount = platform_settings.activation_amount
+        
+        # Check all active bookings (status in ['pending', 'active'])
+        active_bookings = Booking.objects.filter(
+            user=obj,
+            status__in=['pending', 'active']
+        )
+        
+        if not active_bookings.exists():
+            return None
+        
+        # Check if any active booking has total_paid < activation_amount
+        for booking in active_bookings:
+            if booking.total_paid < activation_amount:
+                return "You are not an active buyer"
+        
+        # All active bookings have total_paid >= activation_amount
+        return None
     
     def validate_profile_picture(self, value):
         """Validate profile picture file"""

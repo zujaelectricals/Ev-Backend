@@ -327,7 +327,8 @@ Super User: EVAdmin && EVAdmin@123
      "state": "Maharashtra",
      "pincode": "400001",
      "country": "India",                 // Optional, defaults to "India"
-     "referral_code": "REF12345"         // Optional
+     "pan_card": "ABCDE1234F",            // Required - PAN card number (format: 5 letters, 4 digits, 1 letter)
+     "referral_code": "REF12345"         // Required
    }
    
    Response (200 OK):
@@ -340,7 +341,10 @@ Super User: EVAdmin && EVAdmin@123
    {
      "email": ["Email already registered"],
      "mobile": ["Mobile number already registered"],
-     "mobile": ["Invalid mobile number format"]
+     "mobile": ["Invalid mobile number format"],
+     "pan_card": ["Invalid PAN card format. PAN must be in format: ABCDE1234F (5 letters, 4 digits, 1 letter)"],
+     "pan_card": ["PAN card already registered"],
+     "referral_code": ["Referral code is required"]
    }
    
    Rate Limit: 5 requests per minute per IP
@@ -518,11 +522,14 @@ Super User: EVAdmin && EVAdmin@123
      "role": "user",
      "is_distributor": false,
      "is_active_buyer": true,
-     "referral_code": "REF00001",
+     "referral_code": "ABC123",
+     "referral_link": "http://localhost:8080/ref/ABC123",  // Format: {FRONTEND_BASE_URL}/ref/{referralCode}
      "referred_by": null,  // Or nested object with id, fullname, email, profile_picture_url if referrer exists
      "kyc_status": "approved",
      "nominee_exists": true,
      "is_distributor_terms_and_conditions_accepted": true,
+     "days_remaining_for_full_payment": 15,  // Number of days remaining to complete full payment (30-day window from booking creation). null if: no active booking, 30 days passed, or booking fully paid
+     "active_buyer_warning": null,  // Warning message "You are not an active buyer" if user has any active booking with payment < activation_amount. null if user is an active buyer or has no active bookings
      "date_joined": "2026-01-06T12:00:00Z"
    }
 
@@ -3813,57 +3820,33 @@ Super User: EVAdmin && EVAdmin@123
     - Carry-forward: Next day, new members on ignored side match with carried-forward members from long leg
 
 
-53. GET FULL TREE STRUCTURE
+53. GET TREE STRUCTURE (Direct Children Only)
     Method: GET
     URL: /api/binary/nodes/tree_structure/
     Authentication: Required
-    Description: Get full binary tree structure with all children (recursive tree view). Supports pagination and filtering by side.
-    Performance: When pagination is enabled, the API uses batch queries for optimal performance (8-30x faster than without pagination).
+    Description: Get binary tree structure with only direct left and right children (no nested recursion). Optimized for low latency using prefetch_related queries. Use the node_children endpoint to lazy load children of specific nodes.
+    Performance: Uses prefetch_related to optimize database queries, reducing query count significantly. Returns only direct children to minimize response size and latency.
     
     Query Parameters:
     - side: Filter by side ("left", "right", "both") - default: "both"
-      * "left": Returns only left side members and left_child (excludes right_side_members and right_child)
-      * "right": Returns only right side members and right_child (excludes left_side_members and left_child)
-      * "both": Returns both sides (default behavior)
-    - page: Page number for side members pagination (default: 1 if page_size is provided, optional)
-      * If page_size is provided but page is not, defaults to page 1
-      * If neither page nor page_size is provided, returns all members (backward compatibility)
-      * Applies to left_side_members and right_side_members at ALL levels (not just root)
-    - page_size: Items per page for side members (default: 20, max: 100, optional)
-      * If not provided, returns all members (backward compatibility)
-      * Applies to left_side_members and right_side_members at ALL levels (not just root)
-    - min_depth: Minimum depth to include (default: 0, optional)
-      * Filters members based on their depth level in the tree
-    - max_depth: Maximum depth to traverse (default: 5, optional)
-      * Limits how deep the tree is traversed (prevents excessive recursion)
-      * Note: When pagination is enabled, batch queries make it efficient to fetch all descendants, so depth limits are not automatically applied
+      * "left": Returns only left_child (excludes right_child)
+      * "right": Returns only right_child (excludes left_child)
+      * "both": Returns both left_child and right_child (default behavior)
     
     Example Requests:
     GET /api/binary/nodes/tree_structure/
     GET /api/binary/nodes/tree_structure/?side=left
     GET /api/binary/nodes/tree_structure/?side=right
-    GET /api/binary/nodes/tree_structure/?page=1&page_size=20
-    GET /api/binary/nodes/tree_structure/?page_size=10  // page defaults to 1
-    GET /api/binary/nodes/tree_structure/?side=left&page=1&page_size=10
-    GET /api/binary/nodes/tree_structure/?min_depth=1&max_depth=3
-    GET /api/binary/nodes/tree_structure/?side=left&page=2&page_size=20&max_depth=5
     
     Performance Notes:
-    - When pagination is enabled (page/page_size provided), the API uses batch queries for optimal performance
-      * Reduces database queries from 600+ to ~10 queries (60-300x faster)
-      * Typical response time: 50-200ms (vs 1500-3000ms without pagination)
-      * Batch queries efficiently handle large datasets, so depth limits are not needed
-    - Count accuracy: The pagination count uses stored left_count/right_count fields for accurate totals
-      * Count reflects ALL descendants regardless of depth limits or fetched data
-      * Direct children are excluded from side_members count (they're shown in left_child/right_child)
-      * Example: If left_count=8 and left_child exists, left_side_members count will be 7 (8-1)
-    - When pagination is enabled, left_child and right_child only show direct children (no nested recursion)
-      * Nested descendants are accessible through paginated left_side_members and right_side_members
-      * This significantly reduces JSON payload size
-    - Pagination applies at ALL levels of the tree, not just the root
-      * Each node's left_side_members and right_side_members are independently paginated
-      * Each uses its own stored counts for accurate pagination metadata
-    - For best performance, always use pagination when displaying large trees
+    - Uses prefetch_related with Prefetch objects to optimize database queries
+      * Reduces database queries significantly by prefetching related user and wallet data
+      * Typical response time: 50-150ms (much faster than recursive tree loading)
+    - Returns only direct children (left_child and right_child) with no nested recursion
+      * This significantly reduces JSON payload size and response latency
+      * To load children of a specific node, use the node_children endpoint
+    - Each child node includes total_descendants field (left_count + right_count) for easy reference
+    - Contact information (user_mobile, user_email) and all basic details are included in each child
     
     Response (200 OK):
     {
@@ -3891,97 +3874,13 @@ Super User: EVAdmin && EVAdmin@123
       "level": 0,
       "left_count": 5,
       "right_count": 3,
+      "total_descendants": 8,  // left_count + right_count
       "binary_commission_activated": true,
       "activation_timestamp": "2026-01-06T12:00:00Z",
       "counts_for_activation": true,
       "eligible_for_pairing": false,
-      "left_side_members": {
-        "count": 7,  // Accurate count from stored left_count (8) minus direct child (1) = 7
-        "page": 1,
-        "page_size": 20,
-        "total_pages": 1,  // Calculated from accurate count
-        "next": null,
-        "previous": null,
-        "results": [
-          {
-            "node_id": 4,
-            "user_id": 4,
-            "user_email": "user4@example.com",
-            "user_username": "user4@example.com",
-            "user_full_name": "Alice Brown",
-            "user_mobile": "+919876543212",
-            "user_first_name": "Alice",
-            "user_last_name": "Brown",
-            "user_city": "Bangalore",
-            "user_state": "Karnataka",
-            "is_distributor": false,
-            "is_active_buyer": false,
-            "referral_code": "REF00004",
-            "date_joined": "2026-01-08T14:00:00Z",
-            "wallet_balance": "0.00",
-            "total_bookings": 0,
-            "total_binary_pairs": 0,
-            "total_earnings": "0.00",
-            "parent": 2,
-            "side": "left",
-            "level": 2,
-            "left_count": 0,
-            "right_count": 0,
-            "counts_for_activation": false,
-            "eligible_for_pairing": false,
-            "created_at": "2026-01-08T14:00:00Z",
-            "updated_at": "2026-01-08T14:00:00Z"
-          }
-          // ... more members (up to page_size)
-        ]
-      },
-      // Note: If side="left", right_side_members will be null
-      // Note: If pagination not requested, left_side_members and right_side_members return as arrays (backward compatibility)
-      // Note: When pagination is enabled, left_child and right_child only show direct children (no nested recursion)
-      //       Nested descendants are accessible through paginated left_side_members and right_side_members
-      // Note: Pagination count is calculated from stored left_count/right_count fields for accuracy
-      //       Count = stored_count - 1 (if direct child exists) or stored_count (if no direct child)
-      //       This ensures accurate pagination metadata regardless of depth limits or fetched data
-      "right_side_members": {
-        "count": 7,  // Accurate count from stored right_count (8) minus direct child (1) = 7
-        "page": 1,
-        "page_size": 20,
-        "total_pages": 1,  // Calculated from accurate count
-        "next": null,
-        "previous": null,
-        "results": [
-          {
-            "node_id": 6,
-            "user_id": 6,
-            "user_email": "user6@example.com",
-            "user_username": "user6@example.com",
-            "user_full_name": "David Lee",
-            "user_mobile": "+919876543215",
-            "user_first_name": "David",
-            "user_last_name": "Lee",
-            "user_city": "Hyderabad",
-            "user_state": "Telangana",
-            "is_distributor": false,
-            "is_active_buyer": false,
-            "referral_code": "REF00006",
-            "date_joined": "2026-01-10T11:00:00Z",
-            "wallet_balance": "0.00",
-            "total_bookings": 0,
-            "total_binary_pairs": 0,
-            "total_earnings": "0.00",
-            "parent": 3,
-            "side": "left",
-            "level": 2,
-            "left_count": 0,
-            "right_count": 0,
-            "counts_for_activation": false,
-            "eligible_for_pairing": false,
-            "created_at": "2026-01-10T11:00:00Z",
-            "updated_at": "2026-01-10T11:00:00Z"
-          }
-          // ... more members (up to page_size)
-        ]
-      },
+      // Note: left_side_members and right_side_members are not populated in direct-children-only mode
+      // Use the node_children endpoint to load children of specific nodes as needed
       "left_child": {
         "id": 2,
         "user_id": 2,
@@ -4006,80 +3905,12 @@ Super User: EVAdmin && EVAdmin@123
         "level": 1,
         "left_count": 2,
         "right_count": 1,
+        "total_descendants": 3,  // left_count + right_count
         "counts_for_activation": true,
         "eligible_for_pairing": true,
-        // Note: When pagination is enabled, left_child and right_child only show direct children (no nested recursion)
-        // Nested children are accessible through paginated left_side_members and right_side_members
-        "left_side_members": {
-          // Paginated nested descendants (when pagination enabled)
-          "count": 2,
-          "page": 1,
-          "page_size": 20,
-          "total_pages": 1,
-          "next": null,
-          "previous": null,
-          "results": [
-            // Nested descendants here
-          ]
-        },
-        "right_side_members": {
-          // Paginated nested descendants (when pagination enabled)
-          "count": 1,
-          "page": 1,
-          "page_size": 20,
-          "total_pages": 1,
-          "next": null,
-          "previous": null,
-          "results": [
-            // Nested descendants here
-          ]
-        },
-        "created_at": "2026-01-07T10:00:00Z",
-        "updated_at": "2026-01-07T10:00:00Z"
-      },
-      // Example without pagination (backward compatibility):
-      // "left_child": {
-      //   "id": 2,
-      //   ...
-      //   "left_child": {
-      //     "id": 4,
-      //     "user_id": 4,
-      //     ...
-      //     "left_child": null,
-      //     "right_child": null,
-      //     ...
-      //   },
-      //   "right_child": {
-      //     "id": 5,
-          "user_id": 5,
-          "user_email": "user5@example.com",
-          "user_username": "user5@example.com",
-          "user_full_name": "Charlie Wilson",
-          "user_mobile": "+919876543213",
-          "user_first_name": "Charlie",
-          "user_last_name": "Wilson",
-          "user_city": "Chennai",
-          "user_state": "Tamil Nadu",
-          "is_distributor": false,
-          "is_active_buyer": false,
-          "referral_code": "REF00005",
-          "date_joined": "2026-01-09T09:00:00Z",
-          "wallet_balance": "0.00",
-          "total_bookings": 0,
-          "total_binary_pairs": 0,
-          "total_earnings": "0.00",
-          "parent": 2,
-          "side": "right",
-          "level": 2,
-          "left_count": 0,
-          "right_count": 0,
-          "counts_for_activation": false,
-          "eligible_for_pairing": false,
-          "left_child": null,
-          "right_child": null,
-          "created_at": "2026-01-09T09:00:00Z",
-          "updated_at": "2026-01-09T09:00:00Z"
-        },
+        // Note: left_child and right_child only show direct children (no nested recursion)
+        // To load children of this node, use GET /api/binary/nodes/node_children/?node_id=2
+        // Note: left_side_members and right_side_members are not populated in direct-children-only mode
         "created_at": "2026-01-07T10:00:00Z",
         "updated_at": "2026-01-07T10:00:00Z"
       },
@@ -4107,8 +3938,11 @@ Super User: EVAdmin && EVAdmin@123
         "level": 1,
         "left_count": 1,
         "right_count": 2,
+        "total_descendants": 3,  // left_count + right_count
         "counts_for_activation": true,
         "eligible_for_pairing": true,
+        // Note: left_child and right_child only show direct children (no nested recursion)
+        // To load children of this node, use GET /api/binary/nodes/node_children/?node_id=3
         "left_child": {
           "id": 6,
           "user_id": 6,
@@ -4133,9 +3967,10 @@ Super User: EVAdmin && EVAdmin@123
           "level": 2,
           "left_count": 0,
           "right_count": 0,
+          "total_descendants": 0,  // left_count + right_count
           "counts_for_activation": false,
           "eligible_for_pairing": false,
-          "left_child": null,
+          "left_child": null,  // No nested children - use node_children endpoint to load if needed
           "right_child": null,
           "created_at": "2026-01-10T11:00:00Z",
           "updated_at": "2026-01-10T11:00:00Z"
@@ -4193,8 +4028,6 @@ Super User: EVAdmin && EVAdmin@123
       // ... root node fields ...
       "left_child": { ... },  // Included
       "right_child": null,     // Excluded when side="left"
-      "left_side_members": { ... },  // Paginated structure
-      "right_side_members": null,    // Excluded when side="left"
       "pending_users": [ ... ]
     }
     
@@ -4203,38 +4036,26 @@ Super User: EVAdmin && EVAdmin@123
       // ... root node fields ...
       "left_child": null,      // Excluded when side="right"
       "right_child": { ... },  // Included
-      "left_side_members": null,     // Excluded when side="right"
-      "right_side_members": { ... }, // Paginated structure
-      "pending_users": [ ... ]
-    }
-    
-    Response without pagination (backward compatibility):
-    {
-      // ... root node fields ...
-      "left_side_members": [ ... ],  // Array (not paginated)
-      "right_side_members": [ ... ], // Array (not paginated)
       "pending_users": [ ... ]
     }
     
     Notes:
-    - Returns recursive tree structure with all child nodes
+    - Returns only direct children (left_child and right_child) with NO nested recursion
+      * This significantly reduces response size and latency
+      * To load children of a specific node, use the node_children endpoint
     - Root node is always included regardless of filters
     - Direct children (left_child, right_child) are conditionally included based on side filter
-    - Side filtering: When side="left", right_side_members and right_child are excluded (set to null)
-    - Side filtering: When side="right", left_side_members and left_child are excluded (set to null)
-    - Pagination: Only applies to left_side_members and right_side_members arrays
-    - Pagination: If page and page_size are not provided, returns all members as arrays (backward compatibility)
-    - Pagination: When pagination is requested, side_members return as objects with count, page, page_size, total_pages, next, previous, and results
-    - Depth filtering: min_depth and max_depth filter members based on their level in the tree
-    - max_depth parameter limits how deep the tree is traversed (prevents excessive recursion)
+    - Side filtering: When side="left", right_child is excluded (set to null)
+    - Side filtering: When side="right", left_child is excluded (set to null)
     - Only tree owner can view their own tree structure
     - Each node includes comprehensive member details:
-      * Basic Info: user_id, user_email, user_username, user_full_name, user_mobile, user_profile_picture_url
+      * Basic Info: node_id, user_id, user_email, user_username, user_full_name, user_mobile, user_profile_picture_url
       * Personal Details: user_first_name, user_last_name, user_city, user_state
       * Status: is_distributor, is_active_buyer, referral_code, date_joined
-      * Financial: wallet_balance, total_earnings
-      * Activity: total_bookings, total_binary_pairs
-      * Tree Position: parent, side, level, left_count, right_count
+      * Financial: wallet_balance, total_earnings, total_amount, tds_current, net_amount_total
+      * Activity: total_bookings, total_binary_pairs, total_referrals
+      * Tree Position: parent, parent_name, side, level, left_count, right_count, total_descendants
+        - total_descendants: Sum of left_count + right_count (total number of descendants)
       * Binary Commission: binary_commission_activated, activation_timestamp (timestamp when activation occurred)
       * Eligibility Fields:
         - counts_for_activation (boolean): Indicates if this user counts toward binary activation calculation
@@ -4245,8 +4066,8 @@ Super User: EVAdmin && EVAdmin@123
           * true: User has activation payment AND at least one ancestor has binary commission activated
           * false: User does not have activation payment OR no ancestor has binary commission activated
           * Only eligible users are considered when creating binary pairs
-      * Children: left_child, right_child (recursive structure)
-      * Side Members: left_side_members, right_side_members (paginated or flat lists of all members on each side)
+      * Children: left_child, right_child (only direct children, no nested recursion)
+        - To load children of a child node, use GET /api/binary/nodes/node_children/?node_id={node_id}
     - Binary Activation Rules:
       * Only users with activation payment (counts_for_activation=true) count toward binary activation
       * Users without activation payment are visible in tree but do NOT count toward activation threshold
@@ -4256,14 +4077,180 @@ Super User: EVAdmin && EVAdmin@123
     - Pair Matching Eligibility: Only members with activation payment (eligible_for_pairing=true) are considered for pairing
       * Members created at or after activation_timestamp AND with activation payment are eligible
       * Pre-activation members and members without activation payment are excluded from pairing
-    - left_side_members: Paginated object or array containing all members on the left side with full details (all levels)
-    - right_side_members: Paginated object or array containing all members on the right side with full details (all levels)
-    - left_child/right_child: Recursive tree structure showing parent-child relationships (conditionally included based on side filter)
-    - left_side_members/right_side_members: Paginated objects or flat lists showing all members on each side for easy access
-    - All member details are included for each node in the tree (both left and right sides, unless filtered)
+    - Lazy Loading: Use the node_children endpoint to progressively load children of nodes as users expand the tree
     - Wallet balance and earnings are returned as strings with 2 decimal places
     - If user doesn't have a wallet, balance and earnings default to "0.00"
-    - Backward Compatibility: Existing API calls without new parameters work exactly as before (returns all members as arrays)
+    - Contact Information: Each child includes user_mobile and user_email for contact purposes
+
+
+53.5. GET NODE CHILDREN (Lazy Loading)
+    Method: GET
+    URL: /api/binary/nodes/node_children/
+    Authentication: Required
+    Description: Get direct left and right children of a specific node (for lazy loading). Use this endpoint when a user clicks on a child node to load its children. Returns only direct children with no nested recursion.
+    Performance: Uses prefetch_related to optimize database queries, ensuring fast response times even for large trees.
+    
+    Query Parameters:
+    - node_id: (Required) The ID of the node whose children should be returned
+    - side: Filter by side ("left", "right", "both") - default: "both"
+      * "left": Returns only left_child (excludes right_child)
+      * "right": Returns only right_child (excludes left_child)
+      * "both": Returns both left_child and right_child (default behavior)
+    
+    Example Requests:
+    GET /api/binary/nodes/node_children/?node_id=2
+    GET /api/binary/nodes/node_children/?node_id=2&side=left
+    GET /api/binary/nodes/node_children/?node_id=2&side=right
+    
+    Response (200 OK):
+    {
+      "node_id": 2,
+      "left_child": {
+        "node_id": 4,
+        "user_id": 4,
+        "user_email": "user4@example.com",
+        "user_username": "user4@example.com",
+        "user_full_name": "Alice Brown",
+        "user_mobile": "+919876543212",
+        "user_first_name": "Alice",
+        "user_last_name": "Brown",
+        "user_city": "Bangalore",
+        "user_state": "Karnataka",
+        "is_distributor": false,
+        "is_active_buyer": false,
+        "referral_code": "REF00004",
+        "date_joined": "2026-01-08T14:00:00Z",
+        "wallet_balance": "0.00",
+        "total_bookings": 0,
+        "total_binary_pairs": 0,
+        "total_earnings": "0.00",
+        "total_referrals": 0,
+        "total_amount": "0.00",
+        "tds_current": "0.00",
+        "net_amount_total": "0.00",
+        "parent": 2,
+        "parent_name": "Jane Smith",
+        "side": "left",
+        "level": 2,
+        "left_count": 0,
+        "right_count": 0,
+        "total_descendants": 0,  // left_count + right_count
+        "binary_commission_activated": false,
+        "counts_for_activation": false,
+        "eligible_for_pairing": false,
+        "created_at": "2026-01-08T14:00:00Z",
+        "updated_at": "2026-01-08T14:00:00Z"
+        // Note: left_child and right_child are not included (no nested recursion)
+        // To load children of this node, call this endpoint again with node_id=4
+      },
+      "right_child": {
+        "node_id": 5,
+        "user_id": 5,
+        "user_email": "user5@example.com",
+        "user_username": "user5@example.com",
+        "user_full_name": "Charlie Wilson",
+        "user_mobile": "+919876543213",
+        "user_first_name": "Charlie",
+        "user_last_name": "Wilson",
+        "user_city": "Chennai",
+        "user_state": "Tamil Nadu",
+        "is_distributor": false,
+        "is_active_buyer": false,
+        "referral_code": "REF00005",
+        "date_joined": "2026-01-09T09:00:00Z",
+        "wallet_balance": "0.00",
+        "total_bookings": 0,
+        "total_binary_pairs": 0,
+        "total_earnings": "0.00",
+        "total_referrals": 0,
+        "total_amount": "0.00",
+        "tds_current": "0.00",
+        "net_amount_total": "0.00",
+        "parent": 2,
+        "parent_name": "Jane Smith",
+        "side": "right",
+        "level": 2,
+        "left_count": 0,
+        "right_count": 0,
+        "total_descendants": 0,  // left_count + right_count
+        "binary_commission_activated": false,
+        "counts_for_activation": false,
+        "eligible_for_pairing": false,
+        "created_at": "2026-01-09T09:00:00Z",
+        "updated_at": "2026-01-09T09:00:00Z"
+      }
+    }
+    
+    Response when filtering by left side only (side=left):
+    {
+      "node_id": 2,
+      "left_child": { ... },  // Included
+      "right_child": null     // Excluded when side="left"
+    }
+    
+    Response when filtering by right side only (side=right):
+    {
+      "node_id": 2,
+      "left_child": null,     // Excluded when side="right"
+      "right_child": { ... }  // Included
+    }
+    
+    Response when node has no children:
+    {
+      "node_id": 2,
+      "left_child": null,
+      "right_child": null
+    }
+    
+    Error Responses:
+    - 400 Bad Request: Missing or invalid node_id parameter
+      {
+        "error": "node_id query parameter is required"
+      }
+      or
+      {
+        "error": "node_id must be a valid integer"
+      }
+    
+    - 404 Not Found: Node not found or user doesn't have a binary node
+      {
+        "error": "Node not found"
+      }
+      or
+      {
+        "error": "No binary node found for current user"
+      }
+    
+    - 403 Forbidden: User doesn't have permission to view this node
+      {
+        "detail": "You can only view nodes in your own binary tree"
+      }
+    
+    Notes:
+    - Returns only direct children (left_child and right_child) with NO nested recursion
+      * This keeps response size small and latency low
+      * To load children of a returned child, call this endpoint again with that child's node_id
+    - Permission: Users can only view nodes in their own binary tree (unless admin/superuser)
+      * The endpoint checks if the requested node belongs to the user's tree
+      * Admin and superuser can view any node
+    - Each child includes comprehensive member details:
+      * Basic Info: node_id, user_id, user_email, user_username, user_full_name, user_mobile
+      * Personal Details: user_first_name, user_last_name, user_city, user_state
+      * Status: is_distributor, is_active_buyer, referral_code, date_joined
+      * Financial: wallet_balance, total_earnings, total_amount, tds_current, net_amount_total
+      * Activity: total_bookings, total_binary_pairs, total_referrals
+      * Tree Position: parent, parent_name, side, level, left_count, right_count, total_descendants
+        - total_descendants: Sum of left_count + right_count (total number of descendants)
+      * Binary Commission: binary_commission_activated, activation_timestamp
+      * Eligibility: counts_for_activation, eligible_for_pairing
+    - Contact Information: Each child includes user_mobile and user_email for contact purposes
+    - Lazy Loading Pattern: 
+      * Initial load: Use tree_structure endpoint to get root node with direct children
+      * On click: Use node_children endpoint with the clicked node's ID to load its children
+      * Continue recursively as users expand the tree
+    - Performance: Uses prefetch_related to minimize database queries
+    - Side filtering: When side="left", right_child is excluded (set to null)
+    - Side filtering: When side="right", left_child is excluded (set to null)
 
 
 54. MANUALLY PLACE USER IN TREE
@@ -4327,8 +4314,6 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Notes:
-    - IMPORTANT: User must have at least one successful payment before placement
-    - If user has no successful payment, placement fails with error message
     - Only the tree owner (referrer) can place users in their tree
     - Target user must have used referrer's referral code (checked via user.referred_by or booking.referred_by)
     - If user already has a node, it will be moved to the new position
@@ -4578,16 +4563,14 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Notes:
-    - IMPORTANT: User must have at least one successful payment before placement
-    - If user has no successful payment, placement fails with error message
     - Automatically places pending users using the left-priority placement algorithm
     - Placement Rules:
       1. First 2 direct referrals: 1st user → LEFT, 2nd user → RIGHT
       2. From 3rd referral onward: Follow LEFT-side chain (traverse left children to find left-most available position)
       3. Referral-based override: If user used a specific parent's code, place in that parent's tree
       4. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side)
-    - If no parameters provided: Places ALL pending users who used referrer's code (and have successful payment)
-    - If target_user_id provided: Places only that specific user (must have used referrer's code and have successful payment)
+    - If no parameters provided: Places ALL pending users who used referrer's code
+    - If target_user_id provided: Places only that specific user (must have used referrer's code)
     - Users already in referrer's tree are skipped (not placed again)
     - Commission is automatically paid when placement succeeds (if user has successful payment)
     - Recommended workflow:
@@ -4707,6 +4690,107 @@ Super User: EVAdmin && EVAdmin@123
     - If user already has a node but is in another tree, will be moved to referrer's tree
     - Automatically places user on the chosen side
     - Automatically updates parent's left_count or right_count
+
+
+59. GET TEAM MEMBERS (Distributor Only)
+    Method: GET
+    URL: /api/binary/nodes/team-members/
+    Authentication: Required
+    Description: Get direct team members (children) for a distributor member. Returns basic details including full name, email, phone number, total paid amount from all orders, and side. Supports pagination and side filtering. Only accessible to users with is_distributor=True.
+    
+    Query Parameters:
+    - side (optional): Filter by side - "left", "right", or omit for both sides (default: both)
+    - page (optional): Page number for pagination (default: 1)
+    - page_size (optional): Items per page (default: 20, max: 100)
+    
+    Example Requests:
+    GET /api/binary/nodes/team-members/
+    GET /api/binary/nodes/team-members/?side=left
+    GET /api/binary/nodes/team-members/?side=right
+    GET /api/binary/nodes/team-members/?page=1&page_size=10
+    GET /api/binary/nodes/team-members/?side=left&page=2&page_size=20
+    
+    Response (200 OK):
+    {
+      "count": 10,
+      "next": "http://api/binary/nodes/team-members/?page=2&page_size=20&side=left",
+      "previous": null,
+      "page": 1,
+      "page_size": 20,
+      "results": [
+        {
+          "full_name": "John Doe",
+          "email": "john@example.com",
+          "phone": "+919876543210",
+          "total_paid": "15000.00",
+          "side": "left"
+        },
+        {
+          "full_name": "Jane Smith",
+          "email": "jane@example.com",
+          "phone": "+919876543211",
+          "total_paid": "25000.00",
+          "side": "right"
+        }
+      ]
+    }
+    
+    Response when no team members (200 OK):
+    {
+      "count": 0,
+      "next": null,
+      "previous": null,
+      "page": 1,
+      "page_size": 20,
+      "results": []
+    }
+    
+    Error Response (403 Forbidden):
+    {
+      "detail": "This endpoint is only available for distributors."
+    }
+    
+    Error Response (404 Not Found):
+    {
+      "error": "Binary node not found. Please ensure you have a binary tree structure."
+    }
+    
+    Error Response (400 Bad Request):
+    {
+      "error": "side must be 'left' or 'right'"
+    }
+    OR
+    {
+      "error": "page must be a valid integer"
+    }
+    OR
+    {
+      "error": "page_size must be a valid integer"
+    }
+    
+    Notes:
+    - Only users with is_distributor=True can access this endpoint
+    - Returns only DIRECT CHILDREN (immediate children in the binary tree), not all descendants
+    - Above members in the tree (ancestors) are NOT displayed
+    - Each team member includes:
+      * full_name: User's full name (first_name + last_name) or username if name not available
+      * email: User's email address
+      * phone: User's mobile number
+      * total_paid: Sum of total_paid from all bookings for this user (calculated from Booking model)
+      * side: The side (left or right) where this member is placed in the tree
+    - Pagination:
+      * Default page size: 20 items per page
+      * Maximum page size: 100 items per page
+      * Page numbers start at 1
+      * Response includes pagination metadata: count, next, previous, page, page_size
+    - Side Filtering:
+      * side="left": Returns only team members on the left side
+      * side="right": Returns only team members on the right side
+      * No side parameter: Returns team members from both sides
+    - Performance: Uses efficient database queries with select_related and annotate for optimal performance
+    - Results are ordered by side (left first) and then by user ID for consistency
+    - Total paid calculation: Sums the total_paid field from all bookings for each team member
+      * If a team member has no bookings, total_paid will be "0.00"
 
 
 ================================================================================
@@ -5188,10 +5272,381 @@ Super User: EVAdmin && EVAdmin@123
 
 
 ================================================================================
+                    DISTRIBUTOR DOCUMENT APIs
+================================================================================
+
+80. LIST DISTRIBUTOR DOCUMENTS
+    Method: GET
+    URL: /api/compliance/distributor-documents/
+    Authentication: Required
+    Description: List active distributor documents. Regular users see only active documents, admins see all documents.
+    
+    Response (200 OK):
+    {
+      "count": 3,
+      "results": [
+        {
+          "id": 1,
+          "title": "Terms & Conditions",
+          "document_type": "terms_conditions",
+          "content": "Full terms and conditions text...",
+          "file": "/media/compliance/distributor_documents/terms.pdf",
+          "version": "1.0",
+          "is_required": true,
+          "effective_from": "2026-01-01T00:00:00Z",
+          "effective_until": null,
+          "is_accepted": false,
+          "user_acceptance": null
+        },
+        {
+          "id": 2,
+          "title": "Privacy Policy",
+          "document_type": "policy",
+          "content": "Privacy policy content...",
+          "file": null,
+          "version": "2.0",
+          "is_required": false,
+          "effective_from": "2026-01-15T00:00:00Z",
+          "effective_until": null,
+          "is_accepted": true,
+          "user_acceptance": {
+            "accepted_at": "2026-01-20T10:30:00Z",
+            "accepted_version": "2.0"
+          }
+        }
+      ]
+    }
+    
+    Notes:
+    - Regular users only see active documents that are currently effective
+    - is_accepted field indicates if current user has accepted the document
+    - user_acceptance shows acceptance details if user has accepted
+
+
+81. GET DISTRIBUTOR DOCUMENT
+    Method: GET
+    URL: /api/compliance/distributor-documents/{id}/
+    Authentication: Required
+    Description: Get details of a specific distributor document
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "title": "Terms & Conditions",
+      "document_type": "terms_conditions",
+      "content": "Full terms and conditions text...",
+      "file": "/media/compliance/distributor_documents/terms.pdf",
+      "version": "1.0",
+      "is_required": true,
+      "effective_from": "2026-01-01T00:00:00Z",
+      "effective_until": null,
+      "is_accepted": false,
+      "user_acceptance": null
+    }
+
+
+82. CREATE DISTRIBUTOR DOCUMENT (Admin/Staff Only)
+    Method: POST
+    URL: /api/compliance/distributor-documents/
+    Authentication: Required (Admin/Staff)
+    Description: Create a new distributor document. Only admin/staff can create documents.
+    
+    Request Body (multipart/form-data):
+    {
+      "title": "Terms & Conditions",
+      "document_type": "terms_conditions",  // "terms_conditions", "legal_agreement", "policy", "payment_terms", "distributor_terms", "other"
+      "content": "Full terms and conditions text...",
+      "file": <file>,  // Optional: PDF/document file
+      "version": "1.0",
+      "is_active": true,
+      "is_required": true,
+      "effective_from": "2026-01-01T00:00:00Z",
+      "effective_until": null  // Optional: expiration date
+    }
+    
+    Response (201 Created):
+    {
+      "id": 1,
+      "title": "Terms & Conditions",
+      "document_type": "terms_conditions",
+      "content": "Full terms and conditions text...",
+      "file": "/media/compliance/distributor_documents/terms.pdf",
+      "version": "1.0",
+      "is_active": true,
+      "is_required": true,
+      "created_by": 1,
+      "created_by_username": "admin@example.com",
+      "acceptance_count": 0,
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "effective_from": "2026-01-01T00:00:00Z",
+      "effective_until": null
+    }
+    
+    Error Response (403):
+    {
+      "detail": "You do not have permission to perform this action."
+    }
+
+
+83. UPDATE DISTRIBUTOR DOCUMENT (Admin/Staff Only)
+    Method: PUT/PATCH
+    URL: /api/compliance/distributor-documents/{id}/
+    Authentication: Required (Admin/Staff)
+    Description: Update an existing distributor document. Only admin/staff can update documents.
+    
+    Request Body (multipart/form-data):
+    {
+      "title": "Updated Terms & Conditions",
+      "version": "2.0",  // Increment version when making significant changes
+      "content": "Updated content...",
+      "is_active": true
+    }
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "title": "Updated Terms & Conditions",
+      "document_type": "terms_conditions",
+      "content": "Updated content...",
+      "version": "2.0",
+      "is_active": true,
+      "updated_at": "2026-01-15T10:00:00Z"
+    }
+    
+    Notes:
+    - When version is updated, users who accepted previous version will need to accept new version
+    - created_by, created_at are read-only fields
+
+
+84. DELETE DISTRIBUTOR DOCUMENT (Admin/Staff Only)
+    Method: DELETE
+    URL: /api/compliance/distributor-documents/{id}/
+    Authentication: Required (Admin/Staff)
+    Description: Delete (soft delete) a distributor document. Sets is_active=False. Only admin/staff can delete documents.
+    
+    Response (204 No Content):
+    (No response body)
+    
+    Notes:
+    - This is a soft delete - document is marked as inactive, not permanently deleted
+    - Inactive documents are not visible to regular users
+    - Acceptance records are preserved for legal compliance
+
+
+85. ACCEPT DISTRIBUTOR DOCUMENT
+    Method: POST
+    URL: /api/compliance/distributor-documents/{id}/accept/
+    Authentication: Required
+    Description: Initiate document acceptance. Sends OTP to user's email/mobile for verification. User must verify OTP in next step to complete acceptance.
+    
+    Response (200 OK):
+    {
+      "message": "OTP sent successfully. Please verify OTP to complete acceptance.",
+      "otp_sent": {
+        "message": "OTP sent to both email (user@example.com) and mobile (+919876543210)",
+        "sent_to": ["email", "mobile"]
+      },
+      "document_id": 1,
+      "document_version": "1.0"
+    }
+    
+    Error Response (400):
+    {
+      "error": "This document is not active and cannot be accepted."
+    }
+    OR
+    {
+      "error": "This document is not yet effective."
+    }
+    OR
+    {
+      "error": "This document has expired."
+    }
+    OR
+    {
+      "error": "You have already accepted this document (version 1.0)."
+    }
+    OR
+    {
+      "error": "User must have email or mobile number to accept documents."
+    }
+    
+    Notes:
+    - OTP is sent using universal OTP system (sends to both email and mobile if available)
+    - User must call verify-acceptance endpoint with OTP to complete acceptance
+    - Document must be active and within effective date range
+    - Users cannot accept same document version twice
+
+
+86. VERIFY ACCEPTANCE & COMPLETE DOCUMENT ACCEPTANCE
+    Method: POST
+    URL: /api/compliance/distributor-documents/{id}/verify-acceptance/
+    Authentication: Required
+    Description: Verify OTP and complete document acceptance. Creates acceptance record with IP address, timestamp, user info snapshot, and timeline data for legal compliance.
+    
+    Request Body:
+    {
+      "identifier": "user@example.com",  // User's email or mobile
+      "otp_code": "123456",
+      "otp_type": "email"  // "email" or "mobile"
+    }
+    
+    Response (201 Created):
+    {
+      "message": "Document accepted successfully.",
+      "acceptance": {
+        "id": 1,
+        "user": 1,
+        "user_username": "user@example.com",
+        "user_email": "user@example.com",
+        "document": 1,
+        "document_title": "Terms & Conditions",
+        "document_type": "terms_conditions",
+        "accepted_at": "2026-01-20T10:30:00Z",
+        "accepted_version": "1.0",
+        "ip_address": "192.168.1.100",
+        "user_agent": "Mozilla/5.0...",
+        "otp_verified": true,
+        "otp_identifier": "user@example.com",
+        "timeline_data": {
+          "event_type": "document_acceptance",
+          "document_id": 1,
+          "document_title": "Terms & Conditions",
+          "document_version": "1.0",
+          "document_type": "terms_conditions",
+          "user_id": 1,
+          "user_username": "user@example.com",
+          "ip_address": "192.168.1.100",
+          "user_agent": "Mozilla/5.0...",
+          "acceptance_method": "otp_verified"
+        },
+        "user_info_snapshot": {
+          "user_id": 1,
+          "username": "user@example.com",
+          "email": "user@example.com",
+          "mobile": "+919876543210",
+          "first_name": "John",
+          "last_name": "Doe",
+          "role": "user",
+          "is_distributor": true,
+          "is_active_buyer": true,
+          "date_joined": "2025-01-01T00:00:00Z",
+          "last_login": "2026-01-20T09:00:00Z",
+          "address": {
+            "address_line1": "123 Main St",
+            "city": "Mumbai",
+            "state": "Maharashtra",
+            "pincode": "400001",
+            "country": "India"
+          }
+        }
+      }
+    }
+    
+    Error Response (400):
+    {
+      "non_field_errors": ["Invalid or expired OTP"]
+    }
+    OR
+    {
+      "non_field_errors": ["User not found. Only existing users can verify OTP."]
+    }
+    OR
+    {
+      "non_field_errors": ["Document not found or is not active."]
+    }
+    OR
+    {
+      "non_field_errors": ["You have already accepted this document (version 1.0)."]
+    }
+    OR
+    {
+      "error": "OTP verification failed. User mismatch."
+    }
+    
+    Notes:
+    - OTP must be verified within 10 minutes (OTP expiry time)
+    - IP address is automatically captured from request
+    - User agent (browser info) is automatically captured
+    - User info snapshot preserves user state at acceptance time for legal records
+    - Timeline data provides complete audit trail
+    - Acceptance records are immutable (cannot be modified after creation)
+    - If document version is updated, user must accept new version separately
+
+
+87. LIST DOCUMENT ACCEPTANCES
+    Method: GET
+    URL: /api/compliance/distributor-document-acceptances/
+    Authentication: Required
+    Description: List document acceptance records. Users see their own acceptances, admins see all acceptances.
+    
+    Response (200 OK):
+    {
+      "count": 2,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "user_username": "user@example.com",
+          "user_email": "user@example.com",
+          "document": 1,
+          "document_title": "Terms & Conditions",
+          "document_type": "terms_conditions",
+          "accepted_at": "2026-01-20T10:30:00Z",
+          "accepted_version": "1.0",
+          "ip_address": "192.168.1.100",
+          "user_agent": "Mozilla/5.0...",
+          "otp_verified": true,
+          "otp_identifier": "user@example.com",
+          "timeline_data": {...},
+          "user_info_snapshot": {...}
+        }
+      ]
+    }
+    
+    Notes:
+    - Regular users only see their own acceptance records
+    - Admins can see all acceptance records
+    - Records are sorted by accepted_at (newest first)
+
+
+88. GET DOCUMENT ACCEPTANCE DETAILS
+    Method: GET
+    URL: /api/compliance/distributor-document-acceptances/{id}/
+    Authentication: Required
+    Description: Get details of a specific document acceptance record
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "user": 1,
+      "user_username": "user@example.com",
+      "user_email": "user@example.com",
+      "document": 1,
+      "document_title": "Terms & Conditions",
+      "document_type": "terms_conditions",
+      "accepted_at": "2026-01-20T10:30:00Z",
+      "accepted_version": "1.0",
+      "ip_address": "192.168.1.100",
+      "user_agent": "Mozilla/5.0...",
+      "otp_verified": true,
+      "otp_identifier": "user@example.com",
+      "timeline_data": {...},
+      "user_info_snapshot": {...}
+    }
+    
+    Notes:
+    - Users can only view their own acceptance records
+    - Admins can view any acceptance record
+    - All fields are read-only (acceptance records are immutable)
+
+
+================================================================================
                             REPORTS APIs
 ================================================================================
 
-80. DASHBOARD STATISTICS
+89. DASHBOARD STATISTICS
     Method: GET
     URL: /api/reports/dashboard/
     Authentication: Required
@@ -5219,7 +5674,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-81. SALES REPORT (Admin Only)
+90. SALES REPORT (Admin Only)
     Method: GET
     URL: /api/reports/sales/
     Authentication: Required (Admin)
@@ -5237,7 +5692,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-82. USER REPORT
+91. USER REPORT
     Method: GET
     URL: /api/reports/user/
     Authentication: Required
@@ -5262,7 +5717,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-83. WALLET REPORT
+92. WALLET REPORT
     Method: GET
     URL: /api/reports/wallet/
     Authentication: Required
@@ -5293,7 +5748,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-84. DISTRIBUTOR DASHBOARD (Distributors Only)
+93. DISTRIBUTOR DASHBOARD (Distributors Only)
     Method: GET
     URL: /api/reports/distributor-dashboard/
     Authentication: Required (Distributors only)
@@ -7020,6 +7475,6 @@ File upload endpoints accept multipart/form-data:
                          END OF DOCUMENTATION
 ================================================================================
 
-Last Updated: 2026-02-02
-Version: 1.1.0
+Last Updated: 2026-02-13
+Version: 1.2.0
 

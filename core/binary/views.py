@@ -3,7 +3,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError, PermissionDenied
+from rest_framework.pagination import PageNumberPagination
 from django.db import transaction
+from django.db.models import Sum, Q
+from django.db.models.functions import Coalesce
+from decimal import Decimal
 from .models import BinaryNode, BinaryPair, BinaryEarning
 from .serializers import (
     BinaryNodeSerializer, BinaryPairSerializer, BinaryEarningSerializer,
@@ -121,77 +125,49 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         
         # Try to get binary node and tree structure
         try:
-            # Optimize query with select_related for user and wallet
+            from django.db.models import Prefetch
+            
+            # Optimize query with select_related and prefetch_related for direct children
+            # Prefetch left and right children with their related data
+            left_children_prefetch = Prefetch(
+                'children',
+                queryset=BinaryNode.objects.select_related(
+                    'user', 'user__wallet', 'parent', 'parent__user'
+                ).filter(side='left'),
+                to_attr='left_children_list'
+            )
+            right_children_prefetch = Prefetch(
+                'children',
+                queryset=BinaryNode.objects.select_related(
+                    'user', 'user__wallet', 'parent', 'parent__user'
+                ).filter(side='right'),
+                to_attr='right_children_list'
+            )
+            
             node = BinaryNode.objects.select_related(
                 'user', 'user__wallet', 'parent', 'parent__user'
+            ).prefetch_related(
+                left_children_prefetch,
+                right_children_prefetch
             ).get(user=request.user)
             
-            # Parse query parameters with defaults
-            try:
-                max_depth = int(request.query_params.get('max_depth', 5))
-            except (ValueError, TypeError):
-                max_depth = 5
-            
-            try:
-                min_depth = int(request.query_params.get('min_depth', 0))
-            except (ValueError, TypeError):
-                min_depth = 0
+            # For tree_structure endpoint, we only want direct children (no nested recursion)
+            # Set max_depth to 1 to only show direct children
+            max_depth = 1
             
             # Parse side filter (left, right, both)
             side_filter = request.query_params.get('side', 'both').lower()
             if side_filter not in ['left', 'right', 'both']:
                 side_filter = 'both'
             
-            # Parse pagination parameters (optional - if not provided, returns all members for backward compatibility)
-            page = request.query_params.get('page')
-            page_size = request.query_params.get('page_size')
-            
-            if page:
-                try:
-                    page = int(page)
-                except (ValueError, TypeError):
-                    page = None
-            
-            if page_size:
-                try:
-                    page_size = int(page_size)
-                    # Enforce max page_size of 100
-                    if page_size > 100:
-                        page_size = 100
-                    if page_size < 1:
-                        page_size = None
-                    # If page_size is provided but page is not, default to page 1
-                    elif page is None:
-                        page = 1
-                except (ValueError, TypeError):
-                    page_size = None
-            
-            # Validate depth parameters
-            if min_depth < 0:
-                min_depth = 0
-            if max_depth < 1:
-                max_depth = 5
-            if min_depth > max_depth:
-                min_depth = 0
-            
-            # When pagination is enabled, limit max_depth to prevent fetching thousands of descendants
-            # Batch queries are efficient, but fetching 10,000+ nodes still takes time
-            # We use stored counts for accurate pagination metadata, so we don't need ALL descendants
-            effective_max_depth = max_depth
-            if page is not None and page_size is not None:
-                # Limit to reasonable depth (10 levels) when pagination is enabled
-                # This prevents fetching thousands of nodes while still showing deep trees
-                # Count uses stored counts, so pagination metadata is accurate regardless
-                effective_max_depth = min(max_depth, 10)
-            
             serializer = BinaryTreeNodeSerializer(
                 node,
-                max_depth=effective_max_depth,
-                min_depth=min_depth,
+                max_depth=max_depth,
+                min_depth=0,
                 current_depth=0,
                 side_filter=side_filter,
-                page=page,
-                page_size=page_size,
+                page=None,  # No pagination for direct children
+                page_size=None,
                 request=request
             )
             
@@ -210,6 +186,123 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {'error': f'Invalid parameter: {str(e)}', 'pending_users': pending_users},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=False, methods=['get'])
+    def node_children(self, request):
+        """
+        Get direct left and right children of a specific node (for lazy loading)
+        Query parameter: node_id (required)
+        Returns only direct children with no nested recursion
+        """
+        node_id = request.query_params.get('node_id')
+        
+        if not node_id:
+            return Response(
+                {'error': 'node_id query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            node_id = int(node_id)
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'node_id must be a valid integer'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            from django.db.models import Prefetch
+            
+            # Check if user has permission to view this node
+            # User can view nodes in their own tree
+            try:
+                user_node = BinaryNode.objects.get(user=request.user)
+            except BinaryNode.DoesNotExist:
+                return Response(
+                    {'error': 'No binary node found for current user'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get the requested node
+            try:
+                target_node = BinaryNode.objects.get(id=node_id)
+            except BinaryNode.DoesNotExist:
+                return Response(
+                    {'error': 'Node not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check if target node is in user's tree (user must own the tree containing this node)
+            if not self._is_tree_owner(request.user, target_node):
+                # Allow if user is admin/superuser
+                if not (request.user.is_superuser or request.user.role == 'admin'):
+                    raise PermissionDenied(
+                        "You can only view nodes in your own binary tree"
+                    )
+            
+            # Optimize query with prefetch_related for direct children
+            left_children_prefetch = Prefetch(
+                'children',
+                queryset=BinaryNode.objects.select_related(
+                    'user', 'user__wallet', 'parent', 'parent__user'
+                ).filter(side='left'),
+                to_attr='left_children_list'
+            )
+            right_children_prefetch = Prefetch(
+                'children',
+                queryset=BinaryNode.objects.select_related(
+                    'user', 'user__wallet', 'parent', 'parent__user'
+                ).filter(side='right'),
+                to_attr='right_children_list'
+            )
+            
+            node = BinaryNode.objects.select_related(
+                'user', 'user__wallet', 'parent', 'parent__user'
+            ).prefetch_related(
+                left_children_prefetch,
+                right_children_prefetch
+            ).get(id=node_id)
+            
+            # Parse side filter (left, right, both)
+            side_filter = request.query_params.get('side', 'both').lower()
+            if side_filter not in ['left', 'right', 'both']:
+                side_filter = 'both'
+            
+            # Serialize with max_depth=1 to only show direct children
+            serializer = BinaryTreeNodeSerializer(
+                node,
+                max_depth=1,
+                min_depth=0,
+                current_depth=0,
+                side_filter=side_filter,
+                page=None,
+                page_size=None,
+                request=request
+            )
+            
+            # Return only left_child and right_child in response
+            response_data = {
+                'node_id': node.id,
+                'left_child': serializer.data.get('left_child'),
+                'right_child': serializer.data.get('right_child')
+            }
+            
+            return Response(response_data)
+        except PermissionDenied:
+            raise
+        except BinaryNode.DoesNotExist:
+            return Response(
+                {'error': 'Node not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error in node_children endpoint: {str(e)}")
+            return Response(
+                {'error': f'An error occurred: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
     @action(detail=False, methods=['post'])
@@ -262,19 +355,6 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {'error': 'This user did not use your referral code and cannot be placed in your tree'},
                 status=status.HTTP_403_FORBIDDEN
-            )
-        
-        # Check if user has successful payment before allowing placement
-        from core.booking.models import Payment
-        has_payment = Payment.objects.filter(
-            user=target_user,
-            status='completed'
-        ).exists()
-        
-        if not has_payment:
-            return Response(
-                {'error': 'User must have at least one successful payment before placement'},
-                status=status.HTTP_400_BAD_REQUEST
             )
         
         # Place the user
@@ -555,22 +635,6 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         
         for user in all_referred_users:
             try:
-                # IMPORTANT: Check if user has successful payment before allowing placement
-                from core.booking.models import Payment
-                has_payment = Payment.objects.filter(
-                    user=user,
-                    status='completed'
-                ).exists()
-                
-                if not has_payment:
-                    failed_users.append({
-                        'user_id': user.id,
-                        'user_email': user.email,
-                        'user_full_name': user.get_full_name() or user.username,
-                        'error': 'User must have at least one successful payment before placement'
-                    })
-                    continue
-                
                 # Check if user is already in referrer's tree
                 try:
                     user_node = BinaryNode.objects.get(user=user)
@@ -803,6 +867,131 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
+    
+    @action(detail=False, methods=['get'])
+    def team_members(self, request):
+        """
+        Get direct team members (children) for a distributor member
+        Returns basic details: full_name, email, phone, total_paid, and side
+        Supports pagination and side filtering
+        Only accessible to users with is_distributor=True
+        """
+        # Check if user is a distributor
+        if not request.user.is_distributor:
+            raise PermissionDenied("This endpoint is only available for distributors.")
+        
+        # Get distributor's binary node
+        try:
+            distributor_node = BinaryNode.objects.select_related('user').get(user=request.user)
+        except BinaryNode.DoesNotExist:
+            return Response({
+                'error': 'Binary node not found. Please ensure you have a binary tree structure.'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get query parameters
+        side_filter = request.query_params.get('side', '').lower()
+        page = request.query_params.get('page', '1')
+        page_size = request.query_params.get('page_size', '20')
+        
+        # Validate side filter
+        if side_filter and side_filter not in ['left', 'right']:
+            return Response(
+                {'error': "side must be 'left' or 'right'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate pagination parameters
+        try:
+            page = int(page)
+            if page < 1:
+                page = 1
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'page must be a valid integer'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            page_size = int(page_size)
+            if page_size < 1:
+                page_size = 20
+            if page_size > 100:
+                page_size = 100
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'page_size must be a valid integer'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get direct children only (not all descendants)
+        from core.booking.models import Booking
+        queryset = BinaryNode.objects.filter(parent=distributor_node).select_related('user')
+        
+        # Filter by side if provided
+        if side_filter:
+            queryset = queryset.filter(side=side_filter)
+        
+        # Annotate with total_paid from bookings for each user
+        # Use Coalesce to handle None values (when user has no bookings)
+        queryset = queryset.annotate(
+            total_paid=Coalesce(Sum('user__bookings__total_paid'), Decimal('0'))
+        )
+        
+        # Order by side (left first) and then by user id for consistency
+        queryset = queryset.order_by('side', 'user__id')
+        
+        # Get total count before pagination
+        total_count = queryset.count()
+        
+        # Calculate pagination
+        start_index = (page - 1) * page_size
+        end_index = start_index + page_size
+        total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
+        
+        # Get paginated results
+        paginated_queryset = queryset[start_index:end_index]
+        
+        # Build response data
+        results = []
+        for node in paginated_queryset:
+            user = node.user
+            full_name = user.get_full_name() or user.username or ''
+            
+            # total_paid is guaranteed to be Decimal('0') or greater due to Coalesce
+            total_paid = node.total_paid
+            
+            results.append({
+                'full_name': full_name,
+                'email': user.email or '',
+                'phone': user.mobile or '',
+                'total_paid': str(total_paid),
+                'side': node.side or ''
+            })
+        
+        # Build pagination URLs
+        base_url = request.build_absolute_uri(request.path)
+        query_params = request.GET.copy()
+        
+        next_url = None
+        if page < total_pages:
+            query_params['page'] = page + 1
+            next_url = f"{base_url}?{query_params.urlencode()}"
+        
+        previous_url = None
+        if page > 1:
+            query_params['page'] = page - 1
+            previous_url = f"{base_url}?{query_params.urlencode()}"
+        
+        response_data = {
+            'count': total_count,
+            'next': next_url,
+            'previous': previous_url,
+            'page': page,
+            'page_size': page_size,
+            'results': results
+        }
+        
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 class BinaryPairViewSet(viewsets.ReadOnlyModelViewSet):

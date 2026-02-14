@@ -50,6 +50,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     user_profile_picture_url = serializers.SerializerMethodField()
     counts_for_activation = serializers.SerializerMethodField()
     eligible_for_pairing = serializers.SerializerMethodField()
+    total_descendants = serializers.SerializerMethodField()
     
     class Meta:
         model = BinaryNode
@@ -60,7 +61,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             'wallet_balance', 'total_bookings', 'total_binary_pairs', 'total_earnings',
             'total_referrals', 'total_amount', 'tds_current', 'net_amount_total',
             'parent', 'parent_name', 'side', 'level', 'left_count', 'right_count',
-            'binary_commission_activated', 'activation_timestamp', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
+            'total_descendants', 'binary_commission_activated', 'activation_timestamp', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
             'user_profile_picture_url', 'counts_for_activation', 'eligible_for_pairing', 'created_at', 'updated_at'
         ]
         read_only_fields = ('user', 'created_at', 'updated_at')
@@ -140,6 +141,10 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             current = current.parent
         
         return False
+    
+    def get_total_descendants(self, obj):
+        """Get total descendants count (left_count + right_count)"""
+        return obj.left_count + obj.right_count
     
     def get_parent_name(self, obj):
         """Get parent's full name"""
@@ -274,7 +279,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         return "0.00"
     
     def get_left_child(self, obj):
-        """Get left child node recursively"""
+        """Get left child node - only direct child, no nested recursion"""
         # Skip if filtering for right side only
         if self.side_filter == 'right':
             return None
@@ -283,21 +288,22 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             return None
         
         try:
-            # Optimize query with select_related
-            # Use .first() instead of .get() to handle cases where multiple nodes exist (data integrity issue)
-            left_child = BinaryNode.objects.select_related(
-                'user', 'user__wallet', 'parent', 'parent__user'
-            ).filter(parent=obj, side='left').first()
+            # Try to use prefetched data if available (from Prefetch in view)
+            left_child = None
+            if hasattr(obj, 'left_children_list') and obj.left_children_list:
+                left_child = obj.left_children_list[0]
+            else:
+                # Fallback to query if prefetch not available
+                left_child = BinaryNode.objects.select_related(
+                    'user', 'user__wallet', 'parent', 'parent__user'
+                ).filter(parent=obj, side='left').first()
             
             if not left_child:
                 return None
             
-            # When pagination is enabled, limit recursion to only show direct child (no nested children)
-            # Nested children will be accessible through paginated left_side_members and right_side_members
-            effective_max_depth = self.max_depth
-            if self.page is not None and self.page_size is not None:
-                # Only show direct child, stop recursion here
-                effective_max_depth = self.current_depth + 1
+            # Always stop recursion at direct children (no nested structures)
+            # Set max_depth to current_depth + 1 to prevent further recursion
+            effective_max_depth = self.current_depth + 1
             
             serializer = BinaryTreeNodeSerializer(
                 left_child,
@@ -305,8 +311,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 min_depth=self.min_depth,
                 current_depth=self.current_depth + 1,
                 side_filter=self.side_filter,
-                page=self.page,
-                page_size=self.page_size,
+                page=None,  # No pagination for direct children
+                page_size=None,
                 request=self.request
             )
             return serializer.data
@@ -318,7 +324,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             return None
     
     def get_right_child(self, obj):
-        """Get right child node recursively"""
+        """Get right child node - only direct child, no nested recursion"""
         # Skip if filtering for left side only
         if self.side_filter == 'left':
             return None
@@ -327,21 +333,22 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             return None
         
         try:
-            # Optimize query with select_related
-            # Use .first() instead of .get() to handle cases where multiple nodes exist (data integrity issue)
-            right_child = BinaryNode.objects.select_related(
-                'user', 'user__wallet', 'parent', 'parent__user'
-            ).filter(parent=obj, side='right').first()
+            # Try to use prefetched data if available (from Prefetch in view)
+            right_child = None
+            if hasattr(obj, 'right_children_list') and obj.right_children_list:
+                right_child = obj.right_children_list[0]
+            else:
+                # Fallback to query if prefetch not available
+                right_child = BinaryNode.objects.select_related(
+                    'user', 'user__wallet', 'parent', 'parent__user'
+                ).filter(parent=obj, side='right').first()
             
             if not right_child:
                 return None
             
-            # When pagination is enabled, limit recursion to only show direct child (no nested children)
-            # Nested children will be accessible through paginated left_side_members and right_side_members
-            effective_max_depth = self.max_depth
-            if self.page is not None and self.page_size is not None:
-                # Only show direct child, stop recursion here
-                effective_max_depth = self.current_depth + 1
+            # Always stop recursion at direct children (no nested structures)
+            # Set max_depth to current_depth + 1 to prevent further recursion
+            effective_max_depth = self.current_depth + 1
             
             serializer = BinaryTreeNodeSerializer(
                 right_child,
@@ -349,8 +356,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 min_depth=self.min_depth,
                 current_depth=self.current_depth + 1,
                 side_filter=self.side_filter,
-                page=self.page,
-                page_size=self.page_size,
+                page=None,  # No pagination for direct children
+                page_size=None,
                 request=self.request
             )
             return serializer.data
