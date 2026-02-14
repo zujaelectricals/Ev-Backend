@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - uses: actions/checkout@v4
 
       - uses: azure/login@v1
@@ -22,17 +21,14 @@ jobs:
 
       - name: Debug ACR vars
         run: |
-          echo "ACR_NAME=${{ secrets.ACR_NAME }}"
-          echo "ACR_LOGIN_SERVER=${{ secrets.ACR_LOGIN_SERVER }}"
+          echo "ACR_NAME is set"
+          echo "ACR_LOGIN_SERVER is set"
 
       - name: Build Docker Image
-        run: |
-          docker build . -t ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
+        run: docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest .
 
       - name: Push Docker Image
-        run: |
-          docker push ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
+        run: docker push ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
 
       - name: Restart App Service
-        run: |
-          az webapp restart --name ev-backend-api --resource-group rg-ev-prod
+        run: az webapp restart --name ev-backend-api --resource-group rg-ev-prod
