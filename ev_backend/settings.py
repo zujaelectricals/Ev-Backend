@@ -233,6 +233,10 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://ev-backend-api-dca5g4adcrgwhbfg.southindia-01.azurewebsites.net",
+]
+
 # --------------------------------------------------
 # CORS
 # --------------------------------------------------
