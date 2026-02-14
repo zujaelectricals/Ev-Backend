@@ -236,6 +236,16 @@ CELERY_TIMEZONE = TIME_ZONE
 CSRF_TRUSTED_ORIGINS = [
     "https://ev-backend-api-dca5g4adcrgwhbfg.southindia-01.azurewebsites.net",
 ]
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
+
+CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SAMESITE = "Lax"
+
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+SECURE_SSL_REDIRECT = True
+
 
 # --------------------------------------------------
 # CORS
