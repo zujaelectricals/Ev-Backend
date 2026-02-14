@@ -3,6 +3,84 @@ from django.utils import timezone
 from core.users.models import User
 
 
+class DistributorDocument(models.Model):
+    """
+    Distributor documents that users need to accept (Terms & Conditions, Legal Agreements, Policies, etc.)
+    """
+    DOCUMENT_TYPE_CHOICES = [
+        ('terms_conditions', 'Terms & Conditions'),
+        ('legal_agreement', 'Legal Agreement'),
+        ('policy', 'Policy'),
+        ('payment_terms', 'Payment Terms'),
+        ('distributor_terms', 'Distributor Terms'),
+        ('other', 'Other'),
+    ]
+    
+    title = models.CharField(max_length=200)
+    document_type = models.CharField(max_length=50, choices=DOCUMENT_TYPE_CHOICES, default='other')
+    content = models.TextField(help_text="Document content/text")
+    file = models.FileField(upload_to='compliance/distributor_documents/', null=True, blank=True, help_text="Optional PDF/document file attachment")
+    version = models.CharField(max_length=20, default='1.0', help_text="Document version (e.g., '1.0', '2.0')")
+    
+    is_active = models.BooleanField(default=True, help_text="Whether document is currently active")
+    is_required = models.BooleanField(default=False, help_text="Whether acceptance is mandatory")
+    
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_distributor_documents')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    effective_from = models.DateTimeField(default=timezone.now, help_text="When document becomes effective")
+    effective_until = models.DateTimeField(null=True, blank=True, help_text="When document expires (optional)")
+    
+    class Meta:
+        db_table = 'distributor_documents'
+        verbose_name = 'Distributor Document'
+        verbose_name_plural = 'Distributor Documents'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['is_active', 'document_type']),
+            models.Index(fields=['effective_from', 'effective_until']),
+        ]
+    
+    def __str__(self):
+        return f"{self.title} (v{self.version})"
+
+
+class DistributorDocumentAcceptance(models.Model):
+    """
+    Records of users accepting distributor documents with OTP verification
+    Stores IP address, timestamp, user info snapshot, and timeline for legal compliance
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='distributor_document_acceptances')
+    document = models.ForeignKey(DistributorDocument, on_delete=models.CASCADE, related_name='acceptances')
+    
+    accepted_at = models.DateTimeField(auto_now_add=True)
+    ip_address = models.CharField(max_length=45, help_text="User's IP address at acceptance")
+    user_agent = models.TextField(blank=True, null=True, help_text="Browser/user agent info")
+    
+    otp_verified = models.BooleanField(default=False, help_text="Whether OTP was verified")
+    otp_identifier = models.CharField(max_length=255, blank=True, help_text="Email/mobile used for OTP")
+    accepted_version = models.CharField(max_length=20, help_text="Document version at acceptance")
+    
+    timeline_data = models.JSONField(default=dict, blank=True, null=True, help_text="Additional metadata/timeline info")
+    user_info_snapshot = models.JSONField(default=dict, blank=True, null=True, help_text="Snapshot of user info at acceptance")
+    
+    class Meta:
+        db_table = 'distributor_document_acceptances'
+        verbose_name = 'Distributor Document Acceptance'
+        verbose_name_plural = 'Distributor Document Acceptances'
+        ordering = ['-accepted_at']
+        unique_together = [['user', 'document', 'accepted_version']]
+        indexes = [
+            models.Index(fields=['user', 'document']),
+            models.Index(fields=['accepted_at']),
+            models.Index(fields=['ip_address']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.document.title} (v{self.accepted_version})"
+
+
 class ComplianceDocument(models.Model):
     """
     Compliance documents and records

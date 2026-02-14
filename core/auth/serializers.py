@@ -267,7 +267,8 @@ class SignupSerializer(serializers.Serializer):
     state = serializers.CharField(required=True, max_length=100)
     pincode = serializers.CharField(required=True, max_length=10)
     country = serializers.CharField(default='India', max_length=100)
-    referral_code = serializers.CharField(required=False, allow_blank=True)
+    pan_card = serializers.CharField(required=True, max_length=10)
+    referral_code = serializers.CharField(required=True, allow_blank=False)
     
     def validate_email(self, value):
         """Check if email already exists"""
@@ -280,6 +281,35 @@ class SignupSerializer(serializers.Serializer):
         if User.objects.filter(mobile=value).exists():
             raise serializers.ValidationError("Mobile number already registered")
         return value
+    
+    def validate_pan_card(self, value):
+        """Validate PAN card format and uniqueness"""
+        import re
+        
+        # Convert to uppercase for consistency
+        value = value.upper().strip()
+        
+        # Validate PAN format: 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F)
+        pan_pattern = r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
+        if not re.match(pan_pattern, value):
+            raise serializers.ValidationError("Invalid PAN card format. PAN must be in format: ABCDE1234F (5 letters, 4 digits, 1 letter)")
+        
+        # Check if PAN already exists in User model
+        if User.objects.filter(pan_card=value).exists():
+            raise serializers.ValidationError("PAN card already registered")
+        
+        # Check if PAN already exists in KYC model
+        from core.users.models import KYC
+        if KYC.objects.filter(pan_number=value).exists():
+            raise serializers.ValidationError("PAN card already registered")
+        
+        return value
+    
+    def validate_referral_code(self, value):
+        """Validate referral code is provided"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Referral code is required")
+        return value.strip()
     
     def validate(self, attrs):
         """Validate mobile number format"""
@@ -437,6 +467,10 @@ class VerifySignupOTPSerializer(serializers.Serializer):
         
         # Create new user (email and mobile are both unique at this point)
         username = email or mobile
+        
+        # Get pan_card from signup data and convert to uppercase
+        pan_card = signup_data.get('pan_card', '').upper().strip() if signup_data.get('pan_card') else None
+        
         user = User.objects.create(
             username=username,
             email=email,
@@ -451,6 +485,7 @@ class VerifySignupOTPSerializer(serializers.Serializer):
             state=signup_data['state'],
             pincode=signup_data['pincode'],
             country=signup_data.get('country', 'India'),
+            pan_card=pan_card,
             role='user'
         )
         
