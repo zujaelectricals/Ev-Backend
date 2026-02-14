@@ -19,11 +19,6 @@ jobs:
       - name: Login to ACR
         run: az acr login --name ${{ secrets.ACR_NAME }}
 
-      - name: Debug ACR vars
-        run: |
-          echo "ACR_NAME is set"
-          echo "ACR_LOGIN_SERVER is set"
-
       - name: Build Docker Image
         run: docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest .
 
