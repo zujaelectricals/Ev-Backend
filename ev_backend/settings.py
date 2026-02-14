@@ -209,6 +209,8 @@ SIMPLE_JWT = {
     "BLACKLIST_AFTER_ROTATION": True,
     "SIGNING_KEY": jwt_secret_key,
 }
+ACCESS_TOKEN_LIFETIME = env.int("ACCESS_TOKEN_LIFETIME", default=45)
+REFRESH_TOKEN_LIFETIME = env.int("REFRESH_TOKEN_LIFETIME", default=300)
 
 # --------------------------------------------------
 # REDIS / CELERY
@@ -237,6 +239,35 @@ CELERY_TIMEZONE = TIME_ZONE
 
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
 CORS_ALLOW_CREDENTIALS = True
+
+# --------------------------------------------------
+# OTP
+# --------------------------------------------------
+
+OTP_LENGTH = env.int("OTP_LENGTH", default=6)
+OTP_EXPIRY_SECONDS = env.int("OTP_EXPIRY_SECONDS", default=300)
+OTP_EXPIRY_MINUTES = env.int("OTP_EXPIRY_MINUTES", default=20)
+
+# --------------------------------------------------
+# PAYMENTS
+# --------------------------------------------------
+
+RAZORPAY_KEY_ID = env("RAZORPAY_KEY_ID", default="")
+RAZORPAY_KEY_SECRET = env("RAZORPAY_KEY_SECRET", default="")
+RAZORPAY_WEBHOOK_SECRET = env("RAZORPAY_WEBHOOK_SECRET", default="")
+RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET", default="")
+
+# --------------------------------------------------
+# BUSINESS RULES
+# --------------------------------------------------
+
+PRE_BOOKING_MIN_AMOUNT = env.int("PRE_BOOKING_MIN_AMOUNT", default=500)
+
+# --------------------------------------------------
+# FRONTEND
+# --------------------------------------------------
+
+FRONTEND_BASE_URL = env("FRONTEND_BASE_URL", default="http://localhost:8080")
 
 # --------------------------------------------------
 # DEFAULT
