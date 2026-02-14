@@ -180,10 +180,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
-    "DEFAULT_THROTTLE_RATES": {
-        "otp": "5/min",          # ✅ REQUIRED
-        "anon": "20/min",
-        "user": "100/min",
+     "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/hour",
+        "user": "1000/hour",
+        "otp": "5/minute",
+        "otp_identifier": "5/minute",
     },
 }
 
