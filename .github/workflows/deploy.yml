@@ -21,13 +21,16 @@ jobs:
 
       - name: Build Docker Image
         run: |
-          IMAGE=${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
+          set -e
+          export IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest"
           echo "Building image: $IMAGE"
-          docker build "$GITHUB_WORKSPACE" -t "$IMAGE"
+          docker build -t "$IMAGE" .
 
       - name: Push Docker Image
         run: |
-          IMAGE=${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest
+          set -e
+          export IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest"
+          echo "Pushing image: $IMAGE"
           docker push "$IMAGE"
 
       - name: Restart App Service
