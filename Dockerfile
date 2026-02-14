@@ -54,6 +54,7 @@ EXPOSE 8000
 # --------------------------------------------------
 CMD ["/bin/bash", "-c", \
      "python manage.py migrate && \
+     python manage.py create_admin && \
       python manage.py collectstatic --noinput && \
       gunicorn ev_backend.wsgi:application \
       --bind 0.0.0.0:8000 \
