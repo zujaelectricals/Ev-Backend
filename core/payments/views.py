@@ -68,30 +68,43 @@ def _process_booking_payment(razorpay_payment):
         # Convert amount from paise to rupees (Decimal)
         amount_rupees = Decimal(str(razorpay_payment.amount / 100))
         
-        # Use payment_id as transaction_id if available, otherwise use order_id
-        transaction_id = razorpay_payment.payment_id or razorpay_payment.order_id
+        # IMPORTANT: Always use order_id as transaction_id for consistency
+        # This ensures that verify_payment and webhook use the same transaction_id
+        # even if payment_id is set at different times. order_id is always available.
+        # We'll store payment_id in notes if needed, but use order_id as the primary identifier.
+        transaction_id = razorpay_payment.order_id
         
         # Check if booking payment already exists for this Razorpay payment
-        # Check by payment_id if available, otherwise by order_id in notes
+        # IMPORTANT: Check by order_id FIRST (always available) to catch duplicates
+        # regardless of whether payment_id was set or not. This prevents race conditions
+        # where verify_payment and webhook use different transaction_ids.
         existing_payment = None
-        if razorpay_payment.payment_id:
+        
+        # First, always check by order_id in notes (most reliable, always available)
+        existing_payment = BookingPayment.objects.filter(
+            booking=booking,
+            notes__icontains=f'Order: {razorpay_payment.order_id}'
+        ).first()
+        
+        # Also check by payment_id if available (for cases where payment_id was set)
+        if not existing_payment and razorpay_payment.payment_id:
             existing_payment = BookingPayment.objects.filter(
                 booking=booking,
                 transaction_id=razorpay_payment.payment_id
             ).first()
         
+        # Also check by order_id as transaction_id (for cases where order_id was used as transaction_id)
         if not existing_payment:
-            # Also check by order_id in notes (for cases where payment_id wasn't set yet)
             existing_payment = BookingPayment.objects.filter(
                 booking=booking,
-                notes__icontains=f'Order: {razorpay_payment.order_id}'
+                transaction_id=razorpay_payment.order_id
             ).first()
         
         if existing_payment:
             # Payment already processed - return existing payment without updating booking
             logger.info(
                 f"Booking payment already exists for Razorpay payment {razorpay_payment.order_id} "
-                f"(BookingPayment ID: {existing_payment.id})"
+                f"(BookingPayment ID: {existing_payment.id}, transaction_id: {existing_payment.transaction_id})"
             )
             return existing_payment, booking
         
@@ -105,6 +118,12 @@ def _process_booking_payment(razorpay_payment):
         try:
             if transaction_id:
                 # Use get_or_create when transaction_id is available
+                # Build notes with both order_id and payment_id for tracking
+                notes_parts = [f'Razorpay payment - Order: {razorpay_payment.order_id}']
+                if razorpay_payment.payment_id:
+                    notes_parts.append(f'Payment ID: {razorpay_payment.payment_id}')
+                notes = ' | '.join(notes_parts)
+                
                 booking_payment, created = BookingPayment.objects.get_or_create(
                     transaction_id=transaction_id,
                     defaults={
@@ -113,7 +132,7 @@ def _process_booking_payment(razorpay_payment):
                         'amount': amount_rupees,
                         'payment_method': 'online',
                         'status': 'completed',
-                        'notes': f'Razorpay payment - Order: {razorpay_payment.order_id}',
+                        'notes': notes,
                     }
                 )
                 
@@ -125,15 +144,21 @@ def _process_booking_payment(razorpay_payment):
                     )
                     return booking_payment, booking
             else:
-                # If transaction_id is None, create directly (multiple NULLs allowed in unique constraint)
+                # If transaction_id is None (shouldn't happen since we use order_id), create directly
+                # Build notes with both order_id and payment_id for tracking
+                notes_parts = [f'Razorpay payment - Order: {razorpay_payment.order_id}']
+                if razorpay_payment.payment_id:
+                    notes_parts.append(f'Payment ID: {razorpay_payment.payment_id}')
+                notes = ' | '.join(notes_parts)
+                
                 booking_payment = BookingPayment.objects.create(
                     booking=booking,
                     user=booking.user,
                     amount=amount_rupees,
                     payment_method='online',
-                    transaction_id=None,
+                    transaction_id=transaction_id,  # Should be order_id, not None
                     status='completed',
-                    notes=f'Razorpay payment - Order: {razorpay_payment.order_id}',
+                    notes=notes,
                 )
                 created = True
                 
@@ -861,9 +886,10 @@ def webhook(request):
                             )
                             # Don't mark as failed if booking payment processing fails - payment was still updated
                     else:
-                        # Payment already has SUCCESS status
+                        # Payment already has SUCCESS status - booking payment should already be processed
+                        # Don't call _process_booking_payment again to avoid duplicate processing
                         webhook_processed = True
-                        logger.info(f"✅ Payment already has SUCCESS status: order_id={order_id}, payment_id={payment_id}")
+                        logger.info(f"✅ Payment already has SUCCESS status: order_id={order_id}, payment_id={payment_id}. Skipping booking payment processing (already done).")
             
             elif event_type == 'refund.processed':
                 # For refund.processed events, payment_id is in the refund entity, not in event_data
