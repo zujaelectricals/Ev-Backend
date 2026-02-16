@@ -13,7 +13,7 @@ azure-identity==1.25.0
 azure-monitor-opentelemetry==1.8.1
 azure-monitor-opentelemetry-exporter==1.0.0b42
 azure-storage-blob==12.19.0
-
+requests==2.31.0
 bcrypt==4.1.2
 billiard==4.2.1
 celery==5.5.3
