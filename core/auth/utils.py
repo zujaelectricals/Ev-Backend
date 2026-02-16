@@ -12,6 +12,10 @@ from .models import OTP
 
 logger = logging.getLogger(__name__)
 
+# Dummy user configuration
+DUMMY_USER_EMAIL = 'testuser@gmail.com'
+DUMMY_USER_OTP = '123456'
+
 
 def generate_otp(length=6):
     """Generate a random OTP"""
@@ -91,8 +95,45 @@ def send_mobile_otp(mobile, otp_code=None):
     return True
 
 
+def ensure_dummy_user():
+    """Ensure dummy user exists with all required fields"""
+    from core.users.models import User
+    
+    dummy_user, created = User.objects.get_or_create(
+        email=DUMMY_USER_EMAIL,
+        defaults={
+            'username': DUMMY_USER_EMAIL,
+            'first_name': 'Test',
+            'last_name': 'User',
+            'role': 'user',
+            'is_distributor': False,
+            'is_active_buyer': False,
+            'is_staff': False,
+            'is_superuser': False,
+            'country': 'India',
+        }
+    )
+    
+    # Update username if it doesn't match email (for existing users)
+    if dummy_user.username != DUMMY_USER_EMAIL:
+        dummy_user.username = DUMMY_USER_EMAIL
+        dummy_user.save(update_fields=['username'])
+    
+    # Generate referral code if user doesn't have one
+    if not dummy_user.referral_code:
+        generate_referral_code(dummy_user)
+    
+    return dummy_user
+
+
 def verify_otp(identifier, otp_code, otp_type):
     """Verify OTP from Redis or Database"""
+    # Check for dummy user first
+    if identifier == DUMMY_USER_EMAIL and otp_code == DUMMY_USER_OTP and otp_type == 'email':
+        # Ensure dummy user exists
+        ensure_dummy_user()
+        return True
+    
     # First check Redis
     cache_key = f"otp:{otp_type}:{identifier}"
     cached_otp = cache.get(cache_key)
