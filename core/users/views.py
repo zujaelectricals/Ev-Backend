@@ -571,7 +571,7 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
     queryset = DistributorApplication.objects.select_related('user', 'reviewed_by').all()
     serializer_class = DistributorApplicationSerializer
     permission_classes = [IsAuthenticated]
-    http_method_names = ['get', 'post', 'head', 'options']
+    http_method_names = ['get', 'post', 'put', 'patch', 'head', 'options']
     
     def get_queryset(self):
         """
@@ -642,6 +642,39 @@ class DistributorApplicationViewSet(viewsets.ModelViewSet):
         # Refresh serializer to include updated status
         serializer = self.get_serializer(application)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    def update(self, request, *args, **kwargs):
+        """Update distributor application. Users can update their own application to re-accept terms and conditions."""
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        
+        # Normal users can only update their own application
+        if not (request.user.is_superuser or request.user.role in ['admin', 'staff']):
+            if instance.user != request.user:
+                return Response(
+                    {'error': 'You can only update your own application.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        # Prevent updating read-only fields
+        read_only_fields = ['user', 'status', 'submitted_at', 'reviewed_at', 'reviewed_by']
+        for field in read_only_fields:
+            if field in request.data:
+                return Response(
+                    {'error': f'Field "{field}" cannot be updated.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        
+        return Response(serializer.data)
+    
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update distributor application."""
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
     
     @action(detail=True, methods=['post'], permission_classes=[IsAdminUser], url_path='update-status')
     def update_status(self, request, pk=None):
