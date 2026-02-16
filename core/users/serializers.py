@@ -104,21 +104,17 @@ class UserProfileSerializer(serializers.ModelSerializer):
     is_distributor_terms_and_conditions_accepted = serializers.SerializerMethodField()
     distributor_application_status = serializers.SerializerMethodField()
     profile_picture_url = serializers.SerializerMethodField()
-    referral_link = serializers.SerializerMethodField()
-    days_remaining_for_full_payment = serializers.SerializerMethodField()
-    active_buyer_warning = serializers.SerializerMethodField()
     
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'mobile', 'first_name', 'last_name',
                   'gender', 'date_of_birth', 'profile_picture', 'profile_picture_url',
                   'address_line1', 'address_line2', 'city', 'state', 'pincode', 'country',
-                  'role', 'is_distributor', 'is_active_buyer', 'referral_code', 'referral_link',
+                  'role', 'is_distributor', 'is_active_buyer', 'referral_code',
                   'referred_by', 'kyc_status', 'nominee_exists', 'nominee_kyc_status', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
-                  'is_distributor_terms_and_conditions_accepted', 'distributor_application_status',
-                  'days_remaining_for_full_payment', 'active_buyer_warning')
+                  'is_distributor_terms_and_conditions_accepted', 'distributor_application_status')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer',
                            'referral_code', 'referred_by', 'date_joined')
     
@@ -212,85 +208,6 @@ class UserProfileSerializer(serializers.ModelSerializer):
             return obj.profile_picture.url
         return None
     
-    def get_referral_link(self, obj):
-        """Generate referral link using FRONTEND_BASE_URL and referral_code"""
-        from django.conf import settings
-        
-        if not obj.referral_code:
-            return None
-        
-        frontend_base_url = getattr(settings, 'FRONTEND_BASE_URL', '')
-        if not frontend_base_url:
-            return None
-        
-        # Remove trailing slash if present
-        frontend_base_url = frontend_base_url.rstrip('/')
-        
-        return f"{frontend_base_url}/ref/{obj.referral_code}"
-    
-    def get_days_remaining_for_full_payment(self, obj):
-        """
-        Calculate days remaining to complete full payment (30-day window from booking creation).
-        Returns null if:
-        - No active booking exists
-        - 30 days have passed
-        - Booking is fully paid
-        """
-        from core.booking.models import Booking
-        from django.utils import timezone
-        
-        # Find the most recent active booking (status in ['pending', 'active'])
-        booking = Booking.objects.filter(
-            user=obj,
-            status__in=['pending', 'active']
-        ).order_by('-created_at').first()
-        
-        if not booking:
-            return None
-        
-        # Check if booking is fully paid
-        if booking.remaining_amount <= 0 or booking.status == 'completed':
-            return None
-        
-        # Calculate days remaining (30 days from created_at)
-        days_elapsed = (timezone.now().date() - booking.created_at.date()).days
-        days_remaining = 30 - days_elapsed
-        
-        # Return null if 30 days have passed
-        if days_remaining <= 0:
-            return None
-        
-        return max(0, days_remaining)
-    
-    def get_active_buyer_warning(self, obj):
-        """
-        Check if user has any active booking with payment less than activation_amount.
-        Returns warning message if user is not an active buyer, null otherwise.
-        """
-        from core.booking.models import Booking
-        from core.settings.models import PlatformSettings
-        
-        # Get activation amount from settings
-        platform_settings = PlatformSettings.get_settings()
-        activation_amount = platform_settings.activation_amount
-        
-        # Check all active bookings (status in ['pending', 'active'])
-        active_bookings = Booking.objects.filter(
-            user=obj,
-            status__in=['pending', 'active']
-        )
-        
-        if not active_bookings.exists():
-            return None
-        
-        # Check if any active booking has total_paid < activation_amount
-        for booking in active_bookings:
-            if booking.total_paid < activation_amount:
-                return "You are not an active buyer"
-        
-        # All active bookings have total_paid >= activation_amount
-        return None
-    
     def validate_profile_picture(self, value):
         """Validate profile picture file"""
         if value is None:
@@ -364,44 +281,6 @@ class KYCSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         f'{field_name} must be an image (JPEG, PNG, GIF, WEBP) or PDF file.'
                     )
-        
-        return value
-    
-    def validate_pan_number(self, value):
-        """Validate PAN number and check conflicts with User.pan_card"""
-        if not value:
-            return value
-        
-        import re
-        from django.contrib.auth import get_user_model
-        
-        User = get_user_model()
-        
-        # Convert to uppercase for consistency
-        value = value.upper().strip()
-        
-        # Validate PAN format: 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F)
-        pan_pattern = r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
-        if not re.match(pan_pattern, value):
-            raise serializers.ValidationError("Invalid PAN card format. PAN must be in format: ABCDE1234F (5 letters, 4 digits, 1 letter)")
-        
-        # Get the current user from the instance (if updating) or from context (if creating)
-        user = None
-        if self.instance:
-            user = self.instance.user
-        elif hasattr(self, 'context') and 'request' in self.context:
-            user = self.context['request'].user
-        
-        # Allow user to use their own pan_card value in KYC
-        if user and user.pan_card == value:
-            return value
-        
-        # Check if PAN conflicts with any other User's pan_card (excluding current user's own pan_card)
-        conflicting_user = User.objects.filter(pan_card=value).exclude(id=user.id if user else None).first()
-        if conflicting_user:
-            raise serializers.ValidationError(
-                f"PAN number '{value}' is already registered by another user. Please use a different PAN number."
-            )
         
         return value
     
@@ -530,18 +409,29 @@ class DistributorApplicationSerializer(serializers.ModelSerializer):
         """Validate eligibility before allowing application"""
         user = self.context['request'].user
         
-        # Check if application already exists
-        if hasattr(user, 'distributor_application'):
-            raise serializers.ValidationError({
-                'non_field_errors': ['Application already exists. You can only submit one distributor application.']
-            })
-        
-        # Validate terms and conditions acceptance - must be explicitly True
-        terms_accepted = data.get('is_distributor_terms_and_conditions_accepted', False)
-        if not terms_accepted:
-            raise serializers.ValidationError({
-                'is_distributor_terms_and_conditions_accepted': ['You cannot Proceed without Accepting Terms and Conditions']
-            })
+        # Only check for duplicate applications during creation, not updates
+        if self.instance is None:
+            # This is a create operation
+            if hasattr(user, 'distributor_application'):
+                raise serializers.ValidationError({
+                    'non_field_errors': ['Application already exists. You can only submit one distributor application.']
+                })
+            
+            # Validate terms and conditions acceptance - must be explicitly True for creation
+            terms_accepted = data.get('is_distributor_terms_and_conditions_accepted', False)
+            if not terms_accepted:
+                raise serializers.ValidationError({
+                    'is_distributor_terms_and_conditions_accepted': ['You cannot Proceed without Accepting Terms and Conditions']
+                })
+        else:
+            # This is an update operation - allow updating terms acceptance
+            # If terms_accepted is being set, validate it's True
+            if 'is_distributor_terms_and_conditions_accepted' in data:
+                terms_accepted = data.get('is_distributor_terms_and_conditions_accepted', False)
+                if not terms_accepted:
+                    raise serializers.ValidationError({
+                        'is_distributor_terms_and_conditions_accepted': ['You cannot Proceed without Accepting Terms and Conditions']
+                    })
         
         return data
     
