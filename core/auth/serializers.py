@@ -7,7 +7,8 @@ from django.db.models import Q
 from rest_framework_simplejwt.tokens import RefreshToken
 from .utils import (
     send_email_otp, send_mobile_otp, verify_otp, generate_referral_code,
-    generate_otp, store_signup_session, get_signup_session, delete_signup_session
+    generate_otp, store_signup_session, get_signup_session, delete_signup_session,
+    ensure_dummy_user, DUMMY_USER_EMAIL
 )
 
 User = get_user_model()
@@ -34,17 +35,21 @@ class SendOTPSerializer(serializers.Serializer):
         identifier = validated_data['identifier']
         otp_type = validated_data['otp_type']
         
-        # Check if user exists
-        user = None
-        try:
-            if otp_type == 'email':
-                user = User.objects.get(email=identifier)
-            else:
-                user = User.objects.get(mobile=identifier)
-        except User.DoesNotExist:
-            raise serializers.ValidationError(
-                "User not found. Please use /api/auth/signup/ endpoint to register first."
-            )
+        # Handle dummy user - ensure it exists
+        if identifier == DUMMY_USER_EMAIL and otp_type == 'email':
+            user = ensure_dummy_user()
+        else:
+            # Check if user exists
+            user = None
+            try:
+                if otp_type == 'email':
+                    user = User.objects.get(email=identifier)
+                else:
+                    user = User.objects.get(mobile=identifier)
+            except User.DoesNotExist:
+                raise serializers.ValidationError(
+                    "User not found. Please use /api/auth/signup/ endpoint to register first."
+                )
         
         # Check if user is admin or staff - they should use admin endpoints
         if user.role in ['admin', 'staff']:
@@ -106,17 +111,21 @@ class VerifyOTPSerializer(serializers.Serializer):
         identifier = validated_data['identifier']
         otp_type = validated_data['otp_type']
         
-        # Get existing user only (no auto-creation)
-        user = None
-        try:
-            if otp_type == 'email':
-                user = User.objects.get(email=identifier)
-            else:
-                user = User.objects.get(mobile=identifier)
-        except User.DoesNotExist:
-            raise serializers.ValidationError(
-                "User not found. Please use /api/auth/signup/ endpoint to register first."
-            )
+        # Handle dummy user - ensure it exists
+        if identifier == DUMMY_USER_EMAIL and otp_type == 'email':
+            user = ensure_dummy_user()
+        else:
+            # Get existing user only (no auto-creation)
+            user = None
+            try:
+                if otp_type == 'email':
+                    user = User.objects.get(email=identifier)
+                else:
+                    user = User.objects.get(mobile=identifier)
+            except User.DoesNotExist:
+                raise serializers.ValidationError(
+                    "User not found. Please use /api/auth/signup/ endpoint to register first."
+                )
         
         # Check if user is admin or staff - they should use admin endpoints
         if user.role in ['admin', 'staff']:
