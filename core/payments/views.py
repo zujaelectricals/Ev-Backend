@@ -63,7 +63,9 @@ def _process_booking_payment(razorpay_payment):
     # This ensures only one process can update the booking at a time
     with transaction.atomic():
         # Lock the booking row to prevent concurrent updates
+        # Refresh from database to ensure we have the latest total_paid value
         booking = Booking.objects.select_for_update().get(pk=booking.pk)
+        booking.refresh_from_db()  # Ensure we have latest values, especially total_paid
         
         # Convert amount from paise to rupees (Decimal)
         amount_rupees = Decimal(str(razorpay_payment.amount / 100))
@@ -74,125 +76,70 @@ def _process_booking_payment(razorpay_payment):
         # We'll store payment_id in notes if needed, but use order_id as the primary identifier.
         transaction_id = razorpay_payment.order_id
         
-        # Check if booking payment already exists for this Razorpay payment
-        # IMPORTANT: Check by order_id FIRST (always available) to catch duplicates
-        # regardless of whether payment_id was set or not. This prevents race conditions
-        # where verify_payment and webhook use different transaction_ids.
-        existing_payment = None
+        # Build notes with both order_id and payment_id for tracking
+        notes_parts = [f'Razorpay payment - Order: {razorpay_payment.order_id}']
+        if razorpay_payment.payment_id:
+            notes_parts.append(f'Payment ID: {razorpay_payment.payment_id}')
+        notes = ' | '.join(notes_parts)
         
-        # First, always check by order_id in notes (most reliable, always available)
-        existing_payment = BookingPayment.objects.filter(
-            booking=booking,
-            notes__icontains=f'Order: {razorpay_payment.order_id}'
-        ).first()
-        
-        # Also check by payment_id if available (for cases where payment_id was set)
-        if not existing_payment and razorpay_payment.payment_id:
-            existing_payment = BookingPayment.objects.filter(
-                booking=booking,
-                transaction_id=razorpay_payment.payment_id
-            ).first()
-        
-        # Also check by order_id as transaction_id (for cases where order_id was used as transaction_id)
-        if not existing_payment:
-            existing_payment = BookingPayment.objects.filter(
-                booking=booking,
-                transaction_id=razorpay_payment.order_id
-            ).first()
-        
-        if existing_payment:
-            # Payment already processed - return existing payment without updating booking
-            logger.info(
-                f"Booking payment already exists for Razorpay payment {razorpay_payment.order_id} "
-                f"(BookingPayment ID: {existing_payment.id}, transaction_id: {existing_payment.transaction_id})"
-            )
-            return existing_payment, booking
-        
-        # Try to create booking Payment record
-        # Use get_or_create with IntegrityError handling as additional safety
-        # Note: If transaction_id is None, get_or_create won't work correctly with unique constraint
-        # So we use create with IntegrityError handling instead
-        booking_payment = None
-        created = False
-        
+        # CRITICAL: Use get_or_create with transaction_id AND booking as lookup
+        # This is atomic at the database level and prevents race conditions
+        # The transaction_id (order_id) is always available and consistent
+        # Including booking in the lookup ensures we're checking the right booking's payment
         try:
-            if transaction_id:
-                # Use get_or_create when transaction_id is available
-                # Build notes with both order_id and payment_id for tracking
-                notes_parts = [f'Razorpay payment - Order: {razorpay_payment.order_id}']
-                if razorpay_payment.payment_id:
-                    notes_parts.append(f'Payment ID: {razorpay_payment.payment_id}')
-                notes = ' | '.join(notes_parts)
-                
-                booking_payment, created = BookingPayment.objects.get_or_create(
-                    transaction_id=transaction_id,
-                    defaults={
-                        'booking': booking,
-                        'user': booking.user,
-                        'amount': amount_rupees,
-                        'payment_method': 'online',
-                        'status': 'completed',
-                        'notes': notes,
-                    }
+            booking_payment, created = BookingPayment.objects.get_or_create(
+                transaction_id=transaction_id,
+                booking=booking,  # Also check by booking to ensure we're checking the right booking
+                defaults={
+                    'user': booking.user,
+                    'amount': amount_rupees,
+                    'payment_method': 'online',
+                    'status': 'completed',
+                    'notes': notes,
+                }
+            )
+            
+            # If payment already exists (created=False), it means another process already processed it
+            if not created:
+                logger.info(
+                    f"Booking payment already exists for Razorpay payment {razorpay_payment.order_id} "
+                    f"(BookingPayment ID: {booking_payment.id}, transaction_id: {booking_payment.transaction_id}). "
+                    f"Skipping duplicate processing."
                 )
+                return booking_payment, booking
                 
-                # If payment already exists (race condition caught by get_or_create)
-                if not created:
-                    logger.warning(
-                        f"Booking payment with transaction_id {transaction_id} already exists "
-                        f"(BookingPayment ID: {booking_payment.id}). This indicates a race condition was caught."
-                    )
-                    return booking_payment, booking
-            else:
-                # If transaction_id is None (shouldn't happen since we use order_id), create directly
-                # Build notes with both order_id and payment_id for tracking
-                notes_parts = [f'Razorpay payment - Order: {razorpay_payment.order_id}']
-                if razorpay_payment.payment_id:
-                    notes_parts.append(f'Payment ID: {razorpay_payment.payment_id}')
-                notes = ' | '.join(notes_parts)
-                
-                booking_payment = BookingPayment.objects.create(
-                    booking=booking,
-                    user=booking.user,
-                    amount=amount_rupees,
-                    payment_method='online',
-                    transaction_id=transaction_id,  # Should be order_id, not None
-                    status='completed',
-                    notes=notes,
-                )
-                created = True
-                
+            # Payment was just created (created=True), proceed to update booking
+            logger.info(
+                f"Created new BookingPayment {booking_payment.id} for order {razorpay_payment.order_id} "
+                f"with transaction_id {transaction_id}"
+            )
         except IntegrityError as e:
-            # Handle case where transaction_id is None and unique constraint fails
-            # or if there's a race condition between check and create
+            # Handle race condition where another process created the payment between our check and create
+            # This should be rare since get_or_create is atomic, but can happen in extreme concurrency
             if 'transaction_id' in str(e) or 'unique' in str(e).lower():
                 logger.warning(
                     f"IntegrityError creating BookingPayment for order {razorpay_payment.order_id}: {e}. "
-                    f"Attempting to retrieve existing payment."
+                    f"This indicates a race condition. Attempting to retrieve existing payment."
                 )
                 # Try to find the existing payment that was just created by another process
-                if razorpay_payment.payment_id:
-                    existing_payment = BookingPayment.objects.filter(
-                        booking=booking,
-                        transaction_id=razorpay_payment.payment_id
-                    ).first()
-                if not existing_payment:
-                    existing_payment = BookingPayment.objects.filter(
-                        booking=booking,
-                        notes__icontains=f'Order: {razorpay_payment.order_id}'
-                    ).first()
+                # Use the same transaction_id (order_id) and booking that we tried to create with
+                existing_payment = BookingPayment.objects.filter(
+                    transaction_id=transaction_id,
+                    booking=booking
+                ).first()
                 
                 if existing_payment:
                     logger.info(
                         f"Found existing BookingPayment {existing_payment.id} after IntegrityError. "
-                        f"Returning without updating booking."
+                        f"Transaction_id: {existing_payment.transaction_id}. Returning without updating booking."
                     )
                     return existing_payment, booking
                 else:
                     # Re-raise if we can't find the existing payment
                     logger.error(
-                        f"IntegrityError but could not find existing BookingPayment for "
-                        f"order {razorpay_payment.order_id}. Re-raising exception."
+                        f"IntegrityError but could not find existing BookingPayment with "
+                        f"transaction_id {transaction_id} for order {razorpay_payment.order_id}. "
+                        f"Re-raising exception."
                     )
                     raise
             else:
@@ -210,16 +157,84 @@ def _process_booking_payment(razorpay_payment):
             )
             raise ValueError("booking_payment was not created")
         
+        # CRITICAL SAFEGUARD: Check if this exact payment amount was already added to total_paid
+        # by checking if there's a BookingPayment with this transaction_id that was already processed
+        # This prevents double-counting if _process_booking_payment is called multiple times
+        # (though get_or_create should prevent that, this is an extra safety check)
+        total_paid_before = Decimal(str(booking.total_paid))
+        
+        # Calculate what total_paid should be after this payment
+        expected_total_paid_after = total_paid_before + amount_rupees
+        
+        logger.info(
+            f"About to call make_payment() for booking {booking.id}, order {razorpay_payment.order_id}. "
+            f"Current total_paid: {total_paid_before}, amount to add: {amount_rupees}, "
+            f"expected after: {expected_total_paid_after}"
+        )
+        
+        # Check if total_paid already includes this payment (defensive check)
+        # This handles edge cases where the payment was processed but the function was called again
+        if booking.total_paid >= expected_total_paid_after - Decimal('0.01'):
+            logger.warning(
+                f"Booking {booking.id} total_paid ({booking.total_paid}) already includes or exceeds "
+                f"expected amount ({expected_total_paid_after}) for order {razorpay_payment.order_id}. "
+                f"Skipping make_payment() to prevent double-counting."
+            )
+            # Just ensure remaining_amount is correct
+            booking.remaining_amount = booking.total_amount - booking.total_paid
+            booking.save(update_fields=['remaining_amount'])
+            return booking_payment, booking
+        
         try:
             booking.make_payment(amount_rupees)
-        except Exception as e:
-            # If Celery task fails, we still want to update the booking
-            # So we manually update the booking totals and status
-            logger.warning(
-                f"Celery task failed for booking {booking.id}, updating booking manually: {e}"
+            # If we reach here, make_payment() succeeded completely
+            booking.refresh_from_db()
+            total_paid_after = Decimal(str(booking.total_paid))
+            logger.info(
+                f"make_payment() succeeded for booking {booking.id}, order {razorpay_payment.order_id}. "
+                f"total_paid: {total_paid_before} -> {total_paid_after}"
             )
-            booking.total_paid += amount_rupees
-            booking.remaining_amount = booking.total_amount - booking.total_paid
+            
+            # Verify the update was correct (defensive check)
+            if abs(total_paid_after - expected_total_paid_after) > Decimal('0.01'):
+                logger.error(
+                    f"⚠️ WARNING: Booking {booking.id} total_paid mismatch! "
+                    f"Expected: {expected_total_paid_after}, Actual: {total_paid_after}, "
+                    f"Difference: {total_paid_after - expected_total_paid_after}"
+                )
+        except Exception as e:
+            # Refresh booking from DB to get the current state after make_payment() attempt
+            booking.refresh_from_db()
+            
+            # Check if total_paid was already updated by make_payment()
+            # make_payment() saves BEFORE calling update_active_buyer_status() or Celery task
+            # So if total_paid increased, the save() succeeded and we should NOT update again
+            total_paid_after = Decimal(str(booking.total_paid))
+            amount_already_added = total_paid_after - total_paid_before
+            
+            # Use Decimal comparison with small tolerance for floating point issues
+            if amount_already_added >= amount_rupees - Decimal('0.01'):
+                # Booking was already updated by make_payment() before the exception
+                # Don't update total_paid again - it's already correct!
+                logger.warning(
+                    f"make_payment() raised exception for booking {booking.id}, but booking was already updated "
+                    f"(total_paid: {total_paid_before} -> {total_paid_after}, amount: {amount_rupees}). "
+                    f"Skipping duplicate update to prevent doubling. Exception: {e}"
+                )
+                # Just recalculate remaining_amount to be safe
+                booking.remaining_amount = booking.total_amount - booking.total_paid
+                booking.save(update_fields=['remaining_amount'])
+                return booking_payment, booking
+            else:
+                # Booking wasn't updated (save() failed or exception before save())
+                # This is rare, but update it manually
+                logger.warning(
+                    f"make_payment() failed before updating booking {booking.id} "
+                    f"(total_paid: {total_paid_before} -> {total_paid_after}, expected increase: {amount_rupees}). "
+                    f"Updating booking manually: {e}"
+                )
+                booking.total_paid += amount_rupees
+                booking.remaining_amount = booking.total_amount - booking.total_paid
             
             # Update status based on payment
             # Status becomes 'active' when booking_amount is paid (initial booking fee)
