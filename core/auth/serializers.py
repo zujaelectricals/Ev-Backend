@@ -64,7 +64,10 @@ class SendOTPSerializer(serializers.Serializer):
             otp_code = generate_otp(settings.OTP_LENGTH)
             
             # Send to both channels with the same OTP
-            send_email_otp(user.email, otp_code)
+            try:
+                send_email_otp(user.email, otp_code, user=user)
+            except ValueError as e:
+                raise serializers.ValidationError(str(e))
             send_mobile_otp(user.mobile, otp_code)
             
             return {
@@ -74,7 +77,10 @@ class SendOTPSerializer(serializers.Serializer):
         else:
             # Send to requested channel only
             if otp_type == 'email':
-                send_email_otp(identifier)
+                try:
+                    send_email_otp(identifier, user=user)
+                except ValueError as e:
+                    raise serializers.ValidationError(str(e))
                 return {'message': f'OTP sent to {identifier}'}
             else:
                 send_mobile_otp(identifier)
@@ -182,7 +188,10 @@ class SendAdminOTPSerializer(serializers.Serializer):
             otp_code = generate_otp(settings.OTP_LENGTH)
             
             # Send to both channels with the same OTP
-            send_email_otp(user.email, otp_code)
+            try:
+                send_email_otp(user.email, otp_code, user=user)
+            except ValueError as e:
+                raise serializers.ValidationError(str(e))
             send_mobile_otp(user.mobile, otp_code)
             
             return {
@@ -192,7 +201,10 @@ class SendAdminOTPSerializer(serializers.Serializer):
         else:
             # Send to requested channel only
             if otp_type == 'email':
-                send_email_otp(identifier)
+                try:
+                    send_email_otp(identifier, user=user)
+                except ValueError as e:
+                    raise serializers.ValidationError(str(e))
                 return {'message': f'OTP sent to {identifier}'}
             else:
                 send_mobile_otp(identifier)
@@ -267,8 +279,7 @@ class SignupSerializer(serializers.Serializer):
     state = serializers.CharField(required=True, max_length=100)
     pincode = serializers.CharField(required=True, max_length=10)
     country = serializers.CharField(default='India', max_length=100)
-    pan_card = serializers.CharField(required=True, max_length=10)
-    referral_code = serializers.CharField(required=True, allow_blank=False)
+    referral_code = serializers.CharField(required=False, allow_blank=True)
     
     def validate_email(self, value):
         """Check if email already exists"""
@@ -281,35 +292,6 @@ class SignupSerializer(serializers.Serializer):
         if User.objects.filter(mobile=value).exists():
             raise serializers.ValidationError("Mobile number already registered")
         return value
-    
-    def validate_pan_card(self, value):
-        """Validate PAN card format and uniqueness"""
-        import re
-        
-        # Convert to uppercase for consistency
-        value = value.upper().strip()
-        
-        # Validate PAN format: 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F)
-        pan_pattern = r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
-        if not re.match(pan_pattern, value):
-            raise serializers.ValidationError("Invalid PAN card format. PAN must be in format: ABCDE1234F (5 letters, 4 digits, 1 letter)")
-        
-        # Check if PAN already exists in User model
-        if User.objects.filter(pan_card=value).exists():
-            raise serializers.ValidationError("PAN card already registered")
-        
-        # Check if PAN already exists in KYC model
-        from core.users.models import KYC
-        if KYC.objects.filter(pan_number=value).exists():
-            raise serializers.ValidationError("PAN card already registered")
-        
-        return value
-    
-    def validate_referral_code(self, value):
-        """Validate referral code is provided"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("Referral code is required")
-        return value.strip()
     
     def validate(self, attrs):
         """Validate mobile number format"""
@@ -333,8 +315,16 @@ class SignupSerializer(serializers.Serializer):
         # Generate single OTP code for both channels
         otp_code = generate_otp(settings.OTP_LENGTH)
         
+        # Extract user name from signup data
+        user_name = f"{validated_data.get('first_name', '')} {validated_data.get('last_name', '')}".strip()
+        if not user_name:
+            user_name = email.split("@")[0]
+        
         # Send same OTP to both email and mobile
-        send_email_otp(email, otp_code)
+        try:
+            send_email_otp(email, otp_code, user_name=user_name)
+        except ValueError as e:
+            raise serializers.ValidationError(str(e))
         send_mobile_otp(mobile, otp_code)
         
         # Store signup session in Redis
@@ -467,10 +457,6 @@ class VerifySignupOTPSerializer(serializers.Serializer):
         
         # Create new user (email and mobile are both unique at this point)
         username = email or mobile
-        
-        # Get pan_card from signup data and convert to uppercase
-        pan_card = signup_data.get('pan_card', '').upper().strip() if signup_data.get('pan_card') else None
-        
         user = User.objects.create(
             username=username,
             email=email,
@@ -485,7 +471,6 @@ class VerifySignupOTPSerializer(serializers.Serializer):
             state=signup_data['state'],
             pincode=signup_data['pincode'],
             country=signup_data.get('country', 'India'),
-            pan_card=pan_card,
             role='user'
         )
         
@@ -696,7 +681,10 @@ class SendUniversalOTPSerializer(serializers.Serializer):
             otp_code = generate_otp(settings.OTP_LENGTH)
             
             # Send to both channels with the same OTP
-            send_email_otp(user.email, otp_code)
+            try:
+                send_email_otp(user.email, otp_code, user=user)
+            except ValueError as e:
+                raise serializers.ValidationError(str(e))
             send_mobile_otp(user.mobile, otp_code)
             
             return {
@@ -706,7 +694,10 @@ class SendUniversalOTPSerializer(serializers.Serializer):
         else:
             # Send to requested channel only
             if otp_type == 'email':
-                send_email_otp(identifier)
+                try:
+                    send_email_otp(identifier, user=user)
+                except ValueError as e:
+                    raise serializers.ValidationError(str(e))
                 return {'message': f'OTP sent to {identifier}'}
             else:
                 send_mobile_otp(identifier)
