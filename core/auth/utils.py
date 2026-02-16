@@ -191,7 +191,8 @@ def send_otp_via_msg91(email, otp_code, user_name=None, company_name=None):
     Returns (success, error_message)
     """
     if not settings.MSG91_AUTH_KEY:
-        return False, "MSG91 not configured"
+        logger.error("MSG91_AUTH_KEY is not configured in settings")
+        return False, "MSG91 authentication key not configured. Please set MSG91_AUTH_KEY in environment variables."
     
     try:
         url = "https://control.msg91.com/api/v5/campaign/api/campaigns/otp/run"
@@ -237,6 +238,18 @@ def send_otp_via_msg91(email, otp_code, user_name=None, company_name=None):
         logger.debug(f"MSG91 OTP Send Request Payload: {json.dumps(payload, indent=2)}")
         
         response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        # Handle 401 Unauthorized specifically
+        if response.status_code == 401:
+            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly in production environment."
+            logger.error(f"MSG91 OTP Send 401 Unauthorized - Email: {email}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
+            try:
+                error_data = response.json()
+                logger.error(f"MSG91 Error Response: {json.dumps(error_data, indent=2)}")
+            except:
+                logger.error(f"MSG91 Error Response (raw): {response.text}")
+            return False, error_msg
+        
         response.raise_for_status()
         data = response.json()
         
