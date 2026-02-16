@@ -248,6 +248,12 @@ SECURE_SSL_REDIRECT = True
 
 
 # --------------------------------------------------
+# MSG91
+# --------------------------------------------------
+
+MSG91_AUTH_KEY = env("MSG91_AUTH_KEY", default="")
+MSG91_COMPANY_NAME = env("MSG91_COMPANY_NAME", default="ZUJA ELECTRICAL INNOVATION PRIVATE LIMITED")
+# --------------------------------------------------
 # CORS
 # --------------------------------------------------
 
