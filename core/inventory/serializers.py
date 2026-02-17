@@ -185,11 +185,12 @@ class VehicleSerializer(serializers.ModelSerializer):
         # 1. vehicle_model matches
         # 2. vehicle_color matches one of the vehicle's colors (case-insensitive)
         # 3. battery_variant matches one of the vehicle's batteries (case-insensitive)
-        # 4. status is not 'cancelled' or 'expired'
+        # 4. status is 'active', 'completed', or 'delivered' (payment verified)
+        # Note: 'pending' status is excluded - booking must have verified payment to be considered booked
         bookings = Booking.objects.filter(
             user=request.user,
             vehicle_model=obj,
-            status__in=['pending', 'active', 'completed', 'delivered']
+            status__in=['active', 'completed', 'delivered']
         )
         
         # Check each booking to see if color and battery match
@@ -1034,11 +1035,12 @@ class VehicleVariantSerializer(serializers.ModelSerializer):
         # 1. vehicle_model matches
         # 2. vehicle_color matches one of the vehicle's colors (case-insensitive)
         # 3. battery_variant matches one of the vehicle's batteries (case-insensitive)
-        # 4. status is not 'cancelled' or 'expired'
+        # 4. status is 'active', 'completed', or 'delivered' (payment verified)
+        # Note: 'pending' status is excluded - booking must have verified payment to be considered booked
         bookings = Booking.objects.filter(
             user=request.user,
             vehicle_model=obj,
-            status__in=['pending', 'active', 'completed', 'delivered']
+            status__in=['active', 'completed', 'delivered']
         )
         
         # Check each booking to see if color and battery match
