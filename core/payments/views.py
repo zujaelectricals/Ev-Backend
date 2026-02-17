@@ -12,6 +12,7 @@ import json
 import logging
 import hashlib
 import time
+import requests
 
 from .models import Payment
 from .serializers import (
@@ -219,6 +220,21 @@ def _process_booking_payment(razorpay_payment):
                         exc_info=True
                     )
                     # Don't fail the payment processing if receipt generation fails
+            
+            # Send booking confirmation email if booking just became active and receipt exists
+            if booking.status == 'active' and booking.payment_receipt:
+                try:
+                    from core.booking.tasks import send_booking_confirmation_email_task
+                    send_booking_confirmation_email_task.delay(booking.id)
+                    logger.info(
+                        f"Triggered booking confirmation email task for booking {booking.id}, order {razorpay_payment.order_id}"
+                    )
+                except Exception as email_error:
+                    logger.error(
+                        f"Failed to trigger booking confirmation email for booking {booking.id}: {email_error}",
+                        exc_info=True
+                    )
+                    # Don't fail the payment processing if email trigger fails
         except Exception as e:
             # Refresh booking from DB to get the current state after make_payment() attempt
             booking.refresh_from_db()
@@ -434,7 +450,39 @@ def create_order(request):
             }
         }
         
-        razorpay_order = client.order.create(data=order_data)
+        try:
+            razorpay_order = client.order.create(data=order_data)
+        except requests.exceptions.Timeout as timeout_error:
+            logger.error(
+                f"Razorpay API timeout while creating order for user {request.user.id}, "
+                f"entity_type={entity_type}, entity_id={entity_id}, amount={amount_paise} paise: {timeout_error}",
+                exc_info=True
+            )
+            return Response(
+                {'error': 'Payment gateway request timed out. Please try again.'},
+                status=status.HTTP_504_GATEWAY_TIMEOUT
+            )
+        except requests.exceptions.ConnectionError as conn_error:
+            logger.error(
+                f"Razorpay API connection error while creating order for user {request.user.id}, "
+                f"entity_type={entity_type}, entity_id={entity_id}, amount={amount_paise} paise: {conn_error}",
+                exc_info=True
+            )
+            return Response(
+                {'error': 'Unable to connect to payment gateway. Please try again later.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        except requests.exceptions.RequestException as req_error:
+            logger.error(
+                f"Razorpay API request error while creating order for user {request.user.id}, "
+                f"entity_type={entity_type}, entity_id={entity_id}, amount={amount_paise} paise: {req_error}",
+                exc_info=True
+            )
+            return Response(
+                {'error': 'Payment gateway request failed. Please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        
         order_id = razorpay_order['id']
         
         # Save Payment with CREATED status
@@ -1121,7 +1169,36 @@ def create_payout(request):
         
         try:
             # Create fund account
-            fund_account = client.fund_account.create(fund_account_data)
+            try:
+                fund_account = client.fund_account.create(fund_account_data)
+            except requests.exceptions.Timeout as timeout_error:
+                logger.error(
+                    f"Razorpay API timeout while creating fund account for payout {payout_id}: {timeout_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Payment gateway request timed out while creating fund account. Please try again.'},
+                    status=status.HTTP_504_GATEWAY_TIMEOUT
+                )
+            except requests.exceptions.ConnectionError as conn_error:
+                logger.error(
+                    f"Razorpay API connection error while creating fund account for payout {payout_id}: {conn_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Unable to connect to payment gateway. Please try again later.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            except requests.exceptions.RequestException as req_error:
+                logger.error(
+                    f"Razorpay API request error while creating fund account for payout {payout_id}: {req_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Payment gateway request failed. Please try again.'},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+            
             fund_account_id = fund_account['id']
             
             # Create payout
@@ -1140,7 +1217,36 @@ def create_payout(request):
                 'narration': f'Payout for user {payout.user.username}',
             }
             
-            razorpay_payout = client.payout.create(payout_data)
+            try:
+                razorpay_payout = client.payout.create(payout_data)
+            except requests.exceptions.Timeout as timeout_error:
+                logger.error(
+                    f"Razorpay API timeout while creating payout for payout {payout_id}: {timeout_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Payment gateway request timed out while creating payout. Please try again.'},
+                    status=status.HTTP_504_GATEWAY_TIMEOUT
+                )
+            except requests.exceptions.ConnectionError as conn_error:
+                logger.error(
+                    f"Razorpay API connection error while creating payout for payout {payout_id}: {conn_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Unable to connect to payment gateway. Please try again later.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            except requests.exceptions.RequestException as req_error:
+                logger.error(
+                    f"Razorpay API request error while creating payout for payout {payout_id}: {req_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Payment gateway request failed. Please try again.'},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+            
             razorpay_payout_id = razorpay_payout['id']
             
             # Update Payout model
@@ -1259,7 +1365,36 @@ def create_refund(request):
             }
         }
         
-        razorpay_refund = client.payment.refund(payment_id, refund_data)
+        try:
+            razorpay_refund = client.payment.refund(payment_id, refund_data)
+        except requests.exceptions.Timeout as timeout_error:
+            logger.error(
+                f"Razorpay API timeout while creating refund for payment {payment_id}: {timeout_error}",
+                exc_info=True
+            )
+            return Response(
+                {'error': 'Payment gateway request timed out while processing refund. Please try again.'},
+                status=status.HTTP_504_GATEWAY_TIMEOUT
+            )
+        except requests.exceptions.ConnectionError as conn_error:
+            logger.error(
+                f"Razorpay API connection error while creating refund for payment {payment_id}: {conn_error}",
+                exc_info=True
+            )
+            return Response(
+                {'error': 'Unable to connect to payment gateway. Please try again later.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        except requests.exceptions.RequestException as req_error:
+            logger.error(
+                f"Razorpay API request error while creating refund for payment {payment_id}: {req_error}",
+                exc_info=True
+            )
+            return Response(
+                {'error': 'Payment gateway request failed. Please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        
         refund_id = razorpay_refund['id']
         
         # Update Payment model
