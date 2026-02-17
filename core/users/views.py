@@ -108,9 +108,16 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def profile(self, request):
         """Get current user's profile"""
-        # Refresh user from database to ensure all fields are loaded
-        # Use select_related for ForeignKey (referred_by) and OneToOneField (binary_node, nominee)
-        user = User.objects.select_related('referred_by', 'binary_node', 'nominee').get(pk=request.user.pk)
+        try:
+            # Refresh user from database to ensure all fields are loaded
+            # Use select_related for ForeignKey (referred_by) and OneToOneField (binary_node, nominee)
+            user = User.objects.select_related('referred_by', 'binary_node', 'nominee').get(pk=request.user.pk)
+        except User.DoesNotExist:
+            return Response(
+                {'detail': 'User not found', 'code': 'user_not_found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
         # The serializer will handle OneToOneField reverse relationships (kyc) safely
         serializer = UserProfileSerializer(user, context={'request': request})
         return Response(serializer.data)

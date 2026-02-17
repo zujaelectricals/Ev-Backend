@@ -106,6 +106,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     distributor_application_status = serializers.SerializerMethodField()
     profile_picture_url = serializers.SerializerMethodField()
     referral_link = serializers.SerializerMethodField()
+    booking_payment_receipt_url = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -116,7 +117,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
                   'referred_by', 'kyc_status', 'nominee_exists', 'nominee_kyc_status', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
-                  'is_distributor_terms_and_conditions_accepted', 'distributor_application_status')
+                  'is_distributor_terms_and_conditions_accepted', 'distributor_application_status',
+                  'booking_payment_receipt_url')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer',
                            'referral_code', 'referred_by', 'date_joined')
     
@@ -219,6 +221,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
         # Remove trailing slash if present
         frontend_base_url = frontend_base_url.rstrip('/')
         return f"{frontend_base_url}/ref/{obj.referral_code}"
+    
+    def get_booking_payment_receipt_url(self, obj):
+        """Get the payment receipt URL for the user's most recent booking with a receipt"""
+        from core.booking.models import Booking
+        
+        # Find the most recent booking with a payment receipt
+        # Include all statuses that could have receipts (active, completed, delivered, and even pending if receipt exists)
+        # A receipt indicates payment was made, so it should be accessible regardless of current status
+        booking = Booking.objects.filter(
+            user=obj,
+            payment_receipt__isnull=False
+        ).order_by('-created_at').first()
+        
+        if booking and booking.payment_receipt:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(booking.payment_receipt.url)
+            return booking.payment_receipt.url
+        
+        return None
     
     def validate_profile_picture(self, value):
         """Validate profile picture file"""
@@ -357,6 +379,9 @@ class KYCSerializer(serializers.ModelSerializer):
 
 
 class NomineeSerializer(serializers.ModelSerializer):
+    mobile = serializers.CharField(max_length=15, required=False, allow_null=True, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
+    
     class Meta:
         model = Nominee
         fields = '__all__'

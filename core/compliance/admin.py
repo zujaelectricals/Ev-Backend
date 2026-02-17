@@ -71,9 +71,11 @@ class DistributorDocumentAcceptanceAdmin(admin.ModelAdmin):
     
     def has_add_permission(self, request):
         """Prevent manual creation - acceptances must be created via API"""
-        return False
+        # Allow superusers to bypass this restriction
+        return request.user.is_superuser
     
     def has_change_permission(self, request, obj=None):
         """Prevent editing - acceptances are immutable audit records"""
-        return False
+        # Allow superusers to bypass this restriction
+        return request.user.is_superuser
 

@@ -202,6 +202,23 @@ def _process_booking_payment(razorpay_payment):
                     f"Expected: {expected_total_paid_after}, Actual: {total_paid_after}, "
                     f"Difference: {total_paid_after - expected_total_paid_after}"
                 )
+            
+            # Generate payment receipt if booking just became active and receipt doesn't exist
+            if booking.status == 'active' and not booking.payment_receipt:
+                try:
+                    from core.booking.utils import generate_booking_receipt_pdf
+                    receipt_file = generate_booking_receipt_pdf(booking, booking_payment)
+                    booking.payment_receipt = receipt_file
+                    booking.save(update_fields=['payment_receipt'])
+                    logger.info(
+                        f"Generated payment receipt for booking {booking.id}, order {razorpay_payment.order_id}"
+                    )
+                except Exception as receipt_error:
+                    logger.error(
+                        f"Failed to generate payment receipt for booking {booking.id}: {receipt_error}",
+                        exc_info=True
+                    )
+                    # Don't fail the payment processing if receipt generation fails
         except Exception as e:
             # Refresh booking from DB to get the current state after make_payment() attempt
             booking.refresh_from_db()

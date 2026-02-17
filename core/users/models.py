@@ -169,8 +169,8 @@ class Nominee(models.Model):
     full_name = models.CharField(max_length=200)
     relationship = models.CharField(max_length=20, choices=RELATIONSHIP_CHOICES)
     date_of_birth = models.DateField()
-    mobile = models.CharField(max_length=15)
-    email = models.EmailField(blank=True)
+    mobile = models.CharField(max_length=15, null=True, blank=True)
+    email = models.EmailField(null=True, blank=True)
     
     # Address
     address_line1 = models.TextField()

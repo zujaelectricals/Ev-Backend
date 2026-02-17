@@ -103,6 +103,7 @@ class VehicleSerializer(serializers.ModelSerializer):
     stock_total_quantity = serializers.SerializerMethodField()
     stock_available_quantity = serializers.SerializerMethodField()
     stock_reserved_quantity = serializers.SerializerMethodField()
+    is_already_booked = serializers.SerializerMethodField()
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -115,7 +116,7 @@ class VehicleSerializer(serializers.ModelSerializer):
             'price', 'status', 'description', 'features', 'specifications',
             'images', 'image_ids', 'color_images', 'primary_image_url', 'initial_quantity', 'battery_pricing', 'stock_quantity',
             'stock_total_quantity', 'stock_available_quantity', 'stock_reserved_quantity',
-            'created_at', 'updated_at'
+            'is_already_booked', 'created_at', 'updated_at'
         )
         read_only_fields = ('created_at', 'updated_at', 'model_code')
         extra_kwargs = {
@@ -163,6 +164,66 @@ class VehicleSerializer(serializers.ModelSerializer):
             return 0
         except VehicleStock.DoesNotExist:
             return 0
+    
+    def get_is_already_booked(self, obj):
+        """Check if the current user has already booked this specific vehicle variant"""
+        request = self.context.get('request')
+        
+        # If user is not authenticated, return False
+        if not request or not request.user or not request.user.is_authenticated:
+            return False
+        
+        # Import Booking model here to avoid circular imports
+        from core.booking.models import Booking
+        
+        # Get vehicle colors and battery variants as lists
+        vehicle_colors = obj.vehicle_color if isinstance(obj.vehicle_color, list) else []
+        vehicle_batteries = obj.battery_variant if isinstance(obj.battery_variant, list) else []
+        
+        # Check if user has any active bookings for this vehicle variant
+        # A booking matches if:
+        # 1. vehicle_model matches
+        # 2. vehicle_color matches one of the vehicle's colors (case-insensitive)
+        # 3. battery_variant matches one of the vehicle's batteries (case-insensitive)
+        # 4. status is not 'cancelled' or 'expired'
+        bookings = Booking.objects.filter(
+            user=request.user,
+            vehicle_model=obj,
+            status__in=['pending', 'active', 'completed', 'delivered']
+        )
+        
+        # Check each booking to see if color and battery match
+        for booking in bookings:
+            booking_color = (booking.vehicle_color or '').strip() if booking.vehicle_color else None
+            booking_battery = (booking.battery_variant or '').strip() if booking.battery_variant else None
+            
+            # Check if booking color matches any vehicle color (case-insensitive)
+            color_matches = False
+            if booking_color:
+                booking_color_lower = booking_color.lower()
+                for vehicle_color in vehicle_colors:
+                    if isinstance(vehicle_color, str) and vehicle_color.strip().lower() == booking_color_lower:
+                        color_matches = True
+                        break
+            # If booking has no color specified, we can't match it to a specific variant
+            # Skip this booking as it's ambiguous
+            
+            # Check if booking battery matches any vehicle battery (case-insensitive)
+            battery_matches = False
+            if booking_battery:
+                booking_battery_lower = booking_battery.lower()
+                for vehicle_battery in vehicle_batteries:
+                    if isinstance(vehicle_battery, str) and vehicle_battery.strip().lower() == booking_battery_lower:
+                        battery_matches = True
+                        break
+            # If booking has no battery specified, we can't match it to a specific variant
+            # Skip this booking as it's ambiguous
+            
+            # If both color and battery match, this variant is booked
+            if color_matches and battery_matches:
+                return True
+        
+        return False
     
     
     def validate_features(self, value):
@@ -863,6 +924,7 @@ class VehicleVariantSerializer(serializers.ModelSerializer):
     stock_total_quantity = serializers.SerializerMethodField()
     stock_available_quantity = serializers.SerializerMethodField()
     stock_reserved_quantity = serializers.SerializerMethodField()
+    is_already_booked = serializers.SerializerMethodField()
     
     class Meta:
         model = Vehicle
@@ -870,7 +932,7 @@ class VehicleVariantSerializer(serializers.ModelSerializer):
             'id', 'model_code', 'vehicle_color', 'battery_variant',
             'price', 'status', 'primary_image_url', 'image_count', 'images',
             'stock_total_quantity', 'stock_available_quantity', 'stock_reserved_quantity',
-            'created_at'
+            'is_already_booked', 'created_at'
         )
         read_only_fields = ('model_code',)
     
@@ -951,6 +1013,66 @@ class VehicleVariantSerializer(serializers.ModelSerializer):
                     # Skip images that can't be serialized
                     continue
         return result
+    
+    def get_is_already_booked(self, obj):
+        """Check if the current user has already booked this specific vehicle variant"""
+        request = self.context.get('request')
+        
+        # If user is not authenticated, return False
+        if not request or not request.user or not request.user.is_authenticated:
+            return False
+        
+        # Import Booking model here to avoid circular imports
+        from core.booking.models import Booking
+        
+        # Get vehicle colors and battery variants as lists
+        vehicle_colors = obj.vehicle_color if isinstance(obj.vehicle_color, list) else []
+        vehicle_batteries = obj.battery_variant if isinstance(obj.battery_variant, list) else []
+        
+        # Check if user has any active bookings for this vehicle variant
+        # A booking matches if:
+        # 1. vehicle_model matches
+        # 2. vehicle_color matches one of the vehicle's colors (case-insensitive)
+        # 3. battery_variant matches one of the vehicle's batteries (case-insensitive)
+        # 4. status is not 'cancelled' or 'expired'
+        bookings = Booking.objects.filter(
+            user=request.user,
+            vehicle_model=obj,
+            status__in=['pending', 'active', 'completed', 'delivered']
+        )
+        
+        # Check each booking to see if color and battery match
+        for booking in bookings:
+            booking_color = (booking.vehicle_color or '').strip() if booking.vehicle_color else None
+            booking_battery = (booking.battery_variant or '').strip() if booking.battery_variant else None
+            
+            # Check if booking color matches any vehicle color (case-insensitive)
+            color_matches = False
+            if booking_color:
+                booking_color_lower = booking_color.lower()
+                for vehicle_color in vehicle_colors:
+                    if isinstance(vehicle_color, str) and vehicle_color.strip().lower() == booking_color_lower:
+                        color_matches = True
+                        break
+            # If booking has no color specified, we can't match it to a specific variant
+            # Skip this booking as it's ambiguous
+            
+            # Check if booking battery matches any vehicle battery (case-insensitive)
+            battery_matches = False
+            if booking_battery:
+                booking_battery_lower = booking_battery.lower()
+                for vehicle_battery in vehicle_batteries:
+                    if isinstance(vehicle_battery, str) and vehicle_battery.strip().lower() == booking_battery_lower:
+                        battery_matches = True
+                        break
+            # If booking has no battery specified, we can't match it to a specific variant
+            # Skip this booking as it's ambiguous
+            
+            # If both color and battery match, this variant is booked
+            if color_matches and battery_matches:
+                return True
+        
+        return False
 
 
 class VehicleGroupedSerializer(serializers.Serializer):

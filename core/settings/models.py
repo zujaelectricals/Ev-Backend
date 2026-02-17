@@ -99,6 +99,26 @@ class PlatformSettings(models.Model):
         help_text="Static referral code representing the company (used for first booking in the system). Default: 'COMPANY'"
     )
     
+    # Company Contact Information (for receipts and documents)
+    company_name = models.CharField(
+        max_length=200,
+        default='ZUJA ELECTRICAL INNOVATION (P) LTD',
+        help_text="Company name for receipts and documents"
+    )
+    company_email = models.EmailField(
+        default='inquire@dialight.mail',
+        help_text="Company email for receipts and documents"
+    )
+    company_phone = models.CharField(
+        max_length=20,
+        default='+91 7356360777',
+        help_text="Company phone number for receipts and documents"
+    )
+    company_address = models.TextField(
+        default='Kuttiyadiyil, Arrattuvazhy, Alappuzha North, Ambalapuzha A, Alappuzha – 688007, Kerala, India',
+        help_text="Company address for receipts and documents"
+    )
+    
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(
         User,
@@ -143,6 +163,10 @@ class PlatformSettings(models.Model):
                 'payout_approval_needed': True,
                 'payout_tds_percentage': 0,
                 'company_referral_code': 'COMPANY',
+                'company_name': 'ZUJA ELECTRICAL INNOVATION (P) LTD',
+                'company_email': 'zujaelectric@gmail.com',
+                'company_phone': '+91 7356360777',
+                'company_address': 'Kuttiyadiyil, Arrattuvazhy, Alappuzha North, Ambalapuzha A, Alappuzha – 688007, Kerala, India',
             }
         )
         return settings
