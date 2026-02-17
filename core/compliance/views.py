@@ -122,21 +122,8 @@ class DistributorDocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if user already accepted this version
-        user = request.user
-        existing_acceptance = DistributorDocumentAcceptance.objects.filter(
-            user=user,
-            document=document,
-            accepted_version=document.version
-        ).exists()
-        
-        if existing_acceptance:
-            return Response(
-                {'error': f'You have already accepted this document (version {document.version}).'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         # Use user's email or mobile for OTP
+        user = request.user
         identifier = user.email or user.mobile
         if not identifier:
             return Response(

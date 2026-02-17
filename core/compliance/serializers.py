@@ -185,18 +185,6 @@ class VerifyAcceptanceOTPSerializer(serializers.Serializer):
                 raise serializers.ValidationError("Invalid or expired OTP")
             attrs['otp_identifier'] = identifier
         
-        # Check if user already accepted this version
-        existing_acceptance = DistributorDocumentAcceptance.objects.filter(
-            user=user,
-            document=document,
-            accepted_version=document.version
-        ).exists()
-        
-        if existing_acceptance:
-            raise serializers.ValidationError(
-                f"You have already accepted this document (version {document.version})."
-            )
-        
         attrs['user'] = user
         attrs['document'] = document
         return attrs

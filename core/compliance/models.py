@@ -70,7 +70,6 @@ class DistributorDocumentAcceptance(models.Model):
         verbose_name = 'Distributor Document Acceptance'
         verbose_name_plural = 'Distributor Document Acceptances'
         ordering = ['-accepted_at']
-        unique_together = [['user', 'document', 'accepted_version']]
         indexes = [
             models.Index(fields=['user', 'document']),
             models.Index(fields=['accepted_at']),
