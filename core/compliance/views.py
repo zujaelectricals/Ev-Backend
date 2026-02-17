@@ -89,9 +89,8 @@ class DistributorDocumentViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
     
     def perform_destroy(self, instance):
-        """Soft delete by setting is_active=False"""
-        instance.is_active = False
-        instance.save()
+        """Permanently delete the distributor document"""
+        instance.delete()
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def accept(self, request, pk=None):

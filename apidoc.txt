@@ -528,6 +528,7 @@ Super User: EVAdmin && EVAdmin@123
      "kyc_status": "approved",
      "nominee_exists": true,
      "is_distributor_terms_and_conditions_accepted": true,
+     "booking_payment_receipt_url": "http://localhost:8000/media/booking_receipts/receipt_EV12345678_20260217_041830.pdf",  // URL to downloadable PDF payment receipt for the most recent active booking. null if no active booking with receipt exists
      "days_remaining_for_full_payment": 15,  // Number of days remaining to complete full payment (30-day window from booking creation). null if: no active booking, 30 days passed, or booking fully paid
      "active_buyer_warning": null,  // Warning message "You are not an active buyer" if user has any active booking with payment < activation_amount. null if user is an active buyer or has no active bookings
      "date_joined": "2026-01-06T12:00:00Z"
@@ -5354,7 +5355,7 @@ Super User: EVAdmin && EVAdmin@123
     Request Body (multipart/form-data):
     {
       "title": "Terms & Conditions",
-      "document_type": "terms_conditions",  // "terms_conditions", "legal_agreement", "policy", "payment_terms", "distributor_terms", "other"
+      "document_type": "payment_terms" or "distributor_terms"
       "content": "Full terms and conditions text...",
       "file": <file>,  // Optional: PDF/document file
       "version": "1.0",
@@ -5423,15 +5424,14 @@ Super User: EVAdmin && EVAdmin@123
     Method: DELETE
     URL: /api/compliance/distributor-documents/{id}/
     Authentication: Required (Admin/Staff)
-    Description: Delete (soft delete) a distributor document. Sets is_active=False. Only admin/staff can delete documents.
+    Description: Permanently delete a distributor document. Only admin/staff can delete documents.
     
     Response (204 No Content):
     (No response body)
     
     Notes:
-    - This is a soft delete - document is marked as inactive, not permanently deleted
-    - Inactive documents are not visible to regular users
-    - Acceptance records are preserved for legal compliance
+    - This is a permanent delete - the document and all associated acceptance records will be permanently removed
+    - This action cannot be undone
 
 
 85. ACCEPT DISTRIBUTOR DOCUMENT
