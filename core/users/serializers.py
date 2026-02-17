@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
+from django.conf import settings
 from .models import User, KYC, Nominee, DistributorApplication
 from django.utils import timezone
 
@@ -104,13 +105,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
     is_distributor_terms_and_conditions_accepted = serializers.SerializerMethodField()
     distributor_application_status = serializers.SerializerMethodField()
     profile_picture_url = serializers.SerializerMethodField()
+    referral_link = serializers.SerializerMethodField()
     
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'mobile', 'first_name', 'last_name',
                   'gender', 'date_of_birth', 'profile_picture', 'profile_picture_url',
                   'address_line1', 'address_line2', 'city', 'state', 'pincode', 'country',
-                  'role', 'is_distributor', 'is_active_buyer', 'referral_code',
+                  'role', 'is_distributor', 'is_active_buyer', 'referral_code', 'referral_link',
                   'referred_by', 'kyc_status', 'nominee_exists', 'nominee_kyc_status', 'date_joined',
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
@@ -207,6 +209,16 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.profile_picture.url)
             return obj.profile_picture.url
         return None
+    
+    def get_referral_link(self, obj):
+        """Generate referral link using FRONTEND_BASE_URL and user's referral code"""
+        if not obj.referral_code:
+            return None
+        
+        frontend_base_url = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:8080')
+        # Remove trailing slash if present
+        frontend_base_url = frontend_base_url.rstrip('/')
+        return f"{frontend_base_url}/ref/{obj.referral_code}"
     
     def validate_profile_picture(self, value):
         """Validate profile picture file"""
