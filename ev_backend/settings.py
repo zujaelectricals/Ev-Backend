@@ -276,7 +276,11 @@ RAZORPAY_KEY_ID = env("RAZORPAY_KEY_ID", default="")
 RAZORPAY_KEY_SECRET = env("RAZORPAY_KEY_SECRET", default="")
 RAZORPAY_WEBHOOK_SECRET = env("RAZORPAY_WEBHOOK_SECRET", default="")
 RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET", default="")
-
+# RazorpayX (Payouts) - separate credentials for payout operations
+RAZORPAYX_KEY_ID = env("RAZORPAYX_KEY_ID", default="")
+RAZORPAYX_KEY_SECRET = env("RAZORPAYX_KEY_SECRET", default="")
+RAZORPAYX_ACCOUNT_NUMBER = env("RAZORPAYX_ACCOUNT_NUMBER", default="")
+RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET", default="")
 # --------------------------------------------------
 # BUSINESS RULES
 # --------------------------------------------------
