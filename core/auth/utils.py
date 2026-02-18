@@ -67,6 +67,9 @@ def send_email_otp(email, otp_code=None, user=None, user_name=None):
         if not final_user_name:
             final_user_name = user.email.split("@")[0] if user.email else None
     
+    # Print OTP to terminal for debugging
+    print(f"Email OTP for {email}: {otp_code}")
+    
     # Send OTP via MSG91
     success, error_msg = send_otp_via_msg91(email, otp_code, user_name=final_user_name)
     

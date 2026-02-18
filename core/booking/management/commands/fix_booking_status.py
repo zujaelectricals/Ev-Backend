@@ -75,9 +75,9 @@ class Command(BaseCommand):
                         booking.confirmed_at = timezone.now()
                         booking.save(update_fields=['status', 'confirmed_at'])
                         
-                        # Update user's Active Buyer status
+                        # Update user's Active Buyer status (pass booking for bonus processing)
                         try:
-                            booking.user.update_active_buyer_status()
+                            booking.user.update_active_buyer_status(booking=booking)
                         except Exception as e:
                             self.stdout.write(
                                 self.style.WARNING(

@@ -105,8 +105,73 @@ class Booking(models.Model):
         suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
         return f"{prefix}{suffix}"
     
-    def make_payment(self, amount):
-        """Record payment and update booking status"""
+    def make_payment(self, amount, payment_id=None):
+        """
+        Record payment and update booking status.
+        
+        Args:
+            amount: Payment amount to add
+            payment_id: Optional Payment ID to prevent double-processing the same payment
+        """
+        from decimal import Decimal
+        
+        # Refresh from DB to get latest state
+        self.refresh_from_db()
+        
+        # Calculate actual sum of completed payments (source of truth)
+        completed_payments_sum = sum(
+            Decimal(str(p.amount)) 
+            for p in self.payments.filter(status='completed')
+        )
+        
+        # Import logger for logging
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # CRITICAL: If total_paid doesn't match actual payments, sync it first
+        # This prevents issues where total_paid is incorrect due to previous errors
+        if abs(Decimal(str(self.total_paid)) - completed_payments_sum) > Decimal('0.01'):
+            logger.warning(
+                f"Booking {self.id} total_paid mismatch detected! "
+                f"DB total_paid: {self.total_paid}, Actual payments sum: {completed_payments_sum}. "
+                f"Syncing total_paid to match actual payments."
+            )
+            # Sync total_paid to match actual payments before processing new payment
+            self.total_paid = completed_payments_sum
+            self.remaining_amount = self.total_amount - self.total_paid
+        
+        # Check if this specific payment was already processed
+        # If payment_id is provided, check if that payment was already counted
+        if payment_id:
+            try:
+                # Import Payment here to avoid circular import
+                Payment = self.payments.model
+                payment = self.payments.get(id=payment_id, status='completed')
+                # Payment exists and is completed, check if it's already counted
+                # If total_paid matches sum and adding this amount would exceed, it's duplicate
+                if abs(Decimal(str(self.total_paid)) - completed_payments_sum) <= Decimal('0.01'):
+                    # total_paid matches sum, so check if this payment would create a duplicate
+                    if abs(Decimal(str(self.total_paid)) + Decimal(str(amount)) - completed_payments_sum) <= Decimal('0.01'):
+                        # This payment amount is already included in the sum
+                        logger.info(
+                            f"Payment {payment_id} (amount: {amount}) already processed for booking {self.id}. Skipping."
+                        )
+                        return self
+            except self.payments.model.DoesNotExist:
+                # Payment doesn't exist or not completed, proceed with processing
+                pass
+        
+        # Calculate expected total_paid after this payment
+        expected_total = Decimal(str(self.total_paid)) + Decimal(str(amount))
+        
+        # Final check: if expected total matches or exceeds actual sum, payment might be duplicate
+        # But only skip if we're sure (total_paid was already synced and matches)
+        if abs(Decimal(str(self.total_paid)) - completed_payments_sum) <= Decimal('0.01'):
+            if abs(expected_total - completed_payments_sum) <= Decimal('0.01'):
+                # Payment already processed, skip
+                return self
+        
+        # Process the payment
         self.total_paid += amount
         self.remaining_amount = self.total_amount - self.total_paid
         
@@ -125,8 +190,19 @@ class Booking(models.Model):
         
         self.save()
         
-        # Update user's Active Buyer status
-        self.user.update_active_buyer_status()
+        # Complete the stock reservation if it exists (when first payment is confirmed)
+        # This ensures reservation status is updated to 'completed' when payment is made
+        try:
+            reservation = self.stock_reservation
+            if reservation and reservation.status == 'reserved':
+                from core.inventory.utils import complete_reservation
+                complete_reservation(reservation)
+        except Exception:
+            # No reservation exists or error accessing it, skip
+            pass
+        
+        # Update user's Active Buyer status (pass this booking for bonus processing)
+        self.user.update_active_buyer_status(booking=self)
         
         # Trigger Celery task for payment processing
         from core.booking.tasks import payment_completed
@@ -178,17 +254,37 @@ class Payment(models.Model):
     
     def save(self, *args, **kwargs):
         """Override save to handle status changes"""
-        # Set completed_at when status changes to 'completed'
+        # Track if status is changing to 'completed' to trigger booking update
+        status_changing_to_completed = False
+        old_status = None
+        
         if self.pk:
             try:
                 old_instance = Payment.objects.get(pk=self.pk)
-                if old_instance.status != 'completed' and self.status == 'completed':
+                old_status = old_instance.status
+                if old_status != 'completed' and self.status == 'completed':
+                    status_changing_to_completed = True
                     if not self.completed_at:
                         self.completed_at = timezone.now()
             except Payment.DoesNotExist:
                 pass
         elif self.status == 'completed' and not self.completed_at:
+            status_changing_to_completed = True
             self.completed_at = timezone.now()
         
         super().save(*args, **kwargs)
+        
+        # If status changed to 'completed', update booking and complete reservation
+        # This handles cases where Payment is created/updated directly (admin, shell, etc.)
+        # make_payment() is now idempotent and will check if payment was already processed
+        if status_changing_to_completed:
+            try:
+                booking = self.booking
+                booking.make_payment(self.amount, payment_id=self.id)
+                # Note: make_payment() now handles reservation completion automatically
+            except Exception as e:
+                # Log but don't fail - booking might not exist or other error
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to update booking for payment {self.id}: {e}")
 

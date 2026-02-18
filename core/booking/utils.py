@@ -3,6 +3,7 @@ Utility functions for booking operations
 """
 from io import BytesIO
 from decimal import Decimal
+from datetime import timedelta
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
@@ -14,12 +15,13 @@ from reportlab.lib.utils import ImageReader
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.utils import timezone
+from django.db import transaction
 from core.settings.models import PlatformSettings
+from core.wallet.models import WalletTransaction
 import os
 import requests
 import json
 import logging
-from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +418,7 @@ def generate_booking_receipt_pdf(booking, payment):
     return ContentFile(pdf_content, name=filename)
 
 
+<<<<<<< Updated upstream
 def send_booking_confirmation_email_msg91(booking):
     """
     Send booking confirmation email via MSG91 API.
@@ -583,4 +586,119 @@ def send_booking_confirmation_email_msg91(booking):
             exc_info=True
         )
         return False, error_msg
+=======
+def process_active_buyer_bonus(user, booking):
+    """
+    Process active buyer bonus: Add ₹5000 to user's Total paid when they become an active buyer
+    within 30 days of signup OR when their first payment is >= activation_amount.
+    
+    This bonus reduces the remaining balance on the booking.
+    
+    Args:
+        user: User instance who just became an active buyer
+        booking: Booking instance that triggered the active buyer status (latest booking)
+    
+    Returns:
+        bool: True if bonus was applied, False otherwise (already given, not qualified, or error)
+    """
+    from core.booking.models import Booking, Payment
+    
+    try:
+        # Get platform settings
+        platform_settings = PlatformSettings.get_settings()
+        activation_amount = platform_settings.activation_amount
+        
+        # Check if bonus was already given (prevent duplicates)
+        if WalletTransaction.objects.filter(
+            user=user,
+            transaction_type='ACTIVE_BUYER_BONUS'
+        ).exists():
+            logger.info(
+                f"Active buyer bonus already given to user {user.username}. Skipping."
+            )
+            return False
+        
+        # Check if user qualifies for bonus
+        # Condition 1: User's total paid >= activation_amount (already checked in update_active_buyer_status)
+        # Condition 2: User signed up within 30 days OR first payment >= activation_amount
+        
+        # Check if user signed up within 30 days
+        days_since_signup = (timezone.now() - user.date_joined).days
+        within_30_days = days_since_signup <= 30
+        
+        # Check if this is the first payment >= activation_amount
+        # Get all completed payments for this user, ordered by date
+        all_payments = Payment.objects.filter(
+            user=user,
+            status='completed'
+        ).order_by('payment_date', 'id')
+        
+        # Check if the first payment was >= activation_amount
+        first_payment_qualifies = False
+        if all_payments.exists():
+            first_payment = all_payments.first()
+            if first_payment.amount >= activation_amount:
+                first_payment_qualifies = True
+        
+        # User qualifies if: within 30 days OR first payment >= activation_amount
+        qualifies = within_30_days or first_payment_qualifies
+        
+        if not qualifies:
+            logger.info(
+                f"User {user.username} does not qualify for active buyer bonus. "
+                f"Days since signup: {days_since_signup}, First payment qualifies: {first_payment_qualifies}"
+            )
+            return False
+        
+        # Apply bonus: Add ₹5000 to booking.total_paid
+        bonus_amount = Decimal('5000.00')
+        
+        with transaction.atomic():
+            # Lock booking to prevent concurrent updates
+            booking = Booking.objects.select_for_update().get(pk=booking.pk)
+            
+            # Add bonus to total_paid
+            booking.total_paid += bonus_amount
+            booking.remaining_amount = booking.total_amount - booking.total_paid
+            
+            # Update booking status if fully paid
+            if booking.remaining_amount <= 0:
+                booking.status = 'completed'
+                if not booking.completed_at:
+                    booking.completed_at = timezone.now()
+            
+            booking.save()
+            
+            # Create wallet transaction record for audit trail
+            # Note: This is NOT a wallet credit, just a record of the bonus being applied to booking
+            from core.wallet.utils import get_or_create_wallet
+            wallet = get_or_create_wallet(user)
+            
+            WalletTransaction.objects.create(
+                user=user,
+                wallet=wallet,
+                transaction_type='ACTIVE_BUYER_BONUS',
+                amount=bonus_amount,
+                balance_before=wallet.balance,  # Wallet balance unchanged
+                balance_after=wallet.balance,   # Wallet balance unchanged
+                description=f"Active buyer bonus: ₹{bonus_amount} added to booking {booking.booking_number} total_paid",
+                reference_id=booking.id,
+                reference_type='booking'
+            )
+            
+            logger.info(
+                f"Active buyer bonus applied to user {user.username}: "
+                f"₹{bonus_amount} added to booking {booking.booking_number}. "
+                f"New total_paid: ₹{booking.total_paid}, remaining_amount: ₹{booking.remaining_amount}"
+            )
+        
+        return True
+        
+    except Exception as e:
+        logger.error(
+            f"Error processing active buyer bonus for user {user.username}, booking {booking.id}: {e}",
+            exc_info=True
+        )
+        return False
+>>>>>>> Stashed changes
 

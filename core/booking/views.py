@@ -325,30 +325,28 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
         
         # Update booking (only when admin/staff accepts payment)
+        # make_payment() is now idempotent and will check if payment was already processed
         booking.make_payment(amount)
         
-        # Complete the stock reservation if it exists
+        # Handle special case: if reservation was released (expired), re-reserve it
+        # make_payment() already handles 'reserved' -> 'completed' transition
         from core.inventory.utils import complete_reservation
         try:
             reservation = booking.stock_reservation
-            if reservation:
-                if reservation.status == 'reserved':
-                    # Reservation is still reserved, just mark as completed
-                    complete_reservation(reservation)
-                elif reservation.status == 'released':
-                    # Reservation was released (likely expired), but payment is now complete
-                    # Re-reserve the stock and mark as completed
-                    vehicle_stock = reservation.vehicle_stock
-                    if vehicle_stock.available_quantity >= reservation.quantity:
-                        # Re-reserve the stock
-                        vehicle_stock.reserve(quantity=reservation.quantity)
-                        # Mark reservation as completed
-                        reservation.status = 'completed'
-                        reservation.save(update_fields=['status', 'updated_at'])
-                    else:
-                        # Stock not available, but mark as completed anyway (booking is confirmed)
-                        reservation.status = 'completed'
-                        reservation.save(update_fields=['status', 'updated_at'])
+            if reservation and reservation.status == 'released':
+                # Reservation was released (likely expired), but payment is now complete
+                # Re-reserve the stock and mark as completed
+                vehicle_stock = reservation.vehicle_stock
+                if vehicle_stock.available_quantity >= reservation.quantity:
+                    # Re-reserve the stock
+                    vehicle_stock.reserve(quantity=reservation.quantity)
+                    # Mark reservation as completed
+                    reservation.status = 'completed'
+                    reservation.save(update_fields=['status', 'updated_at'])
+                else:
+                    # Stock not available, but mark as completed anyway (booking is confirmed)
+                    reservation.status = 'completed'
+                    reservation.save(update_fields=['status', 'updated_at'])
         except Exception as e:
             # No reservation exists or error accessing it, skip
             import logging
@@ -702,16 +700,9 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment.completed_at = timezone.now()
             payment.save(update_fields=['completed_at'])
             booking = payment.booking
+            # make_payment() is now idempotent and will check if payment was already processed
             booking.make_payment(payment.amount)
-            
-            # Complete the stock reservation if it exists
-            from core.inventory.utils import complete_reservation
-            try:
-                reservation = booking.stock_reservation
-                if reservation and reservation.status == 'reserved':
-                    complete_reservation(reservation)
-            except:
-                pass  # No reservation exists, skip
+            # Note: make_payment() now handles reservation completion automatically
             
             # Trigger Celery task for payment processing (direct user commission, etc.)
             from core.booking.tasks import payment_completed
@@ -724,29 +715,18 @@ class PaymentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Only admin or staff can update payments')
         
         old_status = self.get_object().status
+        # serializer.save() will trigger Payment.save() which automatically calls make_payment() 
+        # if status changed to 'completed', so we don't need to call it again here
         payment = serializer.save()
         
-        # If status changed to 'completed', trigger payment processing
+        # If status changed to 'completed', set completed_at if not already set
+        # (Payment.save() already called make_payment() and triggered the Celery task)
         if old_status != 'completed' and payment.status == 'completed':
-            payment.completed_at = timezone.now()
-            payment.save(update_fields=['completed_at'])
-            booking = payment.booking
-            booking.make_payment(payment.amount)
-            
-            # Complete the stock reservation if it exists
-            from core.inventory.utils import complete_reservation
-            try:
-                reservation = booking.stock_reservation
-                if reservation and reservation.status == 'reserved':
-                    complete_reservation(reservation)
-            except:
-                pass  # No reservation exists, skip
-            
-            # Trigger Celery task for payment processing (direct user commission, etc.)
-            from core.booking.tasks import payment_completed
-            payment_completed.delay(booking.id, float(payment.amount))
+            if not payment.completed_at:
+                payment.completed_at = timezone.now()
+                payment.save(update_fields=['completed_at'])
         # If status changed to 'failed', optionally release reservation
-        elif new_status == 'failed':
+        elif old_status != 'failed' and payment.status == 'failed':
             booking = payment.booking
             from core.inventory.utils import release_reservation
             try:
@@ -812,31 +792,21 @@ class PaymentViewSet(viewsets.ModelViewSet):
         if new_status == 'completed':
             payment.completed_at = timezone.now()
         
+        # Save payment - Payment.save() will automatically call make_payment() if status changed to 'completed'
+        # This prevents double-processing since Payment.save() already handles the booking update
         payment.save()
         
-        # Trigger booking payment update if status changed to completed
+        # After save, check if we need to send booking confirmation email
+        # (make_payment() is already called by Payment.save(), and it triggers the Celery task)
         if old_status != 'completed' and new_status == 'completed':
             booking = payment.booking
             booking_status_before = booking.status
-            booking.make_payment(payment.amount)
             
-            # Refresh booking to get updated status
+            # Refresh booking to get updated status after make_payment() was called by Payment.save()
             booking.refresh_from_db()
             
-            # Complete the stock reservation if it exists
-            from core.inventory.utils import complete_reservation
-            try:
-                reservation = booking.stock_reservation
-                if reservation and reservation.status == 'reserved':
-                    complete_reservation(reservation)
-            except:
-                pass  # No reservation exists, skip
-            
-            # Trigger Celery task for payment processing (direct user commission, etc.)
-            from core.booking.tasks import payment_completed
-            payment_completed.delay(booking.id, float(payment.amount))
-            
             # Send booking confirmation email if booking just became active and receipt exists
+            # Note: make_payment() already triggered the Celery task for payment processing
             if booking_status_before != 'active' and booking.status == 'active' and booking.payment_receipt:
                 try:
                     from core.booking.tasks import send_booking_confirmation_email_task

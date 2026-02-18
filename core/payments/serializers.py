@@ -26,7 +26,12 @@ class CreateOrderResponseSerializer(serializers.Serializer):
     """Serializer for create order response"""
     order_id = serializers.CharField()
     key_id = serializers.CharField()
-    amount = serializers.IntegerField(help_text="Amount in paise")
+    amount = serializers.IntegerField(help_text="Gross amount in paise (what user pays, includes gateway charges)")
+    net_amount = serializers.IntegerField(help_text="Net amount in paise (what gets credited to booking/payout)")
+    gateway_charges = serializers.IntegerField(help_text="Gateway charges in paise (2.36% of gross amount)")
+    amount_rupees = serializers.FloatField(help_text="Gross amount in rupees (for display)")
+    net_amount_rupees = serializers.FloatField(help_text="Net amount in rupees (for display)")
+    gateway_charges_rupees = serializers.FloatField(help_text="Gateway charges in rupees (for display)")
 
 
 class VerifyPaymentRequestSerializer(serializers.Serializer):
@@ -88,6 +93,8 @@ class CreateRefundResponseSerializer(serializers.Serializer):
 class PaymentSerializer(serializers.ModelSerializer):
     """Serializer for Payment model"""
     amount_in_rupees = serializers.ReadOnlyField()
+    net_amount_in_rupees = serializers.ReadOnlyField()
+    gateway_charges_in_rupees = serializers.ReadOnlyField()
     
     class Meta:
         model = Payment
@@ -98,6 +105,10 @@ class PaymentSerializer(serializers.ModelSerializer):
             'payment_id',
             'amount',
             'amount_in_rupees',
+            'net_amount',
+            'net_amount_in_rupees',
+            'gateway_charges',
+            'gateway_charges_in_rupees',
             'status',
             'content_type',
             'object_id',

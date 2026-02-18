@@ -36,6 +36,46 @@ from .utils.signature import verify_payment_signature, verify_webhook_signature
 
 logger = logging.getLogger(__name__)
 
+# Razorpay charges configuration
+# Fee: 2% + 18% GST on fee = 2.36% effective rate
+RAZORPAY_CHARGE_RATE = 0.0236  # 2.36%
+RAZORPAY_NET_TO_GROSS_DIVISOR = 0.9764  # 1 - 0.0236
+
+
+def _calculate_gross_amount_with_charges(net_amount_rupees):
+    """
+    Calculate gross amount (what user pays) from net amount (what gets credited).
+    
+    Formula: gross_amount = net_amount / (1 - 0.0236) = net_amount / 0.9764
+    
+    Args:
+        net_amount_rupees (float): Net amount in rupees (what should be credited)
+    
+    Returns:
+        tuple: (gross_amount_rupees, gateway_charges_rupees)
+            - gross_amount_rupees: Total amount user needs to pay (in rupees)
+            - gateway_charges_rupees: Gateway charges amount (in rupees)
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    
+    # Use Decimal for precise calculation
+    net_decimal = Decimal(str(net_amount_rupees))
+    
+    # Calculate gross amount: X = net_amount / 0.9764
+    gross_decimal = net_decimal / Decimal(str(RAZORPAY_NET_TO_GROSS_DIVISOR))
+    
+    # Round to 2 decimal places (for rupees)
+    gross_decimal = gross_decimal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    
+    # Calculate gateway charges
+    gateway_charges_decimal = gross_decimal - net_decimal
+    
+    # Convert to float for return (will be converted to paise later)
+    gross_amount_rupees = float(gross_decimal)
+    gateway_charges_rupees = float(gateway_charges_decimal)
+    
+    return gross_amount_rupees, gateway_charges_rupees
+
 
 def _process_booking_payment(razorpay_payment):
     """
@@ -74,8 +114,21 @@ def _process_booking_payment(razorpay_payment):
         booking = Booking.objects.select_for_update().get(pk=booking.pk)
         booking.refresh_from_db()  # Ensure we have latest values, especially total_paid
         
-        # Convert amount from paise to rupees (Decimal)
-        amount_rupees = Decimal(str(razorpay_payment.amount / 100))
+        # Use net_amount (what gets credited) instead of gross amount (what user paid)
+        # If net_amount is not set (for old payments), fallback to gross amount
+        if razorpay_payment.net_amount is not None:
+            amount_rupees = Decimal(str(razorpay_payment.net_amount / 100))
+            logger.info(
+                f"Using net_amount {razorpay_payment.net_amount} paise "
+                f"(gross: {razorpay_payment.amount} paise) for booking payment"
+            )
+        else:
+            # Fallback for old payments that don't have net_amount set
+            amount_rupees = Decimal(str(razorpay_payment.amount / 100))
+            logger.warning(
+                f"Payment {razorpay_payment.order_id} doesn't have net_amount set. "
+                f"Using gross amount {razorpay_payment.amount} paise (may include gateway charges)"
+            )
         
         # IMPORTANT: Always use order_id as transaction_id for consistency
         # This ensures that verify_payment and webhook use the same transaction_id
@@ -292,9 +345,9 @@ def _process_booking_payment(razorpay_payment):
             
             booking.save()
             
-            # Update user's Active Buyer status
+            # Update user's Active Buyer status (pass booking for bonus processing)
             try:
-                booking.user.update_active_buyer_status()
+                booking.user.update_active_buyer_status(booking=booking)
             except Exception as e2:
                 logger.warning(f"Failed to update active buyer status: {e2}")
             
@@ -363,10 +416,8 @@ def _calculate_amount_from_entity(entity_type, entity_id, requested_amount=None)
             if requested_amount is not None:
                 requested_amount_float = float(requested_amount)
                 # Validate that requested amount doesn't exceed remaining amount
-                if booking.total_paid == 0:
-                    max_amount = float(booking.booking_amount)
-                else:
-                    max_amount = float(booking.remaining_amount)
+                # Allow users to pay up to the full remaining amount (even on first payment)
+                max_amount = float(booking.remaining_amount)
                 
                 if requested_amount_float > max_amount:
                     raise ValidationError({
@@ -431,28 +482,44 @@ def create_order(request):
     requested_amount = serializer.validated_data.get('amount')
     
     try:
-        # Calculate amount from database (not trusting frontend)
+        # Calculate net amount from database (not trusting frontend)
+        # This is the amount that should be credited to the booking/payout
         # If requested_amount is provided, validate it against the entity's limits
-        amount_rupees, entity_obj, content_type = _calculate_amount_from_entity(
+        net_amount_rupees, entity_obj, content_type = _calculate_amount_from_entity(
             entity_type, entity_id, requested_amount=requested_amount
         )
         
-        if amount_rupees <= 0:
+        if net_amount_rupees <= 0:
             raise ValidationError({'error': 'Amount must be greater than 0'})
         
-        # Convert to paise (Razorpay uses paise)
-        amount_paise = int(amount_rupees * 100)
+        # Calculate gross amount (what user pays) including Razorpay charges
+        # Formula: gross_amount = net_amount / (1 - 0.0236) = net_amount / 0.9764
+        gross_amount_rupees, gateway_charges_rupees = _calculate_gross_amount_with_charges(net_amount_rupees)
         
-        # Create Razorpay order
+        # Convert to paise (Razorpay uses paise)
+        net_amount_paise = int(round(net_amount_rupees * 100))
+        gross_amount_paise = int(round(gross_amount_rupees * 100))
+        gateway_charges_paise = int(round(gateway_charges_rupees * 100))
+        
+        logger.info(
+            f"Order calculation for {entity_type} {entity_id}: "
+            f"net_amount=₹{net_amount_rupees:.2f} ({net_amount_paise} paise), "
+            f"gross_amount=₹{gross_amount_rupees:.2f} ({gross_amount_paise} paise), "
+            f"gateway_charges=₹{gateway_charges_rupees:.2f} ({gateway_charges_paise} paise)"
+        )
+        
+        # Create Razorpay order with gross amount (what user pays)
         client = get_razorpay_client()
         order_data = {
-            'amount': amount_paise,
+            'amount': gross_amount_paise,  # User pays gross amount (includes charges)
             'currency': 'INR',
             'receipt': f'{entity_type}_{entity_id}',
             'notes': {
                 'entity_type': entity_type,
                 'entity_id': str(entity_id),
                 'user_id': str(request.user.id),
+                'net_amount': str(net_amount_rupees),  # Store net amount in notes for reference
+                'gateway_charges': str(gateway_charges_rupees),  # Store charges in notes for reference
             }
         }
         
@@ -461,7 +528,7 @@ def create_order(request):
         except requests.exceptions.Timeout as timeout_error:
             logger.error(
                 f"Razorpay API timeout while creating order for user {request.user.id}, "
-                f"entity_type={entity_type}, entity_id={entity_id}, amount={amount_paise} paise: {timeout_error}",
+                f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {timeout_error}",
                 exc_info=True
             )
             return Response(
@@ -471,7 +538,7 @@ def create_order(request):
         except requests.exceptions.ConnectionError as conn_error:
             logger.error(
                 f"Razorpay API connection error while creating order for user {request.user.id}, "
-                f"entity_type={entity_type}, entity_id={entity_id}, amount={amount_paise} paise: {conn_error}",
+                f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {conn_error}",
                 exc_info=True
             )
             return Response(
@@ -481,7 +548,7 @@ def create_order(request):
         except requests.exceptions.RequestException as req_error:
             logger.error(
                 f"Razorpay API request error while creating order for user {request.user.id}, "
-                f"entity_type={entity_type}, entity_id={entity_id}, amount={amount_paise} paise: {req_error}",
+                f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {req_error}",
                 exc_info=True
             )
             return Response(
@@ -492,11 +559,14 @@ def create_order(request):
         order_id = razorpay_order['id']
         
         # Save Payment with CREATED status
+        # Store both gross amount (what user pays) and net amount (what gets credited)
         with transaction.atomic():
             payment = Payment.objects.create(
                 user=request.user,
                 order_id=order_id,
-                amount=amount_paise,
+                amount=gross_amount_paise,  # Gross amount (what user pays, includes charges)
+                net_amount=net_amount_paise,  # Net amount (what gets credited)
+                gateway_charges=gateway_charges_paise,  # Gateway charges
                 status='CREATED',
                 content_type=content_type,
                 object_id=entity_id,
@@ -505,14 +575,22 @@ def create_order(request):
         
         logger.info(
             f"Created Razorpay order {order_id} for user {request.user.id}, "
-            f"entity_type={entity_type}, entity_id={entity_id}, amount={amount_paise} paise"
+            f"entity_type={entity_type}, entity_id={entity_id}, "
+            f"gross_amount={gross_amount_paise} paise (₹{gross_amount_rupees:.2f}), "
+            f"net_amount={net_amount_paise} paise (₹{net_amount_rupees:.2f}), "
+            f"gateway_charges={gateway_charges_paise} paise (₹{gateway_charges_rupees:.2f})"
         )
         
-        # Return response
+        # Return response with gross amount and breakdown (what user needs to pay)
         response_serializer = CreateOrderResponseSerializer({
             'order_id': order_id,
             'key_id': settings.RAZORPAY_KEY_ID,
-            'amount': amount_paise,
+            'amount': gross_amount_paise,  # Gross amount in paise (for Razorpay integration)
+            'net_amount': net_amount_paise,  # Net amount in paise (what gets credited)
+            'gateway_charges': gateway_charges_paise,  # Gateway charges in paise
+            'amount_rupees': round(gross_amount_rupees, 2),  # Gross amount in rupees (for display)
+            'net_amount_rupees': round(net_amount_rupees, 2),  # Net amount in rupees (for display)
+            'gateway_charges_rupees': round(gateway_charges_rupees, 2),  # Gateway charges in rupees (for display)
         })
         
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)

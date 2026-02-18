@@ -35,6 +35,7 @@ class WalletTransaction(models.Model):
         ('BINARY_PAIR_COMMISSION', 'Binary Pair Commission'),
         ('DIRECT_USER_COMMISSION', 'Direct User Commission'),
         ('BINARY_INITIAL_BONUS', 'Binary Initial Bonus'),
+        ('ACTIVE_BUYER_BONUS', 'Active Buyer Bonus'),
         ('TDS_DEDUCTION', 'TDS Deduction'),
         ('EXTRA_DEDUCTION', 'Extra Deduction'),
         ('EMI_DEDUCTION', 'EMI Deduction'),

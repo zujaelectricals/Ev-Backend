@@ -29,7 +29,15 @@ class Payment(models.Model):
     payment_id = models.CharField(max_length=255, null=True, blank=True, unique=True, db_index=True)
     
     # Amount in paise (Razorpay uses paise, not rupees)
+    # This is the gross amount (what user pays, including gateway charges)
     amount = models.IntegerField()
+    
+    # Net amount in paise (amount after deducting gateway charges)
+    # This is what gets credited to the booking/payout
+    net_amount = models.IntegerField(null=True, blank=True, help_text="Net amount in paise after gateway charges")
+    
+    # Gateway charges in paise (Razorpay fee + GST)
+    gateway_charges = models.IntegerField(null=True, blank=True, help_text="Gateway charges in paise (2.36% of gross amount)")
     
     # Payment status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='CREATED', db_index=True)
@@ -63,8 +71,22 @@ class Payment(models.Model):
     
     @property
     def amount_in_rupees(self):
-        """Convert amount from paise to rupees"""
+        """Convert gross amount from paise to rupees"""
         return self.amount / 100
+    
+    @property
+    def net_amount_in_rupees(self):
+        """Convert net amount from paise to rupees"""
+        if self.net_amount is not None:
+            return self.net_amount / 100
+        return self.amount_in_rupees  # Fallback to gross if net not set
+    
+    @property
+    def gateway_charges_in_rupees(self):
+        """Convert gateway charges from paise to rupees"""
+        if self.gateway_charges is not None:
+            return self.gateway_charges / 100
+        return 0
 
 
 class WebhookEvent(models.Model):

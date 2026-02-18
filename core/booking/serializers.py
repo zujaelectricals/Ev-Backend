@@ -84,13 +84,16 @@ class BookingSerializer(serializers.ModelSerializer):
     referred_by = ReferredUserSerializer(read_only=True, allow_null=True)
      # Aggregated payment status for this booking (derived from related Payment records)
     payment_status = serializers.SerializerMethodField()
+    # Calculate total_paid from actual completed payments to ensure accuracy
+    total_paid = serializers.SerializerMethodField()
+    remaining_amount = serializers.SerializerMethodField()
     
     class Meta:
         model = Booking
         fields = '__all__'
         read_only_fields = ('user', 'booking_number', 'status', 'created_at', 
-                          'updated_at', 'confirmed_at', 'completed_at', 'delivered_at', 'total_paid', 
-                          'remaining_amount', 'expires_at', 'ip_address', 'referred_by', 'vehicle_model')
+                          'updated_at', 'confirmed_at', 'completed_at', 'delivered_at', 
+                          'expires_at', 'ip_address', 'referred_by', 'vehicle_model')
     
     def validate_booking_amount(self, value):
         """Validate minimum booking amount"""
@@ -278,6 +281,44 @@ class BookingSerializer(serializers.ModelSerializer):
             return 'refunded'
 
         return 'no_payment'
+    
+    def get_total_paid(self, obj):
+        """
+        Calculate total_paid from actual completed payments to ensure accuracy.
+        This prevents discrepancies between stored total_paid and actual payment records.
+        """
+        from decimal import Decimal
+        payments_qs = getattr(obj, 'payments', None)
+        if payments_qs is None:
+            return str(obj.total_paid)  # Fallback to stored value
+        
+        # Sum all completed payments
+        completed_payments_sum = sum(
+            Decimal(str(p.amount))
+            for p in payments_qs.filter(status='completed')
+        )
+        
+        return str(completed_payments_sum)
+    
+    def get_remaining_amount(self, obj):
+        """
+        Calculate remaining_amount based on actual total_paid from completed payments.
+        """
+        from decimal import Decimal
+        total_amount = Decimal(str(obj.total_amount))
+        
+        # Get actual total_paid from completed payments
+        payments_qs = getattr(obj, 'payments', None)
+        if payments_qs is None:
+            total_paid = Decimal(str(obj.total_paid))  # Fallback to stored value
+        else:
+            total_paid = sum(
+                Decimal(str(p.amount))
+                for p in payments_qs.filter(status='completed')
+            )
+        
+        remaining = total_amount - total_paid
+        return str(max(remaining, Decimal('0')))  # Ensure non-negative
 
 
 class RefundDetailSerializer(serializers.Serializer):

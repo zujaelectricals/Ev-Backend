@@ -72,27 +72,61 @@ class User(AbstractBaseUser, PermissionsMixin):
     def get_full_name(self):
         return f"{self.first_name} {self.last_name}".strip()
     
-    def update_active_buyer_status(self):
-        """Update Active Buyer status based on total paid amount"""
+    def update_active_buyer_status(self, booking=None):
+        """
+        Update Active Buyer status based on total paid amount
+        
+        Args:
+            booking: Optional Booking instance that triggered this status update.
+                    If provided, this booking will be used for bonus processing.
+        
+        Returns:
+            bool: True if user is now an active buyer, False otherwise
+        """
         from core.booking.models import Booking
+        from core.settings.models import PlatformSettings
+        
+        # Get activation_amount from settings
+        platform_settings = PlatformSettings.get_settings()
+        activation_amount = platform_settings.activation_amount
+        
         total_paid = Booking.objects.filter(
             user=self,
             status__in=['active', 'completed']
         ).aggregate(total=models.Sum('total_paid'))['total'] or 0
         
         was_active = self.is_active_buyer
-        self.is_active_buyer = total_paid >= 5000  # ACTIVE_BUYER_THRESHOLD
+        self.is_active_buyer = total_paid >= activation_amount
         
         if not was_active and self.is_active_buyer:
             # User just became Active Buyer - trigger any necessary actions
+            import logging
+            logger = logging.getLogger(__name__)
+            
             if self.is_distributor:
                 # Log that distributor earnings can now resume for future binary pairs
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.info(
                     f"Distributor {self.username} became Active Buyer. "
                     f"Future binary pair commissions (6th+) will now be paid normally."
                 )
+            
+            # Process active buyer bonus
+            # If booking is not provided, find the latest booking that contributed to active buyer status
+            if not booking:
+                booking = Booking.objects.filter(
+                    user=self,
+                    status__in=['active', 'completed']
+                ).order_by('-updated_at', '-created_at').first()
+            
+            if booking:
+                try:
+                    from core.booking.utils import process_active_buyer_bonus
+                    process_active_buyer_bonus(self, booking)
+                except Exception as e:
+                    logger.error(
+                        f"Error processing active buyer bonus for user {self.username}: {e}",
+                        exc_info=True
+                    )
         
         self.save(update_fields=['is_active_buyer'])
         return self.is_active_buyer

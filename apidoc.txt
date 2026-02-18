@@ -1954,20 +1954,20 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/payments/create-order/
     Authentication: Required
-    Description: Create a Razorpay order for payment. Supports partial payments for bookings. Amount can be specified or calculated automatically from database entity (booking, payout, etc.) to prevent frontend manipulation.
+    Description: Create a Razorpay order for payment. Supports partial payments for bookings. Amount can be specified or calculated automatically from database entity (booking, payout, etc.) to prevent frontend manipulation. Razorpay gateway charges (2.36% = 2% fee + 18% GST on fee) are automatically included in the order amount.
     
     Request Body:
     {
       "entity_type": "booking",  // "booking" or "payout"
       "entity_id": 123,           // ID of the booking or payout
-      "amount": 5000              // Optional: Amount in rupees for partial payment. If not provided, uses full remaining amount for bookings or full amount for payouts
+      "amount": 5000              // Optional: Net amount in rupees (what gets credited). If not provided, uses full remaining amount for bookings or full amount for payouts. Gateway charges will be added automatically.
     }
     
     Example 1 - Partial Payment (Booking):
     {
       "entity_type": "booking",
       "entity_id": 123,
-      "amount": 5000  // User wants to pay ₹5000 more (partial payment)
+      "amount": 5000  // User wants to pay ₹5000 net (₹5120.44 gross with charges)
     }
     
     Example 2 - Full Remaining Amount (Booking):
@@ -1981,7 +1981,24 @@ Super User: EVAdmin && EVAdmin@123
     {
       "order_id": "order_ABC123XYZ",
       "key_id": "rzp_test_1234567890",
-      "amount": 500000  // Amount in paise (₹5000.00 = 500000 paise)
+      "amount": 512044,                    // Gross amount in paise (what user pays, includes gateway charges)
+      "net_amount": 500000,                // Net amount in paise (what gets credited to booking/payout)
+      "gateway_charges": 12044,            // Gateway charges in paise (2.36% of gross amount)
+      "amount_rupees": 5120.44,            // Gross amount in rupees (for display)
+      "net_amount_rupees": 5000.00,        // Net amount in rupees (for display)
+      "gateway_charges_rupees": 120.44     // Gateway charges in rupees (for display)
+    }
+    
+    Example Response (Booking Amount ₹5000):
+    {
+      "order_id": "order_ABC123XYZ",
+      "key_id": "rzp_test_1234567890",
+      "amount": 512044,                    // ₹5120.44 - Total amount user pays
+      "net_amount": 500000,                // ₹5000.00 - Amount credited to booking
+      "gateway_charges": 12044,            // ₹120.44 - Razorpay charges (2.36%)
+      "amount_rupees": 5120.44,
+      "net_amount_rupees": 5000.00,
+      "gateway_charges_rupees": 120.44
     }
     
     Error Response (400):
@@ -2004,11 +2021,18 @@ Super User: EVAdmin && EVAdmin@123
     
     Notes:
     - Amount validation is done server-side (not trusted from frontend)
+    - Razorpay charges (2.36% = 2% fee + 18% GST) are automatically calculated and added
+    - Formula: gross_amount = net_amount / 0.9764
+    - The "amount" field in response is the gross amount (includes charges) - use this for Razorpay checkout
+    - The "net_amount" field is what actually gets credited to the booking/payout
     - For "booking": 
       * If amount is provided: Validates that amount ≤ remaining_amount (or booking_amount if first payment)
+        This is the NET amount (what gets credited). Gateway charges are added automatically.
       * If amount is NOT provided (backward compatible):
-        - If total_paid == 0 (first payment): Uses Booking.booking_amount (initial booking fee)
-        - If total_paid > 0 (subsequent payments): Uses Booking.remaining_amount (outstanding balance)
+        - If total_paid == 0 (first payment): Uses Booking.booking_amount (initial booking fee) as net amount
+        - If total_paid > 0 (subsequent payments): Uses Booking.remaining_amount (outstanding balance) as net amount
+    - Frontend should use "amount" (in paise) for Razorpay checkout initialization
+    - Frontend can display breakdown using "amount_rupees", "net_amount_rupees", and "gateway_charges_rupees"
     - For "payout": 
       * If amount is provided: Validates that amount ≤ net_amount
       * If amount is NOT provided: Uses Payout.net_amount
