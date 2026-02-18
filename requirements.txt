@@ -90,7 +90,7 @@ python-dotenv==1.0.1
 pytz==2025.2
 PyYAML==6.0.2
 
-razorpay==1.4.2
+razorpay==2.0.0
 redis==5.0.1
 reportlab==4.2.5
 requests==2.31.0
