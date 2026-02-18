@@ -418,7 +418,6 @@ def generate_booking_receipt_pdf(booking, payment):
     return ContentFile(pdf_content, name=filename)
 
 
-<<<<<<< Updated upstream
 def send_booking_confirmation_email_msg91(booking):
     """
     Send booking confirmation email via MSG91 API.
@@ -586,7 +585,8 @@ def send_booking_confirmation_email_msg91(booking):
             exc_info=True
         )
         return False, error_msg
-=======
+
+
 def process_active_buyer_bonus(user, booking):
     """
     Process active buyer bonus: Add ₹5000 to user's Total paid when they become an active buyer
@@ -700,5 +700,4 @@ def process_active_buyer_bonus(user, booking):
             exc_info=True
         )
         return False
->>>>>>> Stashed changes
 
