@@ -30,12 +30,22 @@ def send_email_otp(email, otp_code=None, user=None, user_name=None):
     user_name: Optional user name string (used if user is not provided)
     """
     # Validate email using MSG91 first
+    # Note: 402 (insufficient balance) errors are allowed - validation returns True
+    # to allow OTP sending to proceed even when validation service has billing issues
     is_valid, error_msg = validate_email_msg91(email)
     if not is_valid:
         raise ValueError(error_msg or "Invalid email address")
     
     if otp_code is None:
         otp_code = generate_otp(settings.OTP_LENGTH)
+    
+    # Print OTP to terminal
+    print(f"\n{'='*60}")
+    print(f"OTP SENT VIA EMAIL")
+    print(f"{'='*60}")
+    print(f"Email: {email}")
+    print(f"OTP Code: {otp_code}")
+    print(f"{'='*60}\n")
     
     # Store OTP in Redis with expiry
     cache_key = f"otp:email:{email}"
@@ -68,10 +78,131 @@ def send_email_otp(email, otp_code=None, user=None, user_name=None):
     return True
 
 
-def send_mobile_otp(mobile, otp_code=None):
-    """Send OTP via SMS. If otp_code is provided, use it; otherwise generate new one."""
+def send_sms_via_msg91(mobile, otp_code, user_name=None, company_name=None):
+    """
+    Send OTP via MSG91 SMS API
+    Returns (success, error_message)
+    """
+    if not settings.MSG91_AUTH_KEY:
+        logger.error("MSG91_AUTH_KEY is not configured in settings")
+        return False, "MSG91 authentication key not configured. Please set MSG91_AUTH_KEY in environment variables."
+    
+    try:
+        # MSG91 SMS API endpoint
+        url = "https://control.msg91.com/api/v5/flow/"
+        headers = {
+            "Content-Type": "application/json",
+            "authkey": settings.MSG91_AUTH_KEY
+        }
+        
+        # Use company name from settings or default
+        if not company_name:
+            company_name = getattr(settings, 'MSG91_COMPANY_NAME', 'Company')
+        
+        # MSG91 SMS flow payload
+        # Note: This assumes you have configured an SMS flow template in MSG91
+        # You may need to adjust the payload structure based on your MSG91 SMS template configuration
+        payload = {
+            "flow_id": getattr(settings, 'MSG91_SMS_FLOW_ID', None),  # SMS Flow ID from MSG91 dashboard
+            "sender": getattr(settings, 'MSG91_SMS_SENDER_ID', 'MSG91'),  # Sender ID
+            "mobiles": mobile,
+            "otp": str(otp_code),
+            "company_name": company_name
+        }
+        
+        # If flow_id is not configured, use the older SMS API endpoint
+        if not payload.get("flow_id"):
+            # Fallback to older MSG91 SMS API
+            url = "https://control.msg91.com/api/sendotp.php"
+            params = {
+                "authkey": settings.MSG91_AUTH_KEY,
+                "mobile": mobile,
+                "message": f"Your OTP is {otp_code}. {company_name}",
+                "sender": payload.get("sender", "MSG91"),
+                "otp": otp_code
+            }
+            logger.info(f"MSG91 SMS OTP Send Request - Mobile: {mobile}")
+            logger.debug(f"MSG91 SMS OTP Send Request Params: {params}")
+            
+            response = requests.get(url, params=params, timeout=10)
+        else:
+            logger.info(f"MSG91 SMS OTP Send Request - Mobile: {mobile}, User: {user_name}")
+            logger.debug(f"MSG91 SMS OTP Send Request Payload: {json.dumps(payload, indent=2)}")
+            
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        # Handle 401 Unauthorized specifically
+        if response.status_code == 401:
+            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly."
+            logger.error(f"MSG91 SMS OTP Send 401 Unauthorized - Mobile: {mobile}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
+            try:
+                error_data = response.json()
+                logger.error(f"MSG91 SMS Error Response: {json.dumps(error_data, indent=2)}")
+            except:
+                logger.error(f"MSG91 SMS Error Response (raw): {response.text}")
+            return False, error_msg
+        
+        response.raise_for_status()
+        
+        # For GET requests (older API), response might be text
+        try:
+            data = response.json()
+        except:
+            data = {"text": response.text}
+        
+        # Log the response
+        logger.info(f"MSG91 SMS OTP Send Response - Mobile: {mobile}, Response: {json.dumps(data, indent=2)}")
+        
+        # Check if OTP was sent successfully
+        # MSG91 SMS API returns different formats, check for success indicators
+        if response.status_code == 200:
+            # Check response content for success
+            if isinstance(data, dict):
+                if data.get("type") == "success" or data.get("status") == "success" or "success" in str(data).lower():
+                    logger.info(f"MSG91 SMS OTP Send Success - Mobile: {mobile}")
+                    return True, None
+            elif isinstance(data, str) and "success" in data.lower():
+                logger.info(f"MSG91 SMS OTP Send Success - Mobile: {mobile}")
+                return True, None
+            # If we get here, assume success for 200 status
+            logger.info(f"MSG91 SMS OTP Send Success (200 status) - Mobile: {mobile}")
+            return True, None
+        else:
+            errors = data.get("errors", {}) if isinstance(data, dict) else {}
+            if errors:
+                error_msg = str(errors)
+            else:
+                error_msg = "Failed to send SMS OTP"
+            logger.warning(f"MSG91 SMS OTP Send Failed - Mobile: {mobile}, Errors: {errors}")
+            return False, error_msg
+            
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error sending SMS OTP: {str(e)}"
+        logger.error(f"MSG91 SMS OTP Send Network Error - Mobile: {mobile}, Error: {error_msg}")
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Unexpected error sending SMS OTP: {str(e)}"
+        logger.error(f"MSG91 SMS OTP Send Unexpected Error - Mobile: {mobile}, Error: {error_msg}")
+        return False, error_msg
+
+
+def send_mobile_otp(mobile, otp_code=None, user=None, user_name=None):
+    """
+    Send OTP via SMS using MSG91.
+    If otp_code is provided, use it; otherwise generate new one.
+    user: Optional User object to extract name for MSG91 template
+    user_name: Optional user name string (used if user is not provided)
+    """
     if otp_code is None:
         otp_code = generate_otp(settings.OTP_LENGTH)
+    
+    # Print OTP to terminal
+    print(f"\n{'='*60}")
+    print(f"OTP SENT VIA SMS")
+    print(f"{'='*60}")
+    print(f"Mobile: {mobile}")
+    print(f"OTP Code: {otp_code}")
+    print(f"{'='*60}\n")
     
     # Store OTP in Redis with expiry
     cache_key = f"otp:mobile:{mobile}"
@@ -86,13 +217,80 @@ def send_mobile_otp(mobile, otp_code=None):
         expires_at=expires_at
     )
     
-    # Send SMS (integrate with SMS provider)
-    # For now, just log it
-    print(f"SMS OTP for {mobile}: {otp_code}")
-    # TODO: Integrate with actual SMS provider
-    # sms_provider.send_sms(mobile, f"Your OTP is: {otp_code}")
+    # Extract user name if user object is provided, otherwise use user_name parameter
+    final_user_name = user_name
+    if not final_user_name and user:
+        final_user_name = user.get_full_name() or (user.first_name or user.last_name)
+        if not final_user_name:
+            final_user_name = user.mobile if user.mobile else None
+    
+    # Send SMS via MSG91
+    success, error_msg = send_sms_via_msg91(mobile, otp_code, user_name=final_user_name)
+    
+    if not success:
+        # If MSG91 fails, log error but don't raise (to allow fallback behavior)
+        logger.warning(f"Failed to send SMS OTP via MSG91 for {mobile}: {error_msg}")
+        # Still return True as OTP is stored and can be verified
+        # In production, you might want to raise an error here
     
     return True
+
+
+def send_otp_dual_channel(user, otp_code=None):
+    """
+    Send OTP to both email and SMS simultaneously
+    Returns dict with success status for both channels:
+    {
+        'email': {'success': bool, 'error': str or None},
+        'sms': {'success': bool, 'error': str or None},
+        'otp_code': str
+    }
+    """
+    if otp_code is None:
+        otp_code = generate_otp(settings.OTP_LENGTH)
+    
+    # Print OTP to terminal
+    print(f"\n{'='*60}")
+    print(f"OTP SENT VIA DUAL CHANNEL")
+    print(f"{'='*60}")
+    print(f"OTP Code: {otp_code}")
+    if user.email:
+        print(f"Email: {user.email}")
+    if user.mobile:
+        print(f"Mobile: {user.mobile}")
+    print(f"{'='*60}\n")
+    
+    result = {
+        'email': {'success': False, 'error': None},
+        'sms': {'success': False, 'error': None},
+        'otp_code': otp_code
+    }
+    
+    # Send email OTP if user has email
+    if user.email:
+        try:
+            send_email_otp(user.email, otp_code, user=user)
+            result['email']['success'] = True
+        except Exception as e:
+            error_msg = str(e)
+            result['email']['error'] = error_msg
+            logger.error(f"Failed to send email OTP to {user.email}: {error_msg}")
+    
+    # Send SMS OTP if user has mobile
+    if user.mobile:
+        try:
+            send_mobile_otp(user.mobile, otp_code, user=user)
+            result['sms']['success'] = True
+        except Exception as e:
+            error_msg = str(e)
+            result['sms']['error'] = error_msg
+            logger.error(f"Failed to send SMS OTP to {user.mobile}: {error_msg}")
+    
+    # At least one channel should succeed
+    if not result['email']['success'] and not result['sms']['success']:
+        raise ValueError("Failed to send OTP via both email and SMS channels")
+    
+    return result
 
 
 def ensure_dummy_user():
@@ -192,11 +390,50 @@ def validate_email_msg91(email):
         
         logger.info(f"MSG91 Email Validation Request - Email: {email}")
         response = requests.post(url, json=payload, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        
+        # Parse response data even if status code indicates error
+        try:
+            data = response.json()
+        except (ValueError, json.JSONDecodeError):
+            # If response is not JSON, create a basic error structure
+            data = {
+                "status": "fail",
+                "hasError": True,
+                "errors": [f"HTTP {response.status_code}: {response.text[:200]}"]
+            }
         
         # Log the response
-        logger.info(f"MSG91 Email Validation Response - Email: {email}, Response: {json.dumps(data, indent=2)}")
+        logger.info(f"MSG91 Email Validation Response - Email: {email}, Status: {response.status_code}, Response: {json.dumps(data, indent=2)}")
+        
+        # Handle HTTP errors (like 402 - insufficient balance)
+        if not response.ok:
+            # Extract error message from response
+            errors = data.get("errors", [])
+            if isinstance(errors, list) and len(errors) > 0:
+                error_msg = errors[0] if isinstance(errors[0], str) else str(errors[0])
+            elif isinstance(errors, dict):
+                error_msg = str(errors)
+            else:
+                error_msg = f"HTTP {response.status_code}: Validation request failed"
+            
+            # Special handling for 402 - insufficient balance
+            # For 402, we still return True to allow email sending to proceed
+            # (validation balance issue shouldn't block email sending)
+            if response.status_code == 402:
+                logger.warning(
+                    f"MSG91 email validation returned 402 (insufficient balance) - Email: {email}, "
+                    f"Status: {response.status_code}, Error: {error_msg}. "
+                    f"Proceeding with email send anyway."
+                )
+                # Return True with a warning message - allows email to be sent
+                return True, f"insufficient_balance: {error_msg}"
+            else:
+                logger.warning(
+                    f"MSG91 email validation HTTP error - Email: {email}, "
+                    f"Status: {response.status_code}, Error: {error_msg}"
+                )
+            
+            return False, error_msg
         
         # Check if validation was successful
         if data.get("status") == "success" and data.get("hasError") == False:
@@ -209,20 +446,27 @@ def validate_email_msg91(email):
                 return False, "Invalid email address"
         else:
             # Extract error message if available
-            errors = data.get("errors", {})
-            if errors:
+            errors = data.get("errors", [])
+            if isinstance(errors, list) and len(errors) > 0:
+                error_msg = errors[0] if isinstance(errors[0], str) else str(errors[0])
+            elif isinstance(errors, dict):
                 error_msg = str(errors)
             else:
-                error_msg = "Invalid email address"
+                error_msg = "Validation failed"
             logger.warning(f"MSG91 Email Validation Error - Email: {email}, Errors: {errors}")
             return False, error_msg
             
-    except requests.exceptions.RequestException as e:
-        # On network errors, log but don't block (fail open)
-        logger.error(f"MSG91 email validation network error - Email: {email}, Error: {str(e)}")
+    except requests.exceptions.Timeout:
+        # On timeout, log but don't block (fail open for network issues)
+        logger.error(f"MSG91 email validation timeout - Email: {email}")
+        return True, None
+    except requests.exceptions.ConnectionError:
+        # On connection error, log but don't block (fail open for network issues)
+        logger.error(f"MSG91 email validation connection error - Email: {email}")
         return True, None
     except Exception as e:
-        logger.error(f"MSG91 email validation unexpected error - Email: {email}, Error: {str(e)}")
+        # On other unexpected errors, log but don't block (fail open)
+        logger.error(f"MSG91 email validation unexpected error - Email: {email}, Error: {str(e)}", exc_info=True)
         return True, None
 
 

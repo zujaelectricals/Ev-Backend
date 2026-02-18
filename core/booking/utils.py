@@ -16,6 +16,12 @@ from django.core.files.base import ContentFile
 from django.utils import timezone
 from core.settings.models import PlatformSettings
 import os
+import requests
+import json
+import logging
+from datetime import timedelta
+
+logger = logging.getLogger(__name__)
 
 
 def generate_booking_receipt_pdf(booking, payment):
@@ -408,4 +414,173 @@ def generate_booking_receipt_pdf(booking, payment):
     # Create ContentFile
     filename = f"receipt_{booking.booking_number}_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     return ContentFile(pdf_content, name=filename)
+
+
+def send_booking_confirmation_email_msg91(booking):
+    """
+    Send booking confirmation email via MSG91 API.
+    
+    Args:
+        booking: Booking instance (must have status='active' and payment_receipt)
+    
+    Returns:
+        tuple: (success: bool, error_message: str)
+    """
+    # Check if MSG91 is configured
+    if not settings.MSG91_AUTH_KEY:
+        logger.warning("MSG91_AUTH_KEY is not configured. Skipping booking confirmation email.")
+        return False, "MSG91 authentication key not configured"
+    
+    # Validate booking has required data
+    if not booking.user or not booking.user.email:
+        logger.warning(f"Booking {booking.id} has no user email. Skipping confirmation email.")
+        return False, "User email not found"
+    
+    if not booking.payment_receipt:
+        logger.warning(f"Booking {booking.id} has no payment receipt. Skipping confirmation email.")
+        return False, "Payment receipt not found"
+    
+    if booking.status != 'active':
+        logger.warning(f"Booking {booking.id} status is '{booking.status}', not 'active'. Skipping confirmation email.")
+        return False, f"Booking status is '{booking.status}', not 'active'"
+    
+    user_email = booking.user.email
+    user_full_name = booking.user.get_full_name() or booking.user.username
+    
+    # Step 1: Validate email using MSG91
+    try:
+        from core.auth.utils import validate_email_msg91
+        is_valid, error_msg = validate_email_msg91(user_email)
+        
+        if not is_valid:
+            logger.warning(
+                f"MSG91 email validation failed for booking {booking.id}, email {user_email}: {error_msg}"
+            )
+            return False, f"Email validation failed: {error_msg}"
+        elif error_msg and error_msg.startswith("insufficient_balance:"):
+            # 402 error - insufficient balance, but we still proceed with sending
+            logger.warning(
+                f"MSG91 email validation returned insufficient balance for booking {booking.id}, "
+                f"email {user_email}. Proceeding with email send anyway."
+            )
+            # Continue to send email despite validation balance issue
+    except Exception as e:
+        logger.error(
+            f"Error validating email for booking {booking.id}: {e}",
+            exc_info=True
+        )
+        return False, f"Email validation error: {str(e)}"
+    
+    # Step 2: Prepare email data
+    # Format booking date (confirmed_at or created_at as fallback)
+    booking_date = booking.confirmed_at or booking.created_at
+    booking_date_str = booking_date.strftime('%d-%m-%Y')
+    
+    # Calculate expiry date (30 days after booking confirmation)
+    expiry_date = booking_date + timedelta(days=30)
+    expiry_date_str = expiry_date.strftime('%d-%m-%Y')
+    
+    # Generate absolute receipt URL
+    receipt_url = booking.payment_receipt.url
+    
+    # If URL is already absolute (e.g., Azure blob storage), use it as-is
+    if receipt_url.startswith('http'):
+        pass  # Already absolute
+    else:
+        # Construct absolute URL from MEDIA_URL
+        if hasattr(settings, 'MEDIA_URL'):
+            # Check if MEDIA_URL is absolute (e.g., Azure blob storage)
+            if settings.MEDIA_URL.startswith('http'):
+                # MEDIA_URL is already absolute, just append the relative path
+                receipt_url = f"{settings.MEDIA_URL.rstrip('/')}/{receipt_url.lstrip('/')}"
+            else:
+                # MEDIA_URL is relative, need to construct full URL
+                # Try to get base URL from settings or use a default
+                base_url = getattr(settings, 'BASE_URL', None)
+                if not base_url:
+                    # Try to construct from ALLOWED_HOSTS or use localhost as fallback
+                    allowed_hosts = getattr(settings, 'ALLOWED_HOSTS', [])
+                    if allowed_hosts and allowed_hosts[0] != '*':
+                        protocol = 'https' if getattr(settings, 'USE_HTTPS', False) else 'http'
+                        base_url = f"{protocol}://{allowed_hosts[0]}"
+                    else:
+                        # Last resort: use localhost (for development)
+                        base_url = 'http://localhost:8000'
+                
+                # Construct full URL
+                receipt_url = f"{base_url.rstrip('/')}{settings.MEDIA_URL.rstrip('/')}/{receipt_url.lstrip('/')}"
+        else:
+            # No MEDIA_URL setting, use receipt URL as-is (might fail, but better than nothing)
+            logger.warning(f"MEDIA_URL not found in settings. Using receipt URL as-is: {receipt_url}")
+    
+    # Step 3: Send email via MSG91
+    try:
+        url = "https://control.msg91.com/api/v5/email/send"
+        headers = {
+            "Content-Type": "application/json",
+            "authkey": settings.MSG91_AUTH_KEY
+        }
+        
+        payload = {
+            "recipients": [
+                {
+                    "to": [
+                        {
+                            "email": user_email,
+                            "name": user_full_name
+                        }
+                    ],
+                    "variables": {
+                        "params": {
+                            "customer_name": user_full_name,
+                            "booking_date": booking_date_str,
+                            "expiry_date": expiry_date_str,
+                            "receipt_url": receipt_url
+                        }
+                    }
+                }
+            ],
+            "from": {
+                "email": "no-reply@zujainnovations.com"
+            },
+            "domain": "zujainnovations.com",
+            "template_id": "confirmation1"
+        }
+        
+        logger.info(f"MSG91 Booking Confirmation Email Request - Booking: {booking.id}, Email: {user_email}")
+        logger.debug(f"MSG91 Booking Confirmation Email Payload: {json.dumps(payload, indent=2)}")
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        logger.info(f"MSG91 Booking Confirmation Email Response - Booking: {booking.id}, Response: {json.dumps(data, indent=2)}")
+        
+        # Check if email was sent successfully
+        if data.get("status") == "success" and data.get("hasError") == False:
+            logger.info(f"Booking confirmation email sent successfully for booking {booking.id}, email {user_email}")
+            return True, None
+        else:
+            # Extract error message if available
+            errors = data.get("errors", {})
+            error_msg = str(errors) if errors else "Unknown error from MSG91"
+            logger.warning(
+                f"MSG91 booking confirmation email failed for booking {booking.id}, email {user_email}: {error_msg}"
+            )
+            return False, error_msg
+            
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error: {str(e)}"
+        logger.error(
+            f"MSG91 booking confirmation email network error for booking {booking.id}, email {user_email}: {error_msg}",
+            exc_info=True
+        )
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Unexpected error: {str(e)}"
+        logger.error(
+            f"MSG91 booking confirmation email unexpected error for booking {booking.id}, email {user_email}: {error_msg}",
+            exc_info=True
+        )
+        return False, error_msg
 

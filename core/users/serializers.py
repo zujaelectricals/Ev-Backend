@@ -107,6 +107,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
     referral_link = serializers.SerializerMethodField()
     booking_payment_receipt_url = serializers.SerializerMethodField()
+    vehicle_delivery_date = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -118,7 +119,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
                   'is_distributor_terms_and_conditions_accepted', 'distributor_application_status',
-                  'booking_payment_receipt_url')
+                  'booking_payment_receipt_url', 'vehicle_delivery_date')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer',
                            'referral_code', 'referred_by', 'date_joined')
     
@@ -241,6 +242,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
             return booking.payment_receipt.url
         
         return None
+    
+    def get_vehicle_delivery_date(self, obj):
+        """Get vehicle delivery date (30 days after complete payment when remaining balance = 0)"""
+        from core.booking.models import Booking
+        from datetime import timedelta
+        
+        # Find the most recent completed booking (where remaining_amount = 0)
+        booking = Booking.objects.filter(
+            user=obj,
+            status='completed',
+            remaining_amount=0,
+            completed_at__isnull=False
+        ).order_by('-completed_at').first()
+        
+        if booking and booking.completed_at:
+            # Calculate delivery date as 30 days after payment completion
+            delivery_date = booking.completed_at + timedelta(days=30)
+            return delivery_date.date()
+        
+        return "Your vehicle will be delivered 30 days after completion of payment."
     
     def validate_profile_picture(self, value):
         """Validate profile picture file"""

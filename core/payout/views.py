@@ -312,9 +312,10 @@ class PayoutViewSet(viewsets.ModelViewSet):
             try:
                 process_payout(payout)
             except Exception as e:
-                # If auto-processing fails, set status back to pending for manual review
-                payout.status = 'pending'
-                payout.save()
+                # process_payout() already marks payout as 'failed' on error
+                # Refresh from DB to get updated status
+                payout.refresh_from_db()
+                # Raise ValidationError to return HTTP 400 (not 201) on failure
                 raise serializers.ValidationError(f"Failed to auto-process payout: {str(e)}")
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])

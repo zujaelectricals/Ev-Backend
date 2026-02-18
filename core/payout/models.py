@@ -13,6 +13,7 @@ class Payout(models.Model):
         ('pending', 'Pending'),
         ('processing', 'Processing'),
         ('completed', 'Completed'),
+        ('failed', 'Failed'),
         ('rejected', 'Rejected'),
         ('cancelled', 'Cancelled'),
     ]

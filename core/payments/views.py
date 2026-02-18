@@ -26,6 +26,12 @@ from .serializers import (
     CreateRefundResponseSerializer,
 )
 from .utils.razorpay_client import get_razorpay_client
+from .utils.razorpayx_client import (
+    create_razorpayx_contact,
+    get_razorpayx_contact_by_email,
+    create_razorpayx_fund_account,
+    create_razorpayx_payout
+)
 from .utils.signature import verify_payment_signature, verify_webhook_signature
 
 logger = logging.getLogger(__name__)
@@ -1150,30 +1156,80 @@ def create_payout(request):
         account_holder_name = payout.account_holder_name
         bank_name = payout.bank_name
         
-        # Convert net_amount to paise
+        # Convert net_amount to paise (RazorpayX uses paise)
         amount_paise = int(float(payout.net_amount) * 100)
         
-        # Create Razorpay payout/transfer
-        client = get_razorpay_client()
+        # Get RazorpayX account number from settings (business account, not user account)
+        razorpayx_account_number = settings.RAZORPAYX_ACCOUNT_NUMBER
+        if not razorpayx_account_number:
+            return Response(
+                {'error': 'RAZORPAYX_ACCOUNT_NUMBER must be set in environment variables'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         
-        # Use Razorpay's fund account and payout API
-        # First, create a fund account (or use existing)
-        fund_account_data = {
-            'account_type': 'bank_account',
-            'bank_account': {
-                'name': account_holder_name,
-                'ifsc': ifsc_code,
-                'account_number': account_number,
-            }
-        }
-        
+        # Use RazorpayX client utilities (separate from Razorpay payments client)
         try:
-            # Create fund account
+            # Step 1: Create or get RazorpayX contact
+            # RazorpayX requires a contact before creating fund account
+            user = payout.user
+            contact_data = {
+                'name': account_holder_name,
+                'email': user.email if hasattr(user, 'email') and user.email else f'user_{user.id}@example.com',
+                'contact': getattr(user, 'phone', None) or getattr(user, 'mobile', None) or '9999999999',
+                'type': 'customer',
+            }
+            
             try:
-                fund_account = client.fund_account.create(fund_account_data)
+                # Try to create contact
+                contact_result = create_razorpayx_contact(contact_data)
+                contact_id = contact_result['id']
+                logger.info(f"Created RazorpayX contact {contact_id} for user {user.id}")
+            except Exception as contact_error:
+                # If contact already exists, try to find existing contact
+                error_str = str(contact_error).lower()
+                if 'already exists' in error_str or 'duplicate' in error_str or 'email' in error_str:
+                    try:
+                        existing_contact = get_razorpayx_contact_by_email(contact_data['email'])
+                        if existing_contact:
+                            contact_id = existing_contact['id']
+                            logger.info(f"Using existing RazorpayX contact {contact_id} for user {user.id}")
+                        else:
+                            return Response(
+                                {'error': 'Contact creation failed and no existing contact found'},
+                                status=status.HTTP_400_BAD_REQUEST
+                            )
+                    except Exception as find_error:
+                        logger.error(f"Failed to create or find RazorpayX contact: {contact_error}, find_error: {find_error}")
+                        return Response(
+                            {'error': f'Failed to create or find RazorpayX contact: {str(contact_error)}'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                else:
+                    logger.error(f"Failed to create RazorpayX contact: {contact_error}")
+                    return Response(
+                        {'error': f'Failed to create RazorpayX contact: {str(contact_error)}'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            
+            # Step 2: Create fund account with contact_id
+            fund_account_data = {
+                'contact_id': contact_id,
+                'account_type': 'bank_account',
+                'bank_account': {
+                    'name': account_holder_name,
+                    'ifsc': ifsc_code,
+                    'account_number': account_number,
+                }
+            }
+            
+            try:
+                # Create fund account using RazorpayX client
+                fund_account_result = create_razorpayx_fund_account(fund_account_data)
+                fund_account_id = fund_account_result['id']
+                logger.info(f"Created RazorpayX fund account {fund_account_id} for payout {payout_id}")
             except requests.exceptions.Timeout as timeout_error:
                 logger.error(
-                    f"Razorpay API timeout while creating fund account for payout {payout_id}: {timeout_error}",
+                    f"RazorpayX API timeout while creating fund account for payout {payout_id}: {timeout_error}",
                     exc_info=True
                 )
                 return Response(
@@ -1182,7 +1238,7 @@ def create_payout(request):
                 )
             except requests.exceptions.ConnectionError as conn_error:
                 logger.error(
-                    f"Razorpay API connection error while creating fund account for payout {payout_id}: {conn_error}",
+                    f"RazorpayX API connection error while creating fund account for payout {payout_id}: {conn_error}",
                     exc_info=True
                 )
                 return Response(
@@ -1191,7 +1247,7 @@ def create_payout(request):
                 )
             except requests.exceptions.RequestException as req_error:
                 logger.error(
-                    f"Razorpay API request error while creating fund account for payout {payout_id}: {req_error}",
+                    f"RazorpayX API request error while creating fund account for payout {payout_id}: {req_error}",
                     exc_info=True
                 )
                 return Response(
@@ -1199,29 +1255,44 @@ def create_payout(request):
                     status=status.HTTP_502_BAD_GATEWAY
                 )
             
-            fund_account_id = fund_account['id']
+            # Step 3: Create payout using RazorpayX client
+            # account_number is already validated above, so it's guaranteed to be set
+            # Get user details for contact
+            user = payout.user
+            user_email = user.email if hasattr(user, 'email') and user.email else f'user_{user.id}@example.com'
+            user_phone = getattr(user, 'phone', None) or getattr(user, 'mobile', None) or '9999999999'
             
-            # Create payout
             payout_data = {
-                'account_number': settings.RAZORPAY_ACCOUNT_NUMBER if hasattr(settings, 'RAZORPAY_ACCOUNT_NUMBER') else None,
-                'fund_account': {
-                    'id': fund_account_id,
-                    'account_type': 'bank_account',
-                },
+                'account_number': razorpayx_account_number,  # RazorpayX business account number (required)
                 'amount': amount_paise,
                 'currency': 'INR',
                 'mode': 'NEFT',  # or 'RTGS', 'IMPS' based on amount
                 'purpose': 'payout',
-                'queue_if_low_balance': True,
-                'reference_id': f'payout_{payout_id}',
-                'narration': f'Payout for user {payout.user.username}',
+                'narration': f'Payout{payout_id}'[:30],  # Max 30 chars, alphanumeric only (no spaces/special chars)
+                'fund_account': {
+                    'account_type': 'bank_account',
+                    'bank_account': {
+                        'name': account_holder_name,
+                        'ifsc': ifsc_code,
+                        'account_number': account_number,
+                    },
+                    'contact': {  # Contact must be an object with full details
+                        'name': account_holder_name,
+                        'email': user_email,
+                        'contact': user_phone,
+                        'type': 'customer',
+                        'reference_id': f'user_{user.id}',
+                    }
+                }
             }
             
             try:
-                razorpay_payout = client.payout.create(payout_data)
+                # Create payout using RazorpayX API
+                razorpay_payout_result = create_razorpayx_payout(payout_data)
+                razorpay_payout_id = razorpay_payout_result['id']
             except requests.exceptions.Timeout as timeout_error:
                 logger.error(
-                    f"Razorpay API timeout while creating payout for payout {payout_id}: {timeout_error}",
+                    f"RazorpayX API timeout while creating payout for payout {payout_id}: {timeout_error}",
                     exc_info=True
                 )
                 return Response(
@@ -1230,7 +1301,7 @@ def create_payout(request):
                 )
             except requests.exceptions.ConnectionError as conn_error:
                 logger.error(
-                    f"Razorpay API connection error while creating payout for payout {payout_id}: {conn_error}",
+                    f"RazorpayX API connection error while creating payout for payout {payout_id}: {conn_error}",
                     exc_info=True
                 )
                 return Response(
@@ -1239,7 +1310,7 @@ def create_payout(request):
                 )
             except requests.exceptions.RequestException as req_error:
                 logger.error(
-                    f"Razorpay API request error while creating payout for payout {payout_id}: {req_error}",
+                    f"RazorpayX API request error while creating payout for payout {payout_id}: {req_error}",
                     exc_info=True
                 )
                 return Response(
@@ -1247,16 +1318,14 @@ def create_payout(request):
                     status=status.HTTP_502_BAD_GATEWAY
                 )
             
-            razorpay_payout_id = razorpay_payout['id']
-            
-            # Update Payout model
+            # Update Payout model with RazorpayX payout ID
             with transaction.atomic():
                 payout.transaction_id = razorpay_payout_id
                 # Status will be updated by webhook or manual check
                 payout.save()
             
             logger.info(
-                f"Created Razorpay payout {razorpay_payout_id} for Payout {payout_id}, "
+                f"Created RazorpayX payout {razorpay_payout_id} for Payout {payout_id}, "
                 f"amount={amount_paise} paise"
             )
             
@@ -1269,17 +1338,13 @@ def create_payout(request):
             
             return Response(response_serializer.data, status=status.HTTP_201_CREATED)
         
-        except Exception as razorpay_error:
-            logger.error(f"Razorpay API error creating payout: {razorpay_error}", exc_info=True)
-            # Check if it's a fund account already exists error
-            if 'already exists' in str(razorpay_error).lower():
-                # Try to use existing fund account or create payout directly
-                # For simplicity, we'll return the error
-                return Response(
-                    {'error': f'Failed to create payout: {str(razorpay_error)}'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            raise
+        except Exception as razorpayx_error:
+            logger.error(f"RazorpayX API error creating payout: {razorpayx_error}", exc_info=True)
+            # Return error response (not HTTP 201) on failure
+            return Response(
+                {'error': f'Failed to create RazorpayX payout: {str(razorpayx_error)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
     
     except ValidationError:
         raise
