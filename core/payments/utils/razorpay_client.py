@@ -12,9 +12,10 @@ logger = logging.getLogger(__name__)
 _client = None
 
 # Timeout configuration for Razorpay API calls (in seconds)
-# Connect timeout: time to establish connection
+# Connect timeout: time to establish connection (increased for first connection)
 # Read timeout: time to wait for response after connection
-RAZORPAY_CONNECT_TIMEOUT = getattr(settings, 'RAZORPAY_CONNECT_TIMEOUT', 10)
+# Increased defaults to handle cold start scenarios (DNS resolution, SSL handshake)
+RAZORPAY_CONNECT_TIMEOUT = getattr(settings, 'RAZORPAY_CONNECT_TIMEOUT', 15)
 RAZORPAY_READ_TIMEOUT = getattr(settings, 'RAZORPAY_READ_TIMEOUT', 30)
 RAZORPAY_TIMEOUT = (RAZORPAY_CONNECT_TIMEOUT, RAZORPAY_READ_TIMEOUT)
 
@@ -64,6 +65,19 @@ def get_razorpay_client():
             )
         
         _client = razorpay.Client(auth=(key_id, key_secret))
+        
+        # Configure connection pooling and keep-alive for better performance
+        # This helps reuse connections and reduces latency on subsequent requests
+        if hasattr(_client, 'session') and _client.session:
+            # Enable connection pooling
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=10,  # Number of connection pools to cache
+                pool_maxsize=20,      # Maximum number of connections to save in the pool
+                max_retries=0,        # Disable retries (we handle retries in views)
+            )
+            _client.session.mount('https://', adapter)
+            _client.session.mount('http://', adapter)
+            logger.debug("Configured Razorpay client with connection pooling")
         
         # Configure timeouts on the underlying requests session
         # The requests library doesn't support default timeout on Session,
