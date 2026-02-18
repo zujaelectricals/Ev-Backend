@@ -9,11 +9,14 @@ from django.utils import timezone
 from django.db.models import Q
 from django.db import transaction
 from decimal import Decimal
+import logging
 from core.users.models import User
 from core.settings.models import PlatformSettings
 from core.inventory.utils import create_reservation
 from .models import Booking, Payment
 from .serializers import BookingSerializer, PaymentSerializer
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_company_referral_user(company_referral_code):
@@ -814,7 +817,11 @@ class PaymentViewSet(viewsets.ModelViewSet):
         # Trigger booking payment update if status changed to completed
         if old_status != 'completed' and new_status == 'completed':
             booking = payment.booking
+            booking_status_before = booking.status
             booking.make_payment(payment.amount)
+            
+            # Refresh booking to get updated status
+            booking.refresh_from_db()
             
             # Complete the stock reservation if it exists
             from core.inventory.utils import complete_reservation
@@ -828,6 +835,22 @@ class PaymentViewSet(viewsets.ModelViewSet):
             # Trigger Celery task for payment processing (direct user commission, etc.)
             from core.booking.tasks import payment_completed
             payment_completed.delay(booking.id, float(payment.amount))
+            
+            # Send booking confirmation email if booking just became active and receipt exists
+            if booking_status_before != 'active' and booking.status == 'active' and booking.payment_receipt:
+                try:
+                    from core.booking.tasks import send_booking_confirmation_email_task
+                    send_booking_confirmation_email_task.delay(booking.id)
+                    logger.info(
+                        f"Triggered booking confirmation email task for booking {booking.id} "
+                        f"via PaymentViewSet.update_status"
+                    )
+                except Exception as email_error:
+                    logger.error(
+                        f"Failed to trigger booking confirmation email for booking {booking.id}: {email_error}",
+                        exc_info=True
+                    )
+                    # Don't fail the payment update if email trigger fails
         
         serializer = PaymentSerializer(payment)
         return Response(serializer.data, status=status.HTTP_200_OK)

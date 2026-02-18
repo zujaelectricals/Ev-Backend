@@ -49,3 +49,49 @@ def payment_completed(booking_id, amount):
     except Exception as e:
         logger.error(f"Error in payment_completed task for booking {booking_id}: {e}")
 
+
+@shared_task
+def send_booking_confirmation_email_task(booking_id):
+    """
+    Celery task to send booking confirmation email via MSG91.
+    Triggered when booking status changes to 'active' after payment verification.
+    
+    Args:
+        booking_id: ID of the Booking instance
+    """
+    try:
+        booking = Booking.objects.select_related('user').get(id=booking_id)
+        
+        # Check if booking status is 'active' and has payment_receipt
+        if booking.status != 'active':
+            logger.warning(
+                f"Booking {booking_id} status is '{booking.status}', not 'active'. "
+                f"Skipping confirmation email."
+            )
+            return
+        
+        if not booking.payment_receipt:
+            logger.warning(
+                f"Booking {booking_id} has no payment receipt. Skipping confirmation email."
+            )
+            return
+        
+        # Send confirmation email
+        from core.booking.utils import send_booking_confirmation_email_msg91
+        success, error_msg = send_booking_confirmation_email_msg91(booking)
+        
+        if success:
+            logger.info(f"Booking confirmation email sent successfully for booking {booking_id}")
+        else:
+            logger.error(
+                f"Failed to send booking confirmation email for booking {booking_id}: {error_msg}"
+            )
+            
+    except Booking.DoesNotExist:
+        logger.error(f"Booking {booking_id} not found in send_booking_confirmation_email_task")
+    except Exception as e:
+        logger.error(
+            f"Error in send_booking_confirmation_email_task for booking {booking_id}: {e}",
+            exc_info=True
+        )
+

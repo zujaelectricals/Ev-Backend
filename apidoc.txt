@@ -531,6 +531,7 @@ Super User: EVAdmin && EVAdmin@123
      "booking_payment_receipt_url": "http://localhost:8000/media/booking_receipts/receipt_EV12345678_20260217_041830.pdf",  // URL to downloadable PDF payment receipt for the most recent active booking. null if no active booking with receipt exists
      "days_remaining_for_full_payment": 15,  // Number of days remaining to complete full payment (30-day window from booking creation). null if: no active booking, 30 days passed, or booking fully paid
      "active_buyer_warning": null,  // Warning message "You are not an active buyer" if user has any active booking with payment < activation_amount. null if user is an active buyer or has no active bookings
+     "vehicle_delivery_date": "2026-02-15",  // Vehicle delivery date (30 days after complete payment when remaining balance = 0). Returns date string (YYYY-MM-DD) if payment is complete, or message "Your vehicle will be delivered 30 days after completion of payment." if payment is not complete
      "date_joined": "2026-01-06T12:00:00Z"
    }
 
@@ -2109,11 +2110,11 @@ Super User: EVAdmin && EVAdmin@123
     - Note: Payout events are handled by separate endpoint: /api/payouts/webhook/
 
 
-35. CREATE RAZORPAY PAYOUT (Admin/Staff Only)
+35. CREATE RAZORPAYX PAYOUT (Admin/Staff Only)
     Method: POST
     URL: /api/payments/create-payout/
     Authentication: Required (Admin or Staff)
-    Description: Create Razorpay payout/transfer for an existing Payout model. Initiates bank transfer using Razorpay API.
+    Description: Create RazorpayX payout/transfer for an existing Payout model. Initiates bank transfer using RazorpayX API (separate from Razorpay payments API).
     
     Request Body:
     {
@@ -2130,7 +2131,19 @@ Super User: EVAdmin && EVAdmin@123
     
     Error Response (400):
     {
-      "error": "Payout status must be \"processing\" to create Razorpay transfer. Current status: pending"
+      "error": "Payout status must be \"processing\" to create RazorpayX transfer. Current status: pending"
+    }
+    OR
+    {
+      "error": "Failed to create RazorpayX contact: [error details]"
+    }
+    OR
+    {
+      "error": "Failed to create RazorpayX fund account: [error details]"
+    }
+    OR
+    {
+      "error": "Failed to create RazorpayX payout: [error details]"
     }
     
     Error Response (403):
@@ -2145,7 +2158,7 @@ Super User: EVAdmin && EVAdmin@123
     
     Error Response (500):
     {
-      "error": "Failed to create payout. Please try again."
+      "error": "RAZORPAYX_ACCOUNT_NUMBER must be set in environment variables"
     }
     
     Notes:
@@ -2153,9 +2166,15 @@ Super User: EVAdmin && EVAdmin@123
     - Payout must have status='processing' (set by /api/payout/{id}/process/)
     - Extracts bank details from Payout model:
       * account_number, ifsc_code, account_holder_name, bank_name
-    - Creates Razorpay fund account and initiates payout
-    - Updates Payout.transaction_id with Razorpay payout ID
+    - Uses RazorpayX API (separate credentials: RAZORPAYX_KEY_ID, RAZORPAYX_KEY_SECRET)
+    - Process flow:
+      1. Creates or finds RazorpayX contact (by email if contact already exists)
+      2. Creates RazorpayX fund account linked to contact
+      3. Creates RazorpayX payout using fund account and RAZORPAYX_ACCOUNT_NUMBER (business account)
+    - Updates Payout.transaction_id with RazorpayX payout ID (starts with 'pout_')
     - Amount is converted from rupees to paise automatically
+    - On failure: Returns HTTP 400 (not 201) with error details
+    - On success: Returns HTTP 201 with payout details
     - Payout status will be updated by webhook or manual verification
     - Use this endpoint after calling /api/payout/{id}/process/ to initiate actual bank transfer
 
@@ -4842,16 +4861,26 @@ Super User: EVAdmin && EVAdmin@123
     {
       "requested_amount": ["Insufficient wallet balance"]
     }
+    OR (if auto-processing fails)
+    {
+      "non_field_errors": ["Failed to auto-process payout: [RazorpayX API error details]"]
+    }
+    
+    Note: If auto-processing fails, payout status is set to "failed" and HTTP 400 is returned (not 201).
     
     Processing Behavior:
     - If payout_approval_needed (in /api/settings/) is false:
       * Payout is automatically processed upon creation
       * Wallet balance is deducted immediately
       * Status is set to "processing"
+      * RazorpayX payout API is automatically called (creates contact, fund account, and payout)
+      * On RazorpayX API failure: Status is set to "failed", rejection_reason is populated, HTTP 400 is returned
+      * On RazorpayX API success: transaction_id is populated with RazorpayX payout ID
     - If payout_approval_needed is true (default):
       * Payout status is set to "pending"
       * Admin must approve via POST /api/payout/{id}/process/
       * Wallet balance is deducted only after admin approval
+      * RazorpayX payout API is automatically called after approval
     
     TDS Calculation:
     - TDS percentage is read from Platform Settings (payout_tds_percentage field in /api/settings/)
@@ -4868,7 +4897,7 @@ Super User: EVAdmin && EVAdmin@123
     Description: List payout requests with comprehensive wallet summary, withdrawal history, and paginated payout list (user sees own, admin sees all)
     
     Query Parameters:
-    - status: Filter by status (pending, processing, completed, rejected, cancelled)
+    - status: Filter by status (pending, processing, completed, failed, rejected, cancelled)
     - date_from: Start date for filtering (YYYY-MM-DD format)
     - date_to: End date for filtering (YYYY-MM-DD format)
     - period: Preset period filter (last_7_days, last_30_days, last_90_days, last_year, all_time)
@@ -4975,9 +5004,21 @@ Super User: EVAdmin && EVAdmin@123
     3. Handles EMI auto-fill if enabled
     4. Deducts requested_amount from user's wallet
     5. Sets status to 'processing' and records processed_at timestamp
+    6. Automatically calls RazorpayX payout API:
+       - Creates or finds RazorpayX contact
+       - Creates RazorpayX fund account
+       - Creates RazorpayX payout
+       - Updates transaction_id with RazorpayX payout ID
     
-    NOTE: Payment gateway integration will be added here in the future.
-    After wallet deduction, the payment gateway API will be called to initiate transfer.
+    On RazorpayX API Failure:
+    - Payout status is set to 'failed'
+    - rejection_reason is populated with error details
+    - HTTP 400 is returned (not 200)
+    
+    On RazorpayX API Success:
+    - transaction_id is populated with RazorpayX payout ID (starts with 'pout_')
+    - Status remains 'processing' (webhook will update to 'completed')
+    - HTTP 200 is returned
     
     Request Body (optional):
     {
@@ -5004,6 +5045,11 @@ Super User: EVAdmin && EVAdmin@123
     {
       "error": "Payout cannot be processed. Current status: processing. Expected: pending"
     }
+    OR (if RazorpayX API fails)
+    {
+      "error": "RazorpayX API error for Payout {id}: [error details]"
+    }
+    Note: On RazorpayX API failure, payout status is set to 'failed' and HTTP 400 is returned.
     
     - 403 Forbidden: User is not admin
     {
@@ -5011,7 +5057,8 @@ Super User: EVAdmin && EVAdmin@123
     }
     
     Status Flow:
-    pending → processing (via this endpoint)
+    pending → processing (via this endpoint, if RazorpayX API succeeds)
+    pending → failed (via this endpoint, if RazorpayX API fails)
 
 
 61. COMPLETE PAYOUT (Admin Only)
@@ -5643,10 +5690,537 @@ Super User: EVAdmin && EVAdmin@123
 
 
 ================================================================================
+                    TERMS ACCEPTANCE APIs (ASA & PAYMENT)
+================================================================================
+
+89. GET ACTIVE ASA TERMS
+    Method: GET
+    URL: /api/compliance/terms/asa/active/
+    Authentication: Required
+    Description: Get the currently active ASA (Sales Channel Associate) Terms. Only one active version exists at a time.
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "version": "v1.0",
+      "title": "ASA Terms and Conditions",
+      "full_text": "Full terms content in HTML or Markdown...",
+      "effective_from": "2026-01-01T00:00:00Z",
+      "is_active": true,
+      "is_accepted": false,  // Whether current user has accepted
+      "user_acceptance": null  // Acceptance record if user has accepted
+    }
+    
+    Response (404 Not Found):
+    {
+      "error": "No active ASA Terms found."
+    }
+    
+    Notes:
+    - Only one active ASA Terms version can exist at a time
+    - Regular users see read-only version with acceptance status
+    - Admins can see full CRUD version
+
+
+90. LIST ASA TERMS (Admin/Staff Only)
+    Method: GET
+    URL: /api/compliance/terms/asa/
+    Authentication: Required (Admin/Staff for full list)
+    Description: List all ASA Terms. Regular users see only active terms, admins see all versions.
+    
+    Response (200 OK):
+    {
+      "count": 2,
+      "results": [
+        {
+          "id": 1,
+          "version": "v1.0",
+          "title": "ASA Terms and Conditions",
+          "full_text": "Full terms content...",
+          "effective_from": "2026-01-01T00:00:00Z",
+          "is_active": true,
+          "created_at": "2026-01-01T00:00:00Z"
+        }
+      ]
+    }
+    
+    Notes:
+    - Regular users only see active terms
+    - Admins see all versions (active and inactive)
+    - Results sorted by effective_from (newest first)
+
+
+91. CREATE ASA TERMS (Admin/Staff Only)
+    Method: POST
+    URL: /api/compliance/terms/asa/
+    Authentication: Required (Admin/Staff)
+    Description: Create a new ASA Terms version. Only one active version can exist at a time.
+    
+    Request Body:
+    {
+      "version": "v1.1",
+      "title": "ASA Terms and Conditions",
+      "full_text": "Full terms content in HTML or Markdown format...",
+      "effective_from": "2026-02-01T00:00:00Z",
+      "is_active": true
+    }
+    
+    Response (201 Created):
+    {
+      "id": 2,
+      "version": "v1.1",
+      "title": "ASA Terms and Conditions",
+      "full_text": "Full terms content...",
+      "effective_from": "2026-02-01T00:00:00Z",
+      "is_active": true,
+      "created_at": "2026-01-15T10:00:00Z"
+    }
+    
+    Error Response (400):
+    {
+      "non_field_errors": [
+        "Only one active ASA Terms version can exist at a time. Please deactivate the existing active version first."
+      ]
+    }
+    
+    Notes:
+    - When creating a new active version, existing active version must be deactivated first
+    - Old versions remain archived for audit purposes
+    - Users who accepted previous version will need to accept new version
+
+
+92. INITIATE ASA TERMS ACCEPTANCE
+    Method: POST
+    URL: /api/compliance/terms/asa/{id}/accept/initiate/
+    Authentication: Required
+    Description: Initiate ASA Terms acceptance. Validates all checkboxes are checked, then sends OTP to user's email and SMS (dual channel).
+    
+    Request Body:
+    {
+      "checkboxes_verified": true  // Must be true - confirms all checkboxes are checked
+    }
+    
+    Response (200 OK):
+    {
+      "message": "OTP sent successfully. Please verify OTP to complete acceptance.",
+      "otp_sent": {
+        "email": true,   // OTP sent to email
+        "sms": true      // OTP sent to SMS
+      },
+      "terms_id": 1,
+      "terms_version": "v1.0"
+    }
+    
+    Error Response (400):
+    {
+      "checkboxes_verified": ["All required checkboxes must be checked to initiate acceptance."]
+    }
+    OR
+    {
+      "error": "This ASA Terms version is not active and cannot be accepted."
+    }
+    OR
+    {
+      "error": "This ASA Terms version is not yet effective."
+    }
+    OR
+    {
+      "error": "You have already accepted ASA Terms version v1.0."
+    }
+    OR
+    {
+      "error": "User must have email or mobile number to accept ASA Terms."
+    }
+    
+    Notes:
+    - OTP is sent to BOTH email and SMS simultaneously (if user has both)
+    - User can verify OTP using either email or mobile OTP code
+    - Each ASA Terms version can only be accepted once per user
+    - Checkbox validation ensures user has checked all required terms
+
+
+93. VERIFY ASA TERMS ACCEPTANCE
+    Method: POST
+    URL: /api/compliance/terms/asa/{id}/accept/verify/
+    Authentication: Required
+    Description: Verify OTP and complete ASA Terms acceptance. Generates agreement PDF with SHA256 hash. Creates immutable acceptance record.
+    
+    Request Body:
+    {
+      "identifier": "user@example.com",  // User's email or mobile
+      "otp_code": "123456",
+      "otp_type": "email"  // "email" or "mobile"
+    }
+    
+    Response (201 Created):
+    {
+      "message": "ASA Terms accepted successfully.",
+      "acceptance": {
+        "id": 1,
+        "user": 1,
+        "user_username": "user@example.com",
+        "user_email": "user@example.com",
+        "terms_version": "v1.0",
+        "terms_title": "ASA Terms and Conditions",
+        "accepted_at": "2026-01-20T10:30:00Z",
+        "ip_address": "192.168.1.100",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
+        "otp_verified": true,
+        "otp_identifier": "user@example.com",
+        "agreement_pdf_url": "/media/compliance/asa_agreements/asa_agreement_1_1_20260120_103000.pdf",
+        "pdf_hash": "a1b2c3d4e5f6...",  // SHA256 hash for integrity verification
+        "created_at": "2026-01-20T10:30:00Z"
+      }
+    }
+    
+    Error Response (400):
+    {
+      "non_field_errors": ["Invalid or expired OTP"]
+    }
+    OR
+    {
+      "non_field_errors": ["You have already accepted ASA Terms version v1.0. Each version can only be accepted once."]
+    }
+    OR
+    {
+      "error": "OTP verification failed. User mismatch."
+    }
+    
+    Notes:
+    - OTP must be verified within 10 minutes (OTP expiry time)
+    - PDF is automatically generated on backend (never generated on frontend)
+    - PDF includes: company details, user details, agreement details, legal statement, SHA256 hash
+    - Acceptance record is immutable (cannot be modified after creation)
+    - IP address and user agent are automatically captured
+    - Timestamp is in IST (Indian Standard Time)
+
+
+94. DOWNLOAD ASA AGREEMENT PDF
+    Method: GET
+    URL: /api/compliance/terms/asa/agreement/{acceptance_id}/download/
+    Authentication: Required
+    Description: Download the ASA Agreement PDF document. Users can download their own agreements, admins can download any.
+    
+    Response (200 OK):
+    (PDF file download)
+    Content-Type: application/pdf
+    Content-Disposition: attachment; filename="asa_agreement_1.pdf"
+    
+    Error Response (403 Forbidden):
+    {
+      "error": "You do not have permission to access this agreement."
+    }
+    
+    Error Response (404 Not Found):
+    {
+      "error": "Agreement PDF not found."
+    }
+    OR
+    {
+      "error": "Acceptance record not found."
+    }
+    
+    Notes:
+    - Users can only download their own agreement PDFs
+    - Admins can download any agreement PDF
+    - PDF includes SHA256 hash for integrity verification
+    - PDF is legally binding document under Information Technology Act, 2000
+
+
+95. LIST ASA ACCEPTANCES
+    Method: GET
+    URL: /api/compliance/terms/asa/acceptances/
+    Authentication: Required
+    Description: List ASA Terms acceptance records. Users see their own acceptances, admins see all.
+    
+    Response (200 OK):
+    {
+      "count": 1,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "user_username": "user@example.com",
+          "user_email": "user@example.com",
+          "terms_version": "v1.0",
+          "terms_title": "ASA Terms and Conditions",
+          "accepted_at": "2026-01-20T10:30:00Z",
+          "ip_address": "192.168.1.100",
+          "user_agent": "Mozilla/5.0...",
+          "otp_verified": true,
+          "otp_identifier": "user@example.com",
+          "agreement_pdf_url": "/media/compliance/asa_agreements/asa_agreement_1_1_20260120_103000.pdf",
+          "pdf_hash": "a1b2c3d4e5f6...",
+          "created_at": "2026-01-20T10:30:00Z"
+        }
+      ]
+    }
+    
+    Notes:
+    - Regular users only see their own acceptance records
+    - Admins can see all acceptance records
+    - Records are sorted by accepted_at (newest first)
+
+
+96. GET ACTIVE PAYMENT TERMS
+    Method: GET
+    URL: /api/compliance/terms/payment/active/
+    Authentication: Required
+    Description: Get the currently active Payment Terms.
+    
+    Response (200 OK):
+    {
+      "id": 1,
+      "version": "v1.0",
+      "title": "Payment Terms and Conditions",
+      "full_text": "Full payment terms content in HTML or Markdown...",
+      "effective_from": "2026-01-01T00:00:00Z",
+      "is_active": true,
+      "is_accepted": false  // Whether current user has accepted
+    }
+    
+    Response (404 Not Found):
+    {
+      "error": "No active Payment Terms found."
+    }
+    
+    Notes:
+    - Multiple Payment Terms versions can exist for audit
+    - Regular users see read-only version with acceptance status
+    - Admins can see full CRUD version
+
+
+97. LIST PAYMENT TERMS (Admin/Staff Only)
+    Method: GET
+    URL: /api/compliance/terms/payment/
+    Authentication: Required (Admin/Staff for full list)
+    Description: List all Payment Terms. Regular users see only active terms, admins see all versions.
+    
+    Response (200 OK):
+    {
+      "count": 2,
+      "results": [
+        {
+          "id": 1,
+          "version": "v1.0",
+          "title": "Payment Terms and Conditions",
+          "full_text": "Full terms content...",
+          "effective_from": "2026-01-01T00:00:00Z",
+          "is_active": true,
+          "created_at": "2026-01-01T00:00:00Z"
+        }
+      ]
+    }
+    
+    Notes:
+    - Regular users only see active terms
+    - Admins see all versions (active and inactive)
+    - Results sorted by effective_from (newest first)
+
+
+98. CREATE PAYMENT TERMS (Admin/Staff Only)
+    Method: POST
+    URL: /api/compliance/terms/payment/
+    Authentication: Required (Admin/Staff)
+    Description: Create a new Payment Terms version.
+    
+    Request Body:
+    {
+      "version": "v1.1",
+      "title": "Payment Terms and Conditions",
+      "full_text": "Full payment terms content in HTML or Markdown format...",
+      "effective_from": "2026-02-01T00:00:00Z",
+      "is_active": true
+    }
+    
+    Response (201 Created):
+    {
+      "id": 2,
+      "version": "v1.1",
+      "title": "Payment Terms and Conditions",
+      "full_text": "Full terms content...",
+      "effective_from": "2026-02-01T00:00:00Z",
+      "is_active": true,
+      "created_at": "2026-01-15T10:00:00Z"
+    }
+    
+    Notes:
+    - Multiple active Payment Terms versions can exist
+    - Old versions remain archived for audit purposes
+    - Users can accept multiple times (linked to different transactions)
+
+
+99. INITIATE PAYMENT TERMS ACCEPTANCE
+    Method: POST
+    URL: /api/compliance/terms/payment/{id}/accept/initiate/
+    Authentication: Required
+    Description: Initiate Payment Terms acceptance. Sends OTP to user's email and SMS (dual channel).
+    
+    Request Body:
+    {}  // No body required
+    
+    Response (200 OK):
+    {
+      "message": "OTP sent successfully. Please verify OTP to complete acceptance.",
+      "otp_sent": {
+        "email": true,   // OTP sent to email
+        "sms": true      // OTP sent to SMS
+      },
+      "terms_id": 1,
+      "terms_version": "v1.0"
+    }
+    
+    Error Response (400):
+    {
+      "error": "This Payment Terms version is not active and cannot be accepted."
+    }
+    OR
+    {
+      "error": "This Payment Terms version is not yet effective."
+    }
+    OR
+    {
+      "error": "User must have email or mobile number to accept Payment Terms."
+    }
+    
+    Notes:
+    - OTP is sent to BOTH email and SMS simultaneously (if user has both)
+    - User can verify OTP using either email or mobile OTP code
+    - User can accept Payment Terms multiple times (linked to different transactions)
+    - After receiving OTP, call /accept/verify/ endpoint to complete acceptance
+
+
+100. VERIFY PAYMENT TERMS ACCEPTANCE
+    Method: POST
+    URL: /api/compliance/terms/payment/{id}/accept/verify/
+    Authentication: Required
+    Description: Verify OTP and complete Payment Terms acceptance. PDF generation is optional. Creates acceptance record.
+    
+    Request Body:
+    {
+      "identifier": "user@example.com",  // User's email or mobile
+      "otp_code": "123456",
+      "otp_type": "email",               // "email" or "mobile"
+      "generate_pdf": true              // Optional: whether to generate receipt PDF
+    }
+    
+    Response (201 Created):
+    {
+      "message": "Payment Terms accepted successfully.",
+      "acceptance": {
+        "id": 1,
+        "user": 1,
+        "user_username": "user@example.com",
+        "user_email": "user@example.com",
+        "payment_terms_version": "v1.0",
+        "terms_title": "Payment Terms and Conditions",
+        "accepted_at": "2026-01-20T10:30:00Z",
+        "ip_address": "192.168.1.100",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
+        "otp_verified": true,
+        "otp_identifier": "user@example.com",
+        "receipt_pdf_url": null,  // null if generate_pdf was false
+        "created_at": "2026-01-20T10:30:00Z"
+      }
+    }
+    
+    Error Response (400):
+    {
+      "non_field_errors": ["Invalid or expired OTP"]
+    }
+    OR
+    {
+      "error": "OTP verification failed. User mismatch."
+    }
+    OR
+    {
+      "error": "This Payment Terms version is not active and cannot be accepted."
+    }
+    OR
+    {
+      "error": "This Payment Terms version is not yet effective."
+    }
+    
+    Notes:
+    - OTP must be verified within 10 minutes (OTP expiry time)
+    - PDF generation is optional (set generate_pdf=true to generate receipt)
+    - User can accept Payment Terms multiple times
+    - IP address and user agent are automatically captured
+    - Timestamp is in IST (Indian Standard Time)
+
+
+101. DOWNLOAD PAYMENT TERMS RECEIPT PDF
+    Method: GET
+    URL: /api/compliance/terms/payment/receipt/{acceptance_id}/
+    Authentication: Required
+    Description: Download the Payment Terms Receipt PDF document (if generated). Users can download their own receipts, admins can download any.
+    
+    Response (200 OK):
+    (PDF file download)
+    Content-Type: application/pdf
+    Content-Disposition: attachment; filename="payment_terms_receipt_1.pdf"
+    
+    Error Response (403 Forbidden):
+    {
+      "error": "You do not have permission to access this receipt."
+    }
+    
+    Error Response (404 Not Found):
+    {
+      "error": "Receipt PDF not found."
+    }
+    OR
+    {
+      "error": "Acceptance record not found."
+    }
+    
+    Notes:
+    - Users can only download their own receipt PDFs
+    - Admins can download any receipt PDF
+    - Receipt PDF is optional (only generated if generate_pdf=true during acceptance)
+    - PDF is legally binding document under Information Technology Act, 2000
+
+
+102. LIST PAYMENT ACCEPTANCES
+    Method: GET
+    URL: /api/compliance/terms/payment/acceptances/
+    Authentication: Required
+    Description: List Payment Terms acceptance records. Users see their own acceptances, admins see all.
+    
+    Response (200 OK):
+    {
+      "count": 2,
+      "results": [
+        {
+          "id": 1,
+          "user": 1,
+          "user_username": "user@example.com",
+          "user_email": "user@example.com",
+          "payment_terms_version": "v1.0",
+          "terms_title": "Payment Terms and Conditions",
+          "accepted_at": "2026-01-20T10:30:00Z",
+          "ip_address": "192.168.1.100",
+          "user_agent": "Mozilla/5.0...",
+          "otp_verified": true,
+          "otp_identifier": "user@example.com",
+          "receipt_pdf_url": "/media/compliance/payment_receipts/payment_terms_receipt_1_1_20260120_103000.pdf",
+          "created_at": "2026-01-20T10:30:00Z"
+        }
+      ]
+    }
+    
+    Notes:
+    - Regular users only see their own acceptance records
+    - Admins can see all acceptance records
+    - Records are sorted by accepted_at (newest first)
+    - User can have multiple acceptance records for same version
+
+
+================================================================================
                             REPORTS APIs
 ================================================================================
 
-89. DASHBOARD STATISTICS
+102. DASHBOARD STATISTICS
     Method: GET
     URL: /api/reports/dashboard/
     Authentication: Required
@@ -5674,7 +6248,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-90. SALES REPORT (Admin Only)
+103. SALES REPORT (Admin Only)
     Method: GET
     URL: /api/reports/sales/
     Authentication: Required (Admin)
@@ -5692,7 +6266,7 @@ Super User: EVAdmin && EVAdmin@123
     }
 
 
-91. USER REPORT
+104. USER REPORT
     Method: GET
     URL: /api/reports/user/
     Authentication: Required
@@ -7476,5 +8050,5 @@ File upload endpoints accept multipart/form-data:
 ================================================================================
 
 Last Updated: 2026-02-13
-Version: 1.2.0
+Version: 1.3.0
 

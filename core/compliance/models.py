@@ -140,3 +140,148 @@ class TDSRecord(models.Model):
     def __str__(self):
         return f"TDS - {self.user.username} ({self.financial_year})"
 
+
+class AsaTerms(models.Model):
+    """
+    Master ASA (Sales Channel Associate) Terms table
+    Only ONE active version can exist at a time
+    """
+    version = models.CharField(max_length=20, help_text="Version identifier (e.g., 'v1.0', 'v1.1')")
+    title = models.CharField(max_length=200, help_text="Title of the ASA Terms")
+    full_text = models.TextField(help_text="Full text content of the terms (HTML or Markdown supported)")
+    effective_from = models.DateTimeField(default=timezone.now, help_text="When these terms become effective")
+    is_active = models.BooleanField(default=True, help_text="Whether this version is currently active")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'asa_terms'
+        verbose_name = 'ASA Terms'
+        verbose_name_plural = 'ASA Terms'
+        ordering = ['-effective_from', '-created_at']
+        indexes = [
+            models.Index(fields=['is_active', 'effective_from']),
+        ]
+        constraints = [
+            # Ensure only one active ASA terms version at a time
+            models.UniqueConstraint(
+                fields=['is_active'],
+                condition=models.Q(is_active=True),
+                name='unique_active_asa_terms'
+            )
+        ]
+    
+    def __str__(self):
+        return f"{self.title} (v{self.version})"
+
+
+class PaymentTerms(models.Model):
+    """
+    Master Payment Terms table
+    Multiple versions can exist for audit purposes
+    """
+    version = models.CharField(max_length=20, help_text="Version identifier (e.g., 'v1.0', 'v1.1')")
+    title = models.CharField(max_length=200, help_text="Title of the Payment Terms")
+    full_text = models.TextField(help_text="Full text content of the terms (HTML or Markdown supported)")
+    effective_from = models.DateTimeField(default=timezone.now, help_text="When these terms become effective")
+    is_active = models.BooleanField(default=True, help_text="Whether this version is currently active")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'payment_terms'
+        verbose_name = 'Payment Terms'
+        verbose_name_plural = 'Payment Terms'
+        ordering = ['-effective_from', '-created_at']
+        indexes = [
+            models.Index(fields=['is_active', 'effective_from']),
+        ]
+    
+    def __str__(self):
+        return f"{self.title} (v{self.version})"
+
+
+class UserAsaAcceptance(models.Model):
+    """
+    Records of users accepting ASA Terms with OTP verification
+    User can accept an ASA version ONLY ONCE
+    PDF is ALWAYS REQUIRED and generated on backend
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='asa_acceptances')
+    terms_version = models.CharField(max_length=20, help_text="ASA Terms version that was accepted")
+    
+    accepted_at = models.DateTimeField(auto_now_add=True, help_text="Server timestamp in IST when accepted")
+    ip_address = models.CharField(max_length=45, help_text="User's IP address at acceptance")
+    user_agent = models.TextField(blank=True, null=True, help_text="Browser/user agent info")
+    
+    otp_verified = models.BooleanField(default=False, help_text="Whether OTP was verified (always True for valid acceptances)")
+    otp_identifier = models.CharField(max_length=255, blank=True, help_text="Email/mobile used for OTP verification")
+    
+    agreement_pdf_url = models.FileField(
+        upload_to='compliance/asa_agreements/',
+        help_text="Generated agreement PDF (backend-generated only)"
+    )
+    pdf_hash = models.CharField(
+        max_length=64,
+        help_text="SHA256 hash of the PDF for integrity verification"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'user_asa_acceptances'
+        verbose_name = 'User ASA Acceptance'
+        verbose_name_plural = 'User ASA Acceptances'
+        ordering = ['-accepted_at']
+        indexes = [
+            models.Index(fields=['user', 'terms_version']),
+            models.Index(fields=['accepted_at']),
+            models.Index(fields=['ip_address']),
+        ]
+        # User can accept an ASA version ONLY ONCE
+        unique_together = [['user', 'terms_version']]
+    
+    def __str__(self):
+        return f"{self.user.username} - ASA Terms v{self.terms_version} ({self.accepted_at})"
+
+
+class UserPaymentAcceptance(models.Model):
+    """
+    Records of users accepting Payment Terms
+    OTP is required for FIRST acceptance or high-risk transactions
+    PDF is OPTIONAL but recommended for first acceptance
+    User can accept multiple times
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payment_acceptances')
+    payment_terms_version = models.CharField(max_length=20, help_text="Payment Terms version that was accepted")
+    
+    accepted_at = models.DateTimeField(auto_now_add=True, help_text="Server timestamp in IST when accepted")
+    ip_address = models.CharField(max_length=45, help_text="User's IP address at acceptance")
+    user_agent = models.TextField(blank=True, null=True, help_text="Browser/user agent info")
+    
+    otp_verified = models.BooleanField(default=False, help_text="Whether OTP was verified")
+    otp_identifier = models.CharField(max_length=255, blank=True, help_text="Email/mobile used for OTP verification")
+    
+    receipt_pdf_url = models.FileField(
+        upload_to='compliance/payment_receipts/',
+        null=True,
+        blank=True,
+        help_text="Optional receipt/consent PDF (backend-generated only)"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'user_payment_acceptances'
+        verbose_name = 'User Payment Acceptance'
+        verbose_name_plural = 'User Payment Acceptances'
+        ordering = ['-accepted_at']
+        indexes = [
+            models.Index(fields=['user', 'payment_terms_version']),
+            models.Index(fields=['accepted_at']),
+            models.Index(fields=['ip_address']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.username} - Payment Terms v{self.payment_terms_version} ({self.accepted_at})"
+
