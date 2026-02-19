@@ -308,6 +308,17 @@ class SignupSerializer(serializers.Serializer):
         if User.objects.filter(mobile=value).exists():
             raise serializers.ValidationError("Mobile number already registered")
         return value
+
+    def validate_referral_code(self, value):
+        """Ensure referral code is valid and normalize value for later use."""
+        referral_code = (value or "").strip()
+        if not referral_code:
+            raise serializers.ValidationError("Referral code is required")
+
+        if not User.objects.filter(referral_code__iexact=referral_code).exists():
+            raise serializers.ValidationError("Invalid referral code")
+
+        return referral_code.upper()
     
     def validate(self, attrs):
         """Validate mobile number format"""
@@ -471,6 +482,16 @@ class VerifySignupOTPSerializer(serializers.Serializer):
                 'mobile': 'This mobile number is already registered with another account.'
             })
         
+        # Resolve and validate referral before creating the user.
+        referral_code = (signup_data.get('referral_code') or '').strip()
+        if not referral_code:
+            raise serializers.ValidationError({'referral_code': 'Referral code is required'})
+
+        try:
+            referrer = User.objects.get(referral_code__iexact=referral_code)
+        except User.DoesNotExist:
+            raise serializers.ValidationError({'referral_code': 'Invalid referral code'})
+
         # Create new user (email and mobile are both unique at this point)
         username = email or mobile
         user = User.objects.create(
@@ -487,19 +508,10 @@ class VerifySignupOTPSerializer(serializers.Serializer):
             state=signup_data['state'],
             pincode=signup_data['pincode'],
             country=signup_data.get('country', 'India'),
-            role='user'
+            role='user',
+            referred_by=referrer
         )
-        
-        # Handle referral (only if user doesn't have a referrer)
-        referral_code = signup_data.get('referral_code')
-        if referral_code and not user.referred_by:
-            try:
-                referrer = User.objects.get(referral_code=referral_code)
-                user.referred_by = referrer
-                user.save(update_fields=['referred_by'])
-            except User.DoesNotExist:
-                pass
-        
+
         # Generate referral code if user doesn't have one
         if not user.referral_code:
             generate_referral_code(user)
