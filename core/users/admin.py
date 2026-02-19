@@ -6,7 +6,10 @@ from .models import User, KYC, Nominee, DistributorApplication
 
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
-    list_display = ('username', 'email', 'mobile', 'role', 'is_distributor', 'is_active_buyer', 'is_staff', 'date_joined')
+    list_display = (
+        'username', 'full_name', 'email', 'mobile', 'role',
+        'referred_by_value', 'is_distributor', 'is_active_buyer', 'is_staff', 'date_joined'
+    )
     list_filter = ('role', 'is_distributor', 'is_active_buyer', 'is_staff', 'is_superuser')
     search_fields = ('username', 'email', 'mobile', 'first_name', 'last_name')
     ordering = ('-date_joined',)
@@ -18,6 +21,14 @@ class UserAdmin(BaseUserAdmin):
         ('Referral', {'fields': ('referral_code', 'referred_by')}),
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
     )
+
+    @admin.display(description='Full name')
+    def full_name(self, obj):
+        return obj.get_full_name()
+
+    @admin.display(description='Referred by', ordering='referred_by__username')
+    def referred_by_value(self, obj):
+        return obj.referred_by or '-'
 
 
 @admin.register(KYC)
