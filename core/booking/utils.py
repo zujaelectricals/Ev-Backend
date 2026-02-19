@@ -16,6 +16,7 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Sum
 from core.settings.models import PlatformSettings
 from core.wallet.models import WalletTransaction
 import os
@@ -449,31 +450,7 @@ def send_booking_confirmation_email_msg91(booking):
     user_email = booking.user.email
     user_full_name = booking.user.get_full_name() or booking.user.username
     
-    # Step 1: Validate email using MSG91
-    try:
-        from core.auth.utils import validate_email_msg91
-        is_valid, error_msg = validate_email_msg91(user_email)
-        
-        if not is_valid:
-            logger.warning(
-                f"MSG91 email validation failed for booking {booking.id}, email {user_email}: {error_msg}"
-            )
-            return False, f"Email validation failed: {error_msg}"
-        elif error_msg and error_msg.startswith("insufficient_balance:"):
-            # 402 error - insufficient balance, but we still proceed with sending
-            logger.warning(
-                f"MSG91 email validation returned insufficient balance for booking {booking.id}, "
-                f"email {user_email}. Proceeding with email send anyway."
-            )
-            # Continue to send email despite validation balance issue
-    except Exception as e:
-        logger.error(
-            f"Error validating email for booking {booking.id}: {e}",
-            exc_info=True
-        )
-        return False, f"Email validation error: {str(e)}"
-    
-    # Step 2: Prepare email data
+    # Prepare email data
     # Format booking date (confirmed_at or created_at as fallback)
     booking_date = booking.confirmed_at or booking.created_at
     booking_date_str = booking_date.strftime('%d-%m-%Y')
@@ -515,7 +492,7 @@ def send_booking_confirmation_email_msg91(booking):
             # No MEDIA_URL setting, use receipt URL as-is (might fail, but better than nothing)
             logger.warning(f"MEDIA_URL not found in settings. Using receipt URL as-is: {receipt_url}")
     
-    # Step 3: Send email via MSG91
+    # Send email via MSG91
     try:
         url = "https://control.msg91.com/api/v5/email/send"
         headers = {
@@ -589,9 +566,9 @@ def send_booking_confirmation_email_msg91(booking):
 
 def process_active_buyer_bonus(user, booking):
     """
-    Process active buyer bonus: Add ₹5000 to user's Total paid when they become an active buyer
-    within 30 days of signup OR when their first payment is >= activation_amount.
+    Process active buyer bonus: Add ₹5000 to user's Total paid when they become an active buyer.
     
+    This bonus is given to all Active buyers who have paid >= activation_amount.
     This bonus reduces the remaining balance on the booking.
     
     Args:
@@ -601,7 +578,7 @@ def process_active_buyer_bonus(user, booking):
     Returns:
         bool: True if bonus was applied, False otherwise (already given, not qualified, or error)
     """
-    from core.booking.models import Booking, Payment
+    from core.booking.models import Booking
     
     try:
         # Get platform settings
@@ -618,35 +595,20 @@ def process_active_buyer_bonus(user, booking):
             )
             return False
         
-        # Check if user qualifies for bonus
-        # Condition 1: User's total paid >= activation_amount (already checked in update_active_buyer_status)
-        # Condition 2: User signed up within 30 days OR first payment >= activation_amount
-        
-        # Check if user signed up within 30 days
-        days_since_signup = (timezone.now() - user.date_joined).days
-        within_30_days = days_since_signup <= 30
-        
-        # Check if this is the first payment >= activation_amount
-        # Get all completed payments for this user, ordered by date
-        all_payments = Payment.objects.filter(
-            user=user,
+        # Verify user is an Active Buyer (actual payments >= activation_amount)
+        # Check ACTUAL PAYMENTS, not bookings.total_paid (which might include bonus)
+        # This prevents circular dependency
+        from core.booking.models import Payment
+        actual_payments_total = Payment.objects.filter(
+            booking__user=user,
+            booking__status__in=['active', 'completed'],
             status='completed'
-        ).order_by('payment_date', 'id')
+        ).aggregate(total=Sum('amount'))['total'] or 0
         
-        # Check if the first payment was >= activation_amount
-        first_payment_qualifies = False
-        if all_payments.exists():
-            first_payment = all_payments.first()
-            if first_payment.amount >= activation_amount:
-                first_payment_qualifies = True
-        
-        # User qualifies if: within 30 days OR first payment >= activation_amount
-        qualifies = within_30_days or first_payment_qualifies
-        
-        if not qualifies:
+        if actual_payments_total < activation_amount:
             logger.info(
                 f"User {user.username} does not qualify for active buyer bonus. "
-                f"Days since signup: {days_since_signup}, First payment qualifies: {first_payment_qualifies}"
+                f"Actual payments: {actual_payments_total}, Activation amount: {activation_amount}"
             )
             return False
         

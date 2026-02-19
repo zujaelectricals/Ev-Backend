@@ -1589,10 +1589,11 @@ Super User: EVAdmin && EVAdmin@123
     
     Note on Binary Tree Placement:
     - Users are NOT automatically placed in the binary tree when booking is created
-    - IMPORTANT: Placement APIs can ONLY be called AFTER user has at least one successful payment
-    - Referrer must place users AFTER payment completion, either:
+    - IMPORTANT: Placement APIs can be called AFTER user creates account (no payment required for placement)
+    - Referrer can place users immediately after signup, either:
       1. Automatically via /api/binary/nodes/auto_place_pending/ (uses left-priority algorithm)
       2. Manually via /api/binary/nodes/place_user/ (choose specific position)
+    - However, commission is ONLY paid when user becomes active buyer (total_paid >= activation_amount)
     - Placement Rules (when using auto_place_pending):
       1. First 2 direct referrals: 1st user → LEFT, 2nd user → RIGHT
       2. From 3rd referral onward: Follow LEFT-side chain (traverse left children to find left-most available position)
@@ -1606,11 +1607,12 @@ Super User: EVAdmin && EVAdmin@123
     - Parents can swap or move their direct children via /api/binary/nodes/swap_direct_children/ and /api/binary/nodes/move_user/
     
     Note on Direct User Commission:
-    - Commission is paid when user is placed in binary tree (via placement APIs)
-    - Commission is ONLY paid if user has at least one successful payment AND payment meets activation_amount threshold
+    - Commission is ONLY paid when user becomes active buyer (total_paid >= activation_amount threshold)
     - Activation Amount Check: User's booking must have total_paid >= activation_amount (configurable in Platform Settings)
-    - If payment < activation_amount: No commission is paid, but user is still counted in descendants calculation
-    - Commission timing: Paid when placement happens, regardless of when payment was completed
+    - If user is placed in tree before reaching activation_amount: No commission is paid at placement time
+    - When user's payment reaches activation_amount: Commissions are automatically credited to all eligible ancestors
+    - Commission timing: Paid retroactively when user reaches activation_amount, not at placement time
+    - If payment < activation_amount: No commission is paid, but user is still placed in tree and counted in descendants
     - When User A is added as a direct child of User B, User B receives direct user commission (configurable, default: ₹1000)
     - Direct user commission is paid to ALL eligible ancestors (not just direct parent) if they have < 3 total descendants
     - After 3 total descendants are added, binary commission activates automatically
@@ -7949,7 +7951,7 @@ Standard Error Format:
 12. Distributor Requirement: Only approved distributors can earn from binary pairs, direct user commissions, and referral bonuses
 13. Distributor Eligibility: Users can apply for distributor program without KYC approval. However, KYC approval is required for payout requests.
 14. Distributor Application: Each user can submit only one distributor application. Approval behavior is controlled by distributor_application_auto_approve setting in Platform Settings. If true (default): application is automatically approved upon creation and user becomes distributor immediately. If false: application remains pending and requires admin/staff approval via update-status endpoint. Admin/staff can reject applications regardless of setting.
-15. Binary Tree Placement: Users are NOT automatically placed in binary tree during booking creation. Placement APIs can ONLY be called AFTER user has successful payment. Referrers must place users AFTER payment via /api/binary/nodes/auto_place_pending/ (automatic) or /api/binary/nodes/place_user/ (manual). Commission is paid when placement happens (regardless of when payment was completed). Auto-placement uses left-priority algorithm: 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain. Referral-based override: If using specific parent's code, place in that parent's tree. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side). Parents can choose side for direct referrals and swap/move direct children via API endpoints.
+15. Binary Tree Placement: Users are NOT automatically placed in binary tree during booking creation. Placement APIs can be called AFTER user creates account (no payment required). Referrers can place users immediately after signup via /api/binary/nodes/auto_place_pending/ (automatic) or /api/binary/nodes/place_user/ (manual). Commission is ONLY paid when user becomes active buyer (total_paid >= activation_amount). When user reaches activation_amount, commissions are automatically credited to all eligible ancestors retroactively. Auto-placement uses left-priority algorithm: 1st user → LEFT, 2nd user → RIGHT, 3rd+ → follow LEFT chain. Referral-based override: If using specific parent's code, place in that parent's tree. Default placement side is configurable via Platform Settings (binary_tree_default_placement_side). Parents can choose side for direct referrals and swap/move direct children via API endpoints.
 16. Manual Tree Placement: Tree owners can manually place/move users in their tree via placement APIs; only users who used referrer's code can be placed
 17. Commission Configuration: All binary commission amounts, thresholds, TDS settings, and daily limits are configurable via Platform Settings API
 18. Referral Commission Timing: Commission is only granted for bookings created AFTER the referrer becomes a distributor (no retroactive commissions)

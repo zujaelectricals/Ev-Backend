@@ -22,4 +22,3 @@ router.register(r'terms/payment/acceptances', UserPaymentAcceptanceViewSet, base
 urlpatterns = [
     path('', include(router.urls)),
 ]
-

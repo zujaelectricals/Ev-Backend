@@ -90,13 +90,17 @@ class User(AbstractBaseUser, PermissionsMixin):
         platform_settings = PlatformSettings.get_settings()
         activation_amount = platform_settings.activation_amount
         
-        total_paid = Booking.objects.filter(
-            user=self,
-            status__in=['active', 'completed']
-        ).aggregate(total=models.Sum('total_paid'))['total'] or 0
+        # Calculate total_paid from ACTUAL PAYMENTS, not from bookings.total_paid
+        # This prevents circular dependency where bonus makes user qualify for bonus
+        from core.booking.models import Payment
+        actual_payments_total = Payment.objects.filter(
+            booking__user=self,
+            booking__status__in=['active', 'completed'],
+            status='completed'
+        ).aggregate(total=models.Sum('amount'))['total'] or 0
         
         was_active = self.is_active_buyer
-        self.is_active_buyer = total_paid >= activation_amount
+        self.is_active_buyer = actual_payments_total >= activation_amount
         
         if not was_active and self.is_active_buyer:
             # User just became Active Buyer - trigger any necessary actions
@@ -127,6 +131,23 @@ class User(AbstractBaseUser, PermissionsMixin):
                         f"Error processing active buyer bonus for user {self.username}: {e}",
                         exc_info=True
                     )
+            
+            # Process retroactive commissions for ancestors
+            # This ensures commissions are paid when a child later reaches activation_amount
+            # even if they were placed in the tree before reaching the threshold
+            try:
+                from core.binary.utils import process_retroactive_commissions
+                commission_result = process_retroactive_commissions(self)
+                if commission_result:
+                    logger.info(
+                        f"Retroactive commissions processed for user {self.username} "
+                        f"after becoming Active Buyer. Commissions credited to eligible ancestors."
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Error processing retroactive commissions for user {self.username}: {e}",
+                    exc_info=True
+                )
         
         self.save(update_fields=['is_active_buyer'])
         return self.is_active_buyer

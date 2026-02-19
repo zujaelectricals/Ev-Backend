@@ -138,15 +138,15 @@ def has_successful_payment(user):
 def has_activation_payment(user, booking=None):
     """
     Check if user has at least one successful payment that meets activation_amount threshold.
-    If booking is provided, checks if that specific booking has payment >= activation_amount.
-    Otherwise, checks if user has any booking with payment >= activation_amount.
+    Checks ACTUAL PAYMENTS, not bookings.total_paid (which might include bonuses).
+    This prevents circular dependency where bonus makes user qualify for commission.
     
     Args:
         user: User to check
         booking: Optional Booking instance to check specific booking
     
     Returns:
-        bool: True if user has payment >= activation_amount, False otherwise
+        bool: True if user has actual payments >= activation_amount, False otherwise
     """
     from core.booking.models import Payment, Booking
     from core.settings.models import PlatformSettings
@@ -158,15 +158,24 @@ def has_activation_payment(user, booking=None):
     if activation_amount == 0:
         return has_successful_payment(user)
     
+    from django.db.models import Sum
+    
     if booking:
-        # Check specific booking's total_paid
-        return booking.total_paid >= activation_amount
+        # Check actual payments for this specific booking (exclude bonuses)
+        actual_payments = Payment.objects.filter(
+            booking=booking,
+            status='completed'
+        ).aggregate(total=Sum('amount'))['total'] or 0
+        return actual_payments >= activation_amount
     else:
-        # Check if user has any booking with total_paid >= activation_amount
-        return Booking.objects.filter(
-            user=user,
-            total_paid__gte=activation_amount
-        ).exists()
+        # Check if user has any booking with actual payments >= activation_amount
+        # Sum actual payments across all bookings
+        actual_payments_total = Payment.objects.filter(
+            booking__user=user,
+            booking__status__in=['active', 'completed'],
+            status='completed'
+        ).aggregate(total=Sum('amount'))['total'] or 0
+        return actual_payments_total >= activation_amount
 
 
 def process_direct_user_commission(referrer, new_user):
@@ -425,6 +434,10 @@ def process_retroactive_commissions(user):
     2. Binary activation check (if user now qualifies ancestor for activation)
     3. User becomes eligible for future pairing (if ancestor already activated)
     
+    IMPORTANT: This function is called when a user's total_paid reaches activation_amount threshold.
+    It processes commissions for ALL ancestors who are eligible, even if the user was placed
+    in the tree before reaching activation_amount.
+    
     Args:
         user: User who just became an active buyer (has activation payment)
     
@@ -434,8 +447,12 @@ def process_retroactive_commissions(user):
     import logging
     logger = logging.getLogger(__name__)
     
-    # Check if user now has activation payment
+    # Check if user now has activation payment (total_paid >= activation_amount)
     if not has_activation_payment(user):
+        logger.debug(
+            f"User {user.username} does not have activation payment yet. "
+            f"Skipping retroactive commission processing."
+        )
         return False
     
     # Get user's binary node if exists
@@ -443,12 +460,10 @@ def process_retroactive_commissions(user):
         user_node = BinaryNode.objects.get(user=user)
     except BinaryNode.DoesNotExist:
         # User not in binary tree yet, nothing to process
-        return False
-    
-    # Get all ancestors
-    ancestors = get_all_ancestors(user_node)
-    if not ancestors:
-        # No ancestors, nothing to process
+        logger.debug(
+            f"User {user.username} is not in binary tree yet. "
+            f"Skipping retroactive commission processing."
+        )
         return False
     
     # Get referrer (the user who referred this user)
@@ -462,101 +477,27 @@ def process_retroactive_commissions(user):
     
     if not referrer:
         # No referrer found, nothing to process
+        logger.debug(
+            f"User {user.username} has no referrer. "
+            f"Skipping retroactive commission processing."
+        )
         return False
     
-    commissions_processed = False
+    # Process direct user commission for all eligible ancestors
+    # This function handles:
+    # 1. Paying commission to all ancestors who have < activation_count descendants
+    # 2. Activating binary commission for ancestors who reach activation_count
+    # 3. Skipping ancestors who already have binary_commission_activated
+    commission_paid = process_direct_user_commission(referrer, user)
     
-    # Process for each ancestor
-    with transaction.atomic():
-        for ancestor_node in ancestors:
-            # Lock the row to prevent concurrent modifications
-            locked_node = BinaryNode.objects.select_for_update().get(id=ancestor_node.id)
-            ancestor_user = locked_node.user
-            
-            # If binary commission already activated, user becomes eligible for pairing
-            # but no direct commission is paid (already activated)
-            if locked_node.binary_commission_activated:
-                logger.info(
-                    f"User {user.username} became active buyer. "
-                    f"Ancestor {ancestor_user.username} already has binary commission activated. "
-                    f"User is now eligible for future pairing."
-                )
-                # User is now eligible for pairing, but no commission to pay
-                continue
-            
-            # Binary commission not activated yet - check if we should pay direct commission
-            # and/or trigger activation
-            
-            # Check if commission was already paid for this user
-            from core.wallet.models import WalletTransaction
-            commission_already_paid = WalletTransaction.objects.filter(
-                user=ancestor_user,
-                transaction_type='DIRECT_USER_COMMISSION',
-                reference_id=user.id,
-                reference_type='user'
-            ).exists()
-            
-            if commission_already_paid:
-                # Commission already paid, but check if activation should trigger now
-                logger.info(
-                    f"Commission already paid for user {user.username} by ancestor {ancestor_user.username}. "
-                    f"Checking if binary activation should trigger..."
-                )
-            else:
-                # Commission not paid yet - try to pay it now
-                # Check if ancestor still has < activation_count active descendants
-                platform_settings = PlatformSettings.get_settings()
-                activation_count = platform_settings.binary_commission_activation_count
-                active_descendants = get_active_descendants_count(locked_node)
-                
-                # Count before this user (if user has activation payment, they're included in active_descendants)
-                count_before = active_descendants - 1 if has_activation_payment(user) else active_descendants
-                
-                if count_before < activation_count:
-                    # Still before activation, can pay commission
-                    commission_paid = process_direct_user_commission(referrer, user)
-                    if commission_paid:
-                        commissions_processed = True
-                        logger.info(
-                            f"Retroactive commission paid for user {user.username} to ancestor {ancestor_user.username}"
-                        )
-                else:
-                    logger.info(
-                        f"Cannot pay retroactive commission for user {user.username} to ancestor {ancestor_user.username}: "
-                        f"Ancestor already has {count_before} active descendants (activation threshold: {activation_count})"
-                    )
-            
-            # Check if binary activation should now trigger
-            # Recalculate active descendants count (user now has activation payment)
-            active_descendants = get_active_descendants_count(locked_node)
-            platform_settings = PlatformSettings.get_settings()
-            activation_count = platform_settings.binary_commission_activation_count
-            
-            if active_descendants >= activation_count and not locked_node.binary_commission_activated:
-                # Activate binary commission
-                locked_node.binary_commission_activated = True
-                locked_node.activation_timestamp = user_node.created_at
-                locked_node.save(update_fields=['binary_commission_activated', 'activation_timestamp'])
-                
-                logger.info(
-                    f"Binary commission activated for {ancestor_user.username} "
-                    f"due to user {user.username} becoming active buyer. "
-                    f"Active descendants: {active_descendants}"
-                )
-                
-                # Process initial bonus payment
-                try:
-                    process_binary_initial_bonus(ancestor_user)
-                except Exception as e:
-                    logger.error(
-                        f"Error processing initial bonus for user {ancestor_user.username} "
-                        f"after retroactive activation: {e}",
-                        exc_info=True
-                    )
-                
-                commissions_processed = True
+    if commission_paid:
+        logger.info(
+            f"Retroactive commissions processed for user {user.username} "
+            f"after reaching activation_amount threshold. "
+            f"Commissions credited to eligible ancestors."
+        )
     
-    return commissions_processed
+    return commission_paid
 
 
 def has_active_booking_balance(user):

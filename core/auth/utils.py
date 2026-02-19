@@ -29,13 +29,6 @@ def send_email_otp(email, otp_code=None, user=None, user_name=None):
     user: Optional User object to extract name for MSG91 template
     user_name: Optional user name string (used if user is not provided)
     """
-    # Validate email using MSG91 first
-    # Note: 402 (insufficient balance) errors are allowed - validation returns True
-    # to allow OTP sending to proceed even when validation service has billing issues
-    is_valid, error_msg = validate_email_msg91(email)
-    if not is_valid:
-        raise ValueError(error_msg or "Invalid email address")
-    
     if otp_code is None:
         otp_code = generate_otp(settings.OTP_LENGTH)
     
@@ -370,107 +363,6 @@ def verify_otp(identifier, otp_code, otp_type):
         return True
     
     return False
-
-
-def validate_email_msg91(email):
-    """
-    Validate email using MSG91 API
-    Returns (is_valid, error_message)
-    """
-    if not settings.MSG91_AUTH_KEY:
-        # If MSG91 is not configured, skip validation
-        return True, None
-    
-    try:
-        url = "https://control.msg91.com/api/v5/email/validate"
-        headers = {
-            "Content-Type": "application/json",
-            "authkey": settings.MSG91_AUTH_KEY
-        }
-        payload = {
-            "email": email
-        }
-        
-        logger.info(f"MSG91 Email Validation Request - Email: {email}")
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        
-        # Parse response data even if status code indicates error
-        try:
-            data = response.json()
-        except (ValueError, json.JSONDecodeError):
-            # If response is not JSON, create a basic error structure
-            data = {
-                "status": "fail",
-                "hasError": True,
-                "errors": [f"HTTP {response.status_code}: {response.text[:200]}"]
-            }
-        
-        # Log the response
-        logger.info(f"MSG91 Email Validation Response - Email: {email}, Status: {response.status_code}, Response: {json.dumps(data, indent=2)}")
-        
-        # Handle HTTP errors (like 402 - insufficient balance)
-        if not response.ok:
-            # Extract error message from response
-            errors = data.get("errors", [])
-            if isinstance(errors, list) and len(errors) > 0:
-                error_msg = errors[0] if isinstance(errors[0], str) else str(errors[0])
-            elif isinstance(errors, dict):
-                error_msg = str(errors)
-            else:
-                error_msg = f"HTTP {response.status_code}: Validation request failed"
-            
-            # Special handling for 402 - insufficient balance
-            # For 402, we still return True to allow email sending to proceed
-            # (validation balance issue shouldn't block email sending)
-            if response.status_code == 402:
-                logger.warning(
-                    f"MSG91 email validation returned 402 (insufficient balance) - Email: {email}, "
-                    f"Status: {response.status_code}, Error: {error_msg}. "
-                    f"Proceeding with email send anyway."
-                )
-                # Return True with a warning message - allows email to be sent
-                return True, f"insufficient_balance: {error_msg}"
-            else:
-                logger.warning(
-                    f"MSG91 email validation HTTP error - Email: {email}, "
-                    f"Status: {response.status_code}, Error: {error_msg}"
-                )
-            
-            return False, error_msg
-        
-        # Check if validation was successful
-        if data.get("status") == "success" and data.get("hasError") == False:
-            result = data.get("data", {}).get("result", {})
-            if result.get("valid") == True:
-                logger.info(f"MSG91 Email Validation Success - Email: {email}")
-                return True, None
-            else:
-                logger.warning(f"MSG91 Email Validation Failed - Email: {email}, Result: {result}")
-                return False, "Invalid email address"
-        else:
-            # Extract error message if available
-            errors = data.get("errors", [])
-            if isinstance(errors, list) and len(errors) > 0:
-                error_msg = errors[0] if isinstance(errors[0], str) else str(errors[0])
-            elif isinstance(errors, dict):
-                error_msg = str(errors)
-            else:
-                error_msg = "Validation failed"
-            logger.warning(f"MSG91 Email Validation Error - Email: {email}, Errors: {errors}")
-            return False, error_msg
-            
-    except requests.exceptions.Timeout:
-        # On timeout, log but don't block (fail open for network issues)
-        logger.error(f"MSG91 email validation timeout - Email: {email}")
-        return True, None
-    except requests.exceptions.ConnectionError:
-        # On connection error, log but don't block (fail open for network issues)
-        logger.error(f"MSG91 email validation connection error - Email: {email}")
-        return True, None
-    except Exception as e:
-        # On other unexpected errors, log but don't block (fail open)
-        logger.error(f"MSG91 email validation unexpected error - Email: {email}, Error: {str(e)}", exc_info=True)
-        return True, None
 
 
 def send_otp_via_msg91(email, otp_code, user_name=None, company_name=None):
