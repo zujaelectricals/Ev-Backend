@@ -288,7 +288,14 @@ class SignupSerializer(serializers.Serializer):
     state = serializers.CharField(required=True, max_length=100)
     pincode = serializers.CharField(required=True, max_length=10)
     country = serializers.CharField(default='India', max_length=100)
-    referral_code = serializers.CharField(required=False, allow_blank=True)
+    referral_code = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        error_messages={
+            'required': 'Referral code is required',
+            'blank': 'Referral code is required'
+        }
+    )
     
     def validate_email(self, value):
         """Check if email already exists"""
