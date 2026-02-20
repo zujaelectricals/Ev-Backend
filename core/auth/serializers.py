@@ -288,6 +288,7 @@ class SignupSerializer(serializers.Serializer):
     state = serializers.CharField(required=True, max_length=100)
     pincode = serializers.CharField(required=True, max_length=10)
     country = serializers.CharField(default='India', max_length=100)
+    pan_card = serializers.CharField(required=True, max_length=10)
     referral_code = serializers.CharField(
         required=True,
         allow_blank=False,
@@ -296,6 +297,26 @@ class SignupSerializer(serializers.Serializer):
             'blank': 'Referral code is required'
         }
     )
+    
+    def validate_pan_card(self, value):
+        """Validate PAN card format and uniqueness"""
+        import re
+        
+        # Normalize PAN (uppercase, remove spaces)
+        pan = (value or "").strip().upper()
+        
+        # Validate format: 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F)
+        pan_pattern = re.compile(r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$')
+        if not pan_pattern.match(pan):
+            raise serializers.ValidationError(
+                "Invalid PAN card format. PAN must be in format: ABCDE1234F (5 letters, 4 digits, 1 letter)"
+            )
+        
+        # Check if PAN already exists
+        if User.objects.filter(pan_card=pan).exists():
+            raise serializers.ValidationError("PAN card already registered")
+        
+        return pan
     
     def validate_email(self, value):
         """Check if email already exists"""
@@ -405,6 +426,18 @@ class VerifySignupOTPSerializer(serializers.Serializer):
                 'mobile': 'This mobile number is already registered with another account.'
             })
         
+        # Check if PAN card is already taken (validate from signup data)
+        signup_data = session_data.get('data', {})
+        pan_card = signup_data.get('pan_card')
+        if pan_card:
+            # Normalize PAN (uppercase, remove spaces)
+            pan_card = pan_card.strip().upper()
+            existing_user_pan = User.objects.filter(pan_card=pan_card).first()
+            if existing_user_pan:
+                raise serializers.ValidationError({
+                    'pan_card': 'PAN card already registered'
+                })
+        
         # Verify OTP - check if it matches either email or mobile OTP
         # Since same OTP is sent to both, we check both but only need one to match
         email_valid = verify_otp(email, otp_code, 'email')
@@ -482,6 +515,17 @@ class VerifySignupOTPSerializer(serializers.Serializer):
                 'mobile': 'This mobile number is already registered with another account.'
             })
         
+        # Check if PAN card is already taken
+        pan_card = signup_data.get('pan_card')
+        if pan_card:
+            # Normalize PAN (uppercase, remove spaces) - should already be normalized from validation, but ensure consistency
+            pan_card = pan_card.strip().upper()
+            existing_user_pan = User.objects.filter(pan_card=pan_card).first()
+            if existing_user_pan:
+                raise serializers.ValidationError({
+                    'pan_card': 'PAN card already registered'
+                })
+        
         # Resolve and validate referral before creating the user.
         referral_code = (signup_data.get('referral_code') or '').strip()
         if not referral_code:
@@ -492,7 +536,7 @@ class VerifySignupOTPSerializer(serializers.Serializer):
         except User.DoesNotExist:
             raise serializers.ValidationError({'referral_code': 'Invalid referral code'})
 
-        # Create new user (email and mobile are both unique at this point)
+        # Create new user (email, mobile, and PAN are all unique at this point)
         username = email or mobile
         user = User.objects.create(
             username=username,
@@ -508,6 +552,7 @@ class VerifySignupOTPSerializer(serializers.Serializer):
             state=signup_data['state'],
             pincode=signup_data['pincode'],
             country=signup_data.get('country', 'India'),
+            pan_card=pan_card,
             role='user',
             referred_by=referrer
         )

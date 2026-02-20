@@ -11,16 +11,18 @@ class UserAdmin(BaseUserAdmin):
         'referred_by_value', 'is_distributor', 'is_active_buyer', 'is_staff', 'date_joined'
     )
     list_filter = ('role', 'is_distributor', 'is_active_buyer', 'is_staff', 'is_superuser')
-    search_fields = ('username', 'email', 'mobile', 'first_name', 'last_name')
+    search_fields = ('username', 'email', 'mobile', 'first_name', 'last_name', 'pan_card')
     ordering = ('-date_joined',)
     
     fieldsets = (
         (None, {'fields': ('username', 'password')}),
-        ('Personal info', {'fields': ('first_name', 'last_name', 'email', 'mobile')}),
+        ('Personal info', {'fields': ('first_name', 'last_name', 'email', 'mobile', 'pan_card', 'pan_from_kyc')}),
         ('Permissions', {'fields': ('role', 'is_distributor', 'is_active_buyer', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Referral', {'fields': ('referral_code', 'referred_by')}),
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
     )
+    
+    readonly_fields = ('pan_from_kyc',)
 
     @admin.display(description='Full name')
     def full_name(self, obj):
@@ -29,6 +31,18 @@ class UserAdmin(BaseUserAdmin):
     @admin.display(description='Referred by', ordering='referred_by__username')
     def referred_by_value(self, obj):
         return obj.referred_by or '-'
+    
+    @admin.display(description='PAN (from KYC)')
+    def pan_from_kyc(self, obj):
+        """Display PAN number from KYC if User.pan_card is empty"""
+        if obj.pan_card:
+            return None  # Don't show if pan_card is already set
+        try:
+            if hasattr(obj, 'kyc') and obj.kyc and obj.kyc.pan_number:
+                return obj.kyc.pan_number
+        except KYC.DoesNotExist:
+            pass
+        return '-'
 
 
 @admin.register(KYC)
