@@ -3878,11 +3878,20 @@ Super User: EVAdmin && EVAdmin@123
       * "left": Returns only left_child (excludes right_child)
       * "right": Returns only right_child (excludes left_child)
       * "both": Returns both left_child and right_child (default behavior)
+    - search: Search for users by name in the entire tree below the current user
+      * Searches by fullname (first_name + last_name), username, or email
+      * Case-insensitive partial matching
+      * Returns up to 50 matching results
+      * Uses optimized recursive CTE query for fast performance
+      * Results include tree_side field showing which side (left/right) of the root tree the user is on
     
     Example Requests:
     GET /api/binary/nodes/tree_structure/
     GET /api/binary/nodes/tree_structure/?side=left
     GET /api/binary/nodes/tree_structure/?side=right
+    GET /api/binary/nodes/tree_structure/?search=John
+    GET /api/binary/nodes/tree_structure/?search=john doe
+    GET /api/binary/nodes/tree_structure/?side=left&search=Smith
     
     Performance Notes:
     - Uses prefetch_related with Prefetch objects to optimize database queries
@@ -3893,6 +3902,9 @@ Super User: EVAdmin && EVAdmin@123
       * To load children of a specific node, use the node_children endpoint
     - Each child node includes total_descendants field (left_count + right_count) for easy reference
     - Contact information (user_mobile, user_email) and all basic details are included in each child
+    - Search uses recursive CTE (Common Table Expression) for efficient tree traversal
+      * Single database query to find all descendants
+      * Search query runs only when ?search= parameter is provided (no impact on normal requests)
     
     Response (200 OK):
     {
@@ -4084,6 +4096,75 @@ Super User: EVAdmin && EVAdmin@123
       "right_child": { ... },  // Included
       "pending_users": [ ... ]
     }
+    
+    Response when searching (search=John):
+    {
+      // ... normal tree structure fields (root node, left_child, right_child) ...
+      "pending_users": [ ... ],
+      "search_query": "John",
+      "search_count": 3,
+      "search_results": [
+        {
+          "node_id": 15,
+          "user_id": 15,
+          "user_email": "john.smith@example.com",
+          "user_username": "john.smith@example.com",
+          "user_full_name": "John Smith",
+          "user_mobile": "+919876543220",
+          "user_first_name": "John",
+          "user_last_name": "Smith",
+          "user_city": "Mumbai",
+          "user_state": "Maharashtra",
+          "is_distributor": true,
+          "is_active_buyer": true,
+          "referral_code": "REF00015",
+          "date_joined": "2026-01-15T10:00:00Z",
+          "parent_id": 5,
+          "parent_name": "Alice Brown",
+          "side": "left",
+          "tree_side": "left",  // This user is on the LEFT side of the root tree
+          "level": 4,
+          "left_count": 2,
+          "right_count": 1,
+          "total_descendants": 3,
+          "binary_commission_activated": false,
+          "created_at": "2026-01-15T10:00:00Z"
+        },
+        {
+          "node_id": 22,
+          "user_id": 22,
+          "user_email": "johnny.doe@example.com",
+          "user_username": "johnny.doe@example.com",
+          "user_full_name": "Johnny Doe",
+          "user_mobile": "+919876543225",
+          "user_first_name": "Johnny",
+          "user_last_name": "Doe",
+          "user_city": "Delhi",
+          "user_state": "Delhi",
+          "is_distributor": false,
+          "is_active_buyer": true,
+          "referral_code": "REF00022",
+          "date_joined": "2026-01-18T14:00:00Z",
+          "parent_id": 8,
+          "parent_name": "Bob Wilson",
+          "side": "right",
+          "tree_side": "right",  // This user is on the RIGHT side of the root tree
+          "level": 5,
+          "left_count": 0,
+          "right_count": 0,
+          "total_descendants": 0,
+          "binary_commission_activated": false,
+          "created_at": "2026-01-18T14:00:00Z"
+        }
+      ]
+    }
+    
+    Search Notes:
+    - search_results is only included when ?search= parameter is provided
+    - Searches the ENTIRE tree below the current user (all descendants, not just direct children)
+    - tree_side indicates which side of the ROOT tree the user is on (useful for navigation)
+    - Limited to 50 results for performance
+    - Case-insensitive partial matching on fullname, first_name, last_name, username, email
     
     Notes:
     - Returns only direct children (left_child and right_child) with NO nested recursion

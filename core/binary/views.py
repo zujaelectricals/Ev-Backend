@@ -75,6 +75,121 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         except BinaryNode.DoesNotExist:
             return Response({'message': 'No binary node found'}, status=status.HTTP_404_NOT_FOUND)
     
+    def _get_all_descendant_node_ids(self, node):
+        """
+        Get all descendant node IDs using a single recursive CTE query for efficiency.
+        Returns a set of node IDs that are descendants of the given node.
+        """
+        from django.db import connection
+        
+        with connection.cursor() as cursor:
+            # Use recursive CTE to get all descendants efficiently
+            cursor.execute("""
+                WITH RECURSIVE descendants AS (
+                    SELECT id FROM binary_nodes WHERE parent_id = %s
+                    UNION ALL
+                    SELECT bn.id FROM binary_nodes bn
+                    INNER JOIN descendants d ON bn.parent_id = d.id
+                )
+                SELECT id FROM descendants
+            """, [node.id])
+            return set(row[0] for row in cursor.fetchall())
+    
+    def _search_tree_members(self, user_node, search_query):
+        """
+        Search for users in the tree by fullname (first_name + last_name).
+        Uses optimized database query to find matching users efficiently.
+        
+        Args:
+            user_node: The root BinaryNode of the user's tree
+            search_query: Search string to match against fullname
+            
+        Returns:
+            List of matching user details with their tree position
+        """
+        from core.users.models import User
+        from django.db.models import Value, CharField
+        from django.db.models.functions import Concat, Lower
+        
+        # Get all descendant node IDs efficiently using CTE
+        descendant_ids = self._get_all_descendant_node_ids(user_node)
+        
+        if not descendant_ids:
+            return []
+        
+        # Search users by fullname (case-insensitive) within the tree
+        # Using annotate to create a searchable fullname field
+        search_lower = search_query.lower().strip()
+        
+        matching_nodes = BinaryNode.objects.filter(
+            id__in=descendant_ids
+        ).select_related(
+            'user', 'user__wallet', 'parent', 'parent__user'
+        ).annotate(
+            full_name_lower=Lower(Concat(
+                'user__first_name',
+                Value(' '),
+                'user__last_name',
+                output_field=CharField()
+            ))
+        ).filter(
+            Q(full_name_lower__icontains=search_lower) |
+            Q(user__first_name__icontains=search_lower) |
+            Q(user__last_name__icontains=search_lower) |
+            Q(user__username__icontains=search_lower) |
+            Q(user__email__icontains=search_lower)
+        )[:50]  # Limit to 50 results for performance
+        
+        # Build search results
+        search_results = []
+        for node in matching_nodes:
+            if not node.user:
+                continue
+            
+            # Determine which side of the tree this node is on (relative to user_node)
+            tree_side = self._get_tree_side(user_node, node)
+            
+            search_results.append({
+                'node_id': node.id,
+                'user_id': node.user.id,
+                'user_email': node.user.email,
+                'user_username': node.user.username,
+                'user_full_name': node.user.get_full_name() or node.user.username,
+                'user_mobile': node.user.mobile,
+                'user_first_name': node.user.first_name,
+                'user_last_name': node.user.last_name,
+                'user_city': node.user.city,
+                'user_state': node.user.state,
+                'is_distributor': node.user.is_distributor,
+                'is_active_buyer': node.user.is_active_buyer,
+                'referral_code': node.user.referral_code,
+                'date_joined': node.user.date_joined,
+                'parent_id': node.parent.id if node.parent else None,
+                'parent_name': node.parent.user.get_full_name() if node.parent and node.parent.user else None,
+                'side': node.side,
+                'tree_side': tree_side,  # Which side of the root tree (left/right)
+                'level': node.level,
+                'left_count': node.left_count,
+                'right_count': node.right_count,
+                'total_descendants': node.left_count + node.right_count,
+                'binary_commission_activated': node.binary_commission_activated,
+                'created_at': node.created_at,
+            })
+        
+        return search_results
+    
+    def _get_tree_side(self, root_node, target_node):
+        """
+        Determine which side (left/right) of the root tree the target node is on.
+        Traverses up from target_node until reaching a direct child of root_node.
+        """
+        current = target_node
+        while current and current.parent:
+            if current.parent.id == root_node.id:
+                return current.side
+            current = current.parent
+        return None
+    
     @action(detail=False, methods=['get'])
     def tree_structure(self, request):
         """Get full binary tree structure with all children and pending users"""
@@ -122,6 +237,9 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                     'node_id': None,
                     'in_tree': False
                 })
+        
+        # Check for search parameter
+        search_query = request.query_params.get('search', '').strip()
         
         # Try to get binary node and tree structure
         try:
@@ -174,6 +292,13 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             # Include pending_users in the response
             response_data = serializer.data
             response_data['pending_users'] = pending_users
+            
+            # Add search results if search query provided
+            if search_query:
+                search_results = self._search_tree_members(node, search_query)
+                response_data['search_results'] = search_results
+                response_data['search_query'] = search_query
+                response_data['search_count'] = len(search_results)
             
             return Response(response_data)
         except BinaryNode.DoesNotExist:
