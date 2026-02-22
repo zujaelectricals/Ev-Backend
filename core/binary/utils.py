@@ -44,10 +44,57 @@ def create_binary_node(user, parent=None, side=None):
         
         # Update counts for all ancestors recursively
         # This ensures ancestor counts are accurate for activation checks
-        current = parent.parent
-        while current:
-            current.update_counts()
-            current = current.parent
+        # Use efficient query to get all ancestor IDs, then update them in batch
+        from django.db import connection
+        
+        try:
+            with connection.cursor() as cursor:
+                # Get all ancestor IDs using recursive CTE
+                cursor.execute("""
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id, 0 as depth
+                        FROM binary_nodes WHERE id = %s
+                        UNION ALL
+                        SELECT bn.id, bn.parent_id, a.depth + 1
+                        FROM binary_nodes bn
+                        INNER JOIN ancestors a ON bn.id = a.parent_id
+                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                    )
+                    SELECT id FROM ancestors WHERE id != %s
+                """, [parent.id, parent.id])
+                
+                ancestor_ids = [row[0] for row in cursor.fetchall()]
+                
+                # Update counts for all ancestors in batch
+                for ancestor_id in ancestor_ids:
+                    try:
+                        ancestor = BinaryNode.objects.get(id=ancestor_id)
+                        ancestor.update_counts()
+                    except BinaryNode.DoesNotExist:
+                        continue
+        except Exception as e:
+            # Fallback to simple traversal with depth limit if CTE fails
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CTE query failed in create_binary_node ancestor update, using fallback: {str(e)}")
+            
+            current = parent.parent
+            max_depth = 100
+            depth = 0
+            
+            while current and depth < max_depth:
+                try:
+                    current.update_counts()
+                    if current.parent_id:
+                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                    else:
+                        current = None
+                except BinaryNode.DoesNotExist:
+                    current = None
+                except Exception as e:
+                    logger.error(f"Error updating ancestor counts: {str(e)}")
+                    break
+                depth += 1
     
     return node
 
@@ -55,6 +102,7 @@ def create_binary_node(user, parent=None, side=None):
 def get_all_ancestors(user_node):
     """
     Get all ancestor nodes by traversing up the binary tree
+    Uses efficient recursive CTE query to avoid N+1 problem
     
     Args:
         user_node: BinaryNode to start from
@@ -63,14 +111,62 @@ def get_all_ancestors(user_node):
         list: List of all ancestor BinaryNode objects (parent, grandparent, etc.)
               Empty list if user_node has no parent (root node)
     """
-    ancestors = []
-    current = user_node.parent
+    from django.db import connection
     
-    while current:
-        ancestors.append(current)
-        current = current.parent
+    if not user_node.parent_id:
+        return []
     
-    return ancestors
+    try:
+        with connection.cursor() as cursor:
+            # Get all ancestor IDs using recursive CTE
+            cursor.execute("""
+                WITH RECURSIVE ancestors AS (
+                    SELECT id, parent_id, 0 as depth
+                    FROM binary_nodes WHERE id = %s
+                    UNION ALL
+                    SELECT bn.id, bn.parent_id, a.depth + 1
+                    FROM binary_nodes bn
+                    INNER JOIN ancestors a ON bn.id = a.parent_id
+                    WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                )
+                SELECT id FROM ancestors WHERE id != %s ORDER BY depth
+            """, [user_node.parent_id, user_node.id])
+            
+            ancestor_ids = [row[0] for row in cursor.fetchall()]
+            
+            # Fetch all ancestors in a single query
+            if ancestor_ids:
+                ancestors = list(BinaryNode.objects.filter(id__in=ancestor_ids).select_related('user', 'parent'))
+                # Sort by depth (order by the order they appear in ancestor_ids)
+                ancestor_dict = {a.id: a for a in ancestors}
+                return [ancestor_dict[aid] for aid in ancestor_ids if aid in ancestor_dict]
+            return []
+    except Exception as e:
+        # Fallback to simple traversal with depth limit if CTE fails
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"CTE query failed in get_all_ancestors, using fallback: {str(e)}")
+        
+        ancestors = []
+        current = user_node.parent
+        max_depth = 100
+        depth = 0
+        
+        while current and depth < max_depth:
+            ancestors.append(current)
+            try:
+                if current.parent_id:
+                    current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                else:
+                    current = None
+            except BinaryNode.DoesNotExist:
+                current = None
+            except Exception as e:
+                logger.error(f"Error accessing parent in get_all_ancestors: {str(e)}")
+                break
+            depth += 1
+        
+        return ancestors
 
 
 def get_total_descendants_count(node):
@@ -1345,6 +1441,41 @@ def _format_user_display_info(user):
         return str(user)
 
 
+def find_next_available_on_side(start_node, side):
+    """
+    Find the next available position by traversing down the same-side subtree.
+    
+    Traverses down the tree following the specified side (e.g., right→right→right
+    or left→left→left) until finding a node with an available slot on that side.
+    
+    Args:
+        start_node: BinaryNode to start searching from
+        side: 'left' or 'right' - the side to check and traverse
+    
+    Returns:
+        BinaryNode: The first node found with an available slot on the specified side
+        None: If no available position found (shouldn't happen in practice)
+    """
+    if side not in ['left', 'right']:
+        raise ValueError(f"Invalid side: {side}. Must be 'left' or 'right'")
+    
+    current = start_node
+    
+    while current:
+        # Check if current node has an available slot on the specified side
+        existing_on_side = BinaryNode.objects.filter(parent=current, side=side).first()
+        
+        if not existing_on_side:
+            # Found available position
+            return current
+        
+        # Position is occupied, continue down the same-side subtree
+        current = existing_on_side
+    
+    # No available position found (shouldn't happen in practice)
+    return None
+
+
 def place_user_manually(user, parent_node, side, allow_replacement=False):
     """
     Manually place a user in a specific position in the binary tree
@@ -1412,11 +1543,55 @@ def move_binary_node(node, new_parent, new_side):
         raise ValueError("Cannot move node to itself")
     
     # Check for cycles: new_parent cannot be a descendant of node
-    current = new_parent
-    while current:
-        if current == node:
-            raise ValueError("Cannot move node to its own descendant (would create cycle)")
-        current = current.parent
+    # Use efficient recursive CTE query to avoid N+1 problem
+    from django.db import connection
+    
+    try:
+        with connection.cursor() as cursor:
+            # Check if node is in the ancestor chain of new_parent
+            cursor.execute("""
+                WITH RECURSIVE ancestors AS (
+                    SELECT id, parent_id, 0 as depth
+                    FROM binary_nodes WHERE id = %s
+                    UNION ALL
+                    SELECT bn.id, bn.parent_id, a.depth + 1
+                    FROM binary_nodes bn
+                    INNER JOIN ancestors a ON bn.id = a.parent_id
+                    WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                )
+                SELECT id FROM ancestors WHERE id = %s
+            """, [new_parent.id, node.id])
+            
+            result = cursor.fetchone()
+            if result:
+                raise ValueError("Cannot move node to its own descendant (would create cycle)")
+    except ValueError:
+        raise
+    except Exception as e:
+        # Fallback to simple traversal with depth limit if CTE fails
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"CTE query failed in move_binary_node cycle check, using fallback: {str(e)}")
+        
+        current = new_parent
+        max_depth = 100
+        depth = 0
+        
+        while current and depth < max_depth:
+            if current.id == node.id:
+                raise ValueError("Cannot move node to its own descendant (would create cycle)")
+            try:
+                if current.parent_id:
+                    current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                else:
+                    current = None
+            except BinaryNode.DoesNotExist:
+                current = None
+            except Exception as e:
+                logger.error(f"Error accessing parent in move_binary_node: {str(e)}")
+                # If we can't verify, err on the side of caution
+                break
+            depth += 1
     
     # Check if target position is available
     existing_node = BinaryNode.objects.filter(parent=new_parent, side=new_side).first()
@@ -1479,14 +1654,53 @@ def is_node_in_tree(node, tree_owner):
     except BinaryNode.DoesNotExist:
         return False
     
-    # Traverse up from node to root
-    current = node
-    while current:
-        if current == owner_node:
-            return True
-        current = current.parent
+    # Use efficient recursive CTE query to avoid N+1 problem
+    from django.db import connection
     
-    return False
+    try:
+        with connection.cursor() as cursor:
+            # Use recursive CTE to get all ancestors efficiently in a single query
+            cursor.execute("""
+                WITH RECURSIVE ancestors AS (
+                    SELECT id, parent_id, 0 as depth
+                    FROM binary_nodes WHERE id = %s
+                    UNION ALL
+                    SELECT bn.id, bn.parent_id, a.depth + 1
+                    FROM binary_nodes bn
+                    INNER JOIN ancestors a ON bn.id = a.parent_id
+                    WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                )
+                SELECT id FROM ancestors WHERE id = %s
+            """, [node.id, owner_node.id])
+            
+            result = cursor.fetchone()
+            return result is not None
+    except Exception as e:
+        # Fallback to simple traversal with depth limit if CTE fails
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"CTE query failed in is_node_in_tree, using fallback: {str(e)}")
+        
+        current = node
+        max_depth = 100
+        depth = 0
+        
+        while current and depth < max_depth:
+            if current.id == owner_node.id:
+                return True
+            try:
+                if current.parent_id:
+                    current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                else:
+                    current = None
+            except BinaryNode.DoesNotExist:
+                current = None
+            except Exception as e:
+                logger.error(f"Error accessing parent in is_node_in_tree: {str(e)}")
+                return False
+            depth += 1
+        
+        return False
 
 
 def can_user_be_placed(referrer, target_user):

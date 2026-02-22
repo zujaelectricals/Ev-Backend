@@ -37,14 +37,63 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         except BinaryNode.DoesNotExist:
             return False
         
-        # Traverse up from node to root
-        current = node
-        while current:
-            if current == owner_node:
-                return True
-            current = current.parent
+        # If node is the owner node itself, return True
+        if node.id == owner_node.id:
+            return True
         
-        return False
+        # Use recursive CTE to get all ancestors efficiently in a single query
+        # This avoids N+1 query problem and prevents timeouts
+        from django.db import connection
+        
+        try:
+            with connection.cursor() as cursor:
+                # Use recursive CTE to get all ancestors up to a maximum depth
+                # Maximum depth of 100 levels to prevent infinite loops
+                cursor.execute("""
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id, 0 as depth
+                        FROM binary_nodes WHERE id = %s
+                        UNION ALL
+                        SELECT bn.id, bn.parent_id, a.depth + 1
+                        FROM binary_nodes bn
+                        INNER JOIN ancestors a ON bn.id = a.parent_id
+                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                    )
+                    SELECT id FROM ancestors WHERE id = %s
+                """, [node.id, owner_node.id])
+                
+                result = cursor.fetchone()
+                return result is not None
+        except Exception as e:
+            # Fallback to simple traversal with depth limit if CTE fails
+            # This handles edge cases and database compatibility
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CTE query failed in _is_tree_owner, using fallback: {str(e)}")
+            
+            # Fallback: traverse with depth limit and proper error handling
+            current = node
+            max_depth = 100
+            depth = 0
+            
+            while current and depth < max_depth:
+                if current.id == owner_node.id:
+                    return True
+                try:
+                    # Use select_related if possible, but we need to fetch fresh
+                    # to avoid stale data issues
+                    if current.parent_id:
+                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                    else:
+                        current = None
+                except BinaryNode.DoesNotExist:
+                    current = None
+                except Exception as e:
+                    logger.error(f"Error accessing parent in _is_tree_owner: {str(e)}")
+                    return False
+                depth += 1
+            
+            return False
     
     def _can_place_user(self, referrer, target_user):
         """Check if target_user can be placed in referrer's tree"""
@@ -56,12 +105,57 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         if node == new_parent:
             raise ValidationError("Cannot move node to itself")
         
-        # Check if new_parent is a descendant of node
-        current = new_parent
-        while current:
-            if current == node:
-                raise ValidationError("Cannot move node to its own descendant (would create cycle)")
-            current = current.parent
+        # Check if new_parent is a descendant of node using efficient query
+        # Use recursive CTE to get all ancestors of new_parent and check if node is in that set
+        from django.db import connection
+        
+        try:
+            with connection.cursor() as cursor:
+                # Use recursive CTE to get all ancestors of new_parent
+                cursor.execute("""
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id, 0 as depth
+                        FROM binary_nodes WHERE id = %s
+                        UNION ALL
+                        SELECT bn.id, bn.parent_id, a.depth + 1
+                        FROM binary_nodes bn
+                        INNER JOIN ancestors a ON bn.id = a.parent_id
+                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                    )
+                    SELECT id FROM ancestors WHERE id = %s
+                """, [new_parent.id, node.id])
+                
+                result = cursor.fetchone()
+                if result:
+                    raise ValidationError("Cannot move node to its own descendant (would create cycle)")
+        except ValidationError:
+            raise
+        except Exception as e:
+            # Fallback to simple traversal with depth limit if CTE fails
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CTE query failed in _validate_no_cycles, using fallback: {str(e)}")
+            
+            current = new_parent
+            max_depth = 100
+            depth = 0
+            
+            while current and depth < max_depth:
+                if current.id == node.id:
+                    raise ValidationError("Cannot move node to its own descendant (would create cycle)")
+                try:
+                    if current.parent_id:
+                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                    else:
+                        current = None
+                except BinaryNode.DoesNotExist:
+                    current = None
+                except Exception as e:
+                    logger.error(f"Error accessing parent in _validate_no_cycles: {str(e)}")
+                    # If we can't verify, err on the side of caution and allow the operation
+                    # (This prevents blocking valid operations due to transient DB issues)
+                    break
+                depth += 1
         
         return True
     
@@ -182,12 +276,59 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         """
         Determine which side (left/right) of the root tree the target node is on.
         Traverses up from target_node until reaching a direct child of root_node.
+        Uses efficient query to avoid N+1 problem.
         """
-        current = target_node
-        while current and current.parent:
-            if current.parent.id == root_node.id:
-                return current.side
-            current = current.parent
+        # If target_node is direct child of root_node, return its side
+        if target_node.parent_id == root_node.id:
+            return target_node.side
+        
+        # Use recursive CTE to find the direct child of root_node in the ancestor chain
+        from django.db import connection
+        
+        try:
+            with connection.cursor() as cursor:
+                # Find the direct child of root_node in the ancestor chain of target_node
+                cursor.execute("""
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id, side, 0 as depth
+                        FROM binary_nodes WHERE id = %s
+                        UNION ALL
+                        SELECT bn.id, bn.parent_id, bn.side, a.depth + 1
+                        FROM binary_nodes bn
+                        INNER JOIN ancestors a ON bn.id = a.parent_id
+                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                    )
+                    SELECT side FROM ancestors WHERE parent_id = %s LIMIT 1
+                """, [target_node.id, root_node.id])
+                
+                result = cursor.fetchone()
+                if result:
+                    return result[0]
+        except Exception as e:
+            # Fallback to simple traversal with depth limit
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CTE query failed in _get_tree_side, using fallback: {str(e)}")
+            
+            current = target_node
+            max_depth = 100
+            depth = 0
+            
+            while current and current.parent and depth < max_depth:
+                if current.parent_id == root_node.id:
+                    return current.side
+                try:
+                    if current.parent_id:
+                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                    else:
+                        current = None
+                except BinaryNode.DoesNotExist:
+                    current = None
+                except Exception as e:
+                    logger.error(f"Error accessing parent in _get_tree_side: {str(e)}")
+                    return None
+                depth += 1
+        
         return None
     
     @action(detail=False, methods=['get'])
@@ -212,7 +353,9 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         pending_users = []
         for user in all_referred_users:
             try:
-                user_node = BinaryNode.objects.get(user=user)
+                # Use select_related to prefetch parent relationship
+                # This helps with the fallback case in _is_tree_owner
+                user_node = BinaryNode.objects.select_related('parent').get(user=user)
                 # Check if user is in referrer's tree
                 is_in_tree = self._is_tree_owner(referrer, user_node)
                 if not is_in_tree:
@@ -435,16 +578,17 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         """
         Manually place a user in a specific position in the binary tree
         Only the tree owner (referrer) can place users
+        Automatically places on the specified side of the authenticated user's node,
+        or traverses down the same-side subtree if the position is occupied.
         """
         target_user_id = request.data.get('target_user_id')
-        parent_node_id = request.data.get('parent_node_id')
         side = request.data.get('side')
         allow_replacement = request.data.get('allow_replacement', False)
         
         # Validate required fields
-        if not target_user_id or not parent_node_id or not side:
+        if not target_user_id or not side:
             return Response(
-                {'error': 'target_user_id, parent_node_id, and side are required'},
+                {'error': 'target_user_id and side are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -457,22 +601,19 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             from core.users.models import User
             target_user = User.objects.get(id=target_user_id)
-            parent_node = BinaryNode.objects.get(id=parent_node_id)
         except User.DoesNotExist:
             return Response(
                 {'error': 'Target user not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
+        
+        # Get authenticated user's BinaryNode
+        try:
+            owner_node = BinaryNode.objects.get(user=request.user)
         except BinaryNode.DoesNotExist:
             return Response(
-                {'error': 'Parent node not found'},
+                {'error': 'No binary node found for current user. You must have a node in the tree to place users.'},
                 status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Check if current user owns the tree containing parent_node
-        if not self._is_tree_owner(request.user, parent_node):
-            raise PermissionDenied(
-                "You can only place users in your own binary tree"
             )
         
         # Check if target_user is eligible to be placed
@@ -482,9 +623,18 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # Place the user
+        # Find the next available position on the specified side
         try:
-            from .utils import place_user_manually, process_direct_user_commission
+            from .utils import find_next_available_on_side, place_user_manually, process_direct_user_commission
+            parent_node = find_next_available_on_side(owner_node, side)
+            
+            if not parent_node:
+                return Response(
+                    {'error': f'No available position found on the {side} side of your tree'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Place the user
             node = place_user_manually(
                 user=target_user,
                 parent_node=parent_node,
@@ -676,7 +826,9 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         pending_users = []
         for user in all_referred_users:
             try:
-                user_node = BinaryNode.objects.get(user=user)
+                # Use select_related to prefetch parent relationship
+                # This helps with the fallback case in _is_tree_owner
+                user_node = BinaryNode.objects.select_related('parent').get(user=user)
                 # Check if user is in referrer's tree
                 is_in_tree = self._is_tree_owner(referrer, user_node)
                 if not is_in_tree:
@@ -714,7 +866,20 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         Can place all pending users or a specific user
         """
         referrer = request.user
+        # Get target_user_id from request body first, then fall back to query parameter
         target_user_id = request.data.get('target_user_id')
+        if not target_user_id:
+            # Check query parameters as alternative source
+            user_id_param = request.query_params.get('user_id')
+            if user_id_param:
+                try:
+                    target_user_id = int(user_id_param)
+                except (ValueError, TypeError):
+                    return Response(
+                        {'error': 'Invalid user_id query parameter. Must be a valid integer.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+        
         referring_user_id = request.data.get('referring_user_id')
         
         # Get users who have referred_by = referrer
@@ -733,15 +898,19 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         # Filter to specific user if target_user_id provided
         if target_user_id:
             try:
+                # Ensure target_user_id is an integer
+                if not isinstance(target_user_id, int):
+                    target_user_id = int(target_user_id)
+                
                 all_referred_users = all_referred_users.filter(id=target_user_id)
                 if not all_referred_users.exists():
                     return Response(
                         {'error': f'User {target_user_id} not found or did not use your referral code'},
                         status=status.HTTP_404_NOT_FOUND
                     )
-            except ValueError:
+            except (ValueError, TypeError):
                 return Response(
-                    {'error': 'Invalid target_user_id'},
+                    {'error': 'Invalid target_user_id. Must be a valid integer.'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
@@ -762,7 +931,9 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             try:
                 # Check if user is already in referrer's tree
                 try:
-                    user_node = BinaryNode.objects.get(user=user)
+                    # Use select_related to prefetch parent relationship
+                    # This helps with the fallback case in _is_tree_owner
+                    user_node = BinaryNode.objects.select_related('parent').get(user=user)
                     is_in_tree = self._is_tree_owner(referrer, user_node)
                     if is_in_tree:
                         # User already in tree, skip

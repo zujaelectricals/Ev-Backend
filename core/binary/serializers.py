@@ -133,14 +133,56 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             return False
         
         # Check if any ancestor has binary commission activated
-        # Traverse up the tree to find root or activated ancestor
-        current = obj.parent
-        while current:
-            if current.binary_commission_activated:
-                return True
-            current = current.parent
+        # Use efficient recursive CTE query to avoid N+1 problem
+        if not obj.parent_id:
+            return False
         
-        return False
+        from django.db import connection
+        
+        try:
+            with connection.cursor() as cursor:
+                # Check if any ancestor has binary_commission_activated = True
+                cursor.execute("""
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id, binary_commission_activated, 0 as depth
+                        FROM binary_nodes WHERE id = %s
+                        UNION ALL
+                        SELECT bn.id, bn.parent_id, bn.binary_commission_activated, a.depth + 1
+                        FROM binary_nodes bn
+                        INNER JOIN ancestors a ON bn.id = a.parent_id
+                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                    )
+                    SELECT id FROM ancestors WHERE binary_commission_activated = 1 LIMIT 1
+                """, [obj.parent_id])
+                
+                result = cursor.fetchone()
+                return result is not None
+        except Exception as e:
+            # Fallback to simple traversal with depth limit
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CTE query failed in get_eligible_for_pairing, using fallback: {str(e)}")
+            
+            current = obj.parent
+            max_depth = 100
+            depth = 0
+            
+            while current and depth < max_depth:
+                if current.binary_commission_activated:
+                    return True
+                try:
+                    if current.parent_id:
+                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                    else:
+                        current = None
+                except BinaryNode.DoesNotExist:
+                    current = None
+                except Exception as e:
+                    logger.error(f"Error accessing parent in get_eligible_for_pairing: {str(e)}")
+                    break
+                depth += 1
+            
+            return False
     
     def get_total_descendants(self, obj):
         """Get total descendants count (left_count + right_count)"""
@@ -602,14 +644,50 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 
                 # Check eligible_for_pairing (user has activation AND ancestor has binary_commission_activated)
                 if has_activation.get(user_id, False):
-                    # Check if any ancestor has binary_commission_activated
-                    current = node.parent
+                    # Check if any ancestor has binary_commission_activated using efficient query
                     has_activated_ancestor = False
-                    while current:
-                        if current.binary_commission_activated:
-                            has_activated_ancestor = True
-                            break
-                        current = current.parent
+                    if node.parent_id:
+                        from django.db import connection
+                        try:
+                            with connection.cursor() as cursor:
+                                cursor.execute("""
+                                    WITH RECURSIVE ancestors AS (
+                                        SELECT id, parent_id, binary_commission_activated, 0 as depth
+                                        FROM binary_nodes WHERE id = %s
+                                        UNION ALL
+                                        SELECT bn.id, bn.parent_id, bn.binary_commission_activated, a.depth + 1
+                                        FROM binary_nodes bn
+                                        INNER JOIN ancestors a ON bn.id = a.parent_id
+                                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                                    )
+                                    SELECT id FROM ancestors WHERE binary_commission_activated = 1 LIMIT 1
+                                """, [node.parent_id])
+                                has_activated_ancestor = cursor.fetchone() is not None
+                        except Exception as e:
+                            # Fallback to simple traversal with depth limit
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.warning(f"CTE query failed in eligible_for_pairing check, using fallback: {str(e)}")
+                            
+                            current = node.parent
+                            max_depth = 100
+                            depth = 0
+                            
+                            while current and depth < max_depth:
+                                if current.binary_commission_activated:
+                                    has_activated_ancestor = True
+                                    break
+                                try:
+                                    if current.parent_id:
+                                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                                    else:
+                                        current = None
+                                except BinaryNode.DoesNotExist:
+                                    current = None
+                                except Exception as e:
+                                    logger.error(f"Error accessing parent: {str(e)}")
+                                    break
+                                depth += 1
                     eligible_for_pairing[node.id] = has_activated_ancestor
                 else:
                     eligible_for_pairing[node.id] = False
@@ -787,13 +865,56 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             return False
         
         # Check if any ancestor has binary commission activated
-        current = node.parent
-        while current:
-            if current.binary_commission_activated:
-                return True
-            current = current.parent
+        # Use efficient recursive CTE query to avoid N+1 problem
+        if not node.parent_id:
+            return False
         
-        return False
+        from django.db import connection
+        
+        try:
+            with connection.cursor() as cursor:
+                # Check if any ancestor has binary_commission_activated = True
+                cursor.execute("""
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id, binary_commission_activated, 0 as depth
+                        FROM binary_nodes WHERE id = %s
+                        UNION ALL
+                        SELECT bn.id, bn.parent_id, bn.binary_commission_activated, a.depth + 1
+                        FROM binary_nodes bn
+                        INNER JOIN ancestors a ON bn.id = a.parent_id
+                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                    )
+                    SELECT id FROM ancestors WHERE binary_commission_activated = 1 LIMIT 1
+                """, [node.parent_id])
+                
+                result = cursor.fetchone()
+                return result is not None
+        except Exception as e:
+            # Fallback to simple traversal with depth limit
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CTE query failed in get_eligible_for_pairing (node method), using fallback: {str(e)}")
+            
+            current = node.parent
+            max_depth = 100
+            depth = 0
+            
+            while current and depth < max_depth:
+                if current.binary_commission_activated:
+                    return True
+                try:
+                    if current.parent_id:
+                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                    else:
+                        current = None
+                except BinaryNode.DoesNotExist:
+                    current = None
+                except Exception as e:
+                    logger.error(f"Error accessing parent: {str(e)}")
+                    break
+                depth += 1
+            
+            return False
     
     def _paginate_side_members(self, members, side_name, node=None):
         """
