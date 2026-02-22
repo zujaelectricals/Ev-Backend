@@ -317,13 +317,6 @@ class VerifyAsaAcceptanceSerializer(serializers.Serializer):
         except AsaTerms.DoesNotExist:
             raise serializers.ValidationError("ASA Terms not found or is not active.")
         
-        # Check if user already accepted this version
-        if UserAsaAcceptance.objects.filter(user=user, terms_version=asa_terms.version).exists():
-            raise serializers.ValidationError(
-                f"You have already accepted ASA Terms version {asa_terms.version}. "
-                "Each version can only be accepted once."
-            )
-        
         # Verify OTP
         if user.email and user.mobile:
             # User has both email and mobile, check both

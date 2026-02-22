@@ -123,14 +123,25 @@ def verify_otp_login(request):
     serializer = VerifyOTPSerializer(data=request.data)
     if serializer.is_valid():
         result = serializer.save()
+        user = result['user']
+        # Prepare referred_by data
+        referred_by_data = None
+        if user.referred_by:
+            referred_by_data = {
+                'id': user.referred_by.id,
+                'username': user.referred_by.username,
+                'email': user.referred_by.email,
+                'referral_code': user.referred_by.referral_code,
+            }
         user_data = {
-            'id': result['user'].id,
-            'username': result['user'].username,
-            'email': result['user'].email,
-            'mobile': result['user'].mobile,
-            'role': result['user'].role,
-            'is_active_buyer': result['user'].is_active_buyer,
-            'is_distributor': result['user'].is_distributor,
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'mobile': user.mobile,
+            'role': user.role,
+            'is_active_buyer': user.is_active_buyer,
+            'is_distributor': user.is_distributor,
+            'referred_by': referred_by_data,
         }
         return Response({
             'user': user_data,

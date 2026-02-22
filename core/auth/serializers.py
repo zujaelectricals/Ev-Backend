@@ -119,9 +119,9 @@ class VerifyOTPSerializer(serializers.Serializer):
             user = None
             try:
                 if otp_type == 'email':
-                    user = User.objects.get(email=identifier)
+                    user = User.objects.select_related('referred_by').get(email=identifier)
                 else:
-                    user = User.objects.get(mobile=identifier)
+                    user = User.objects.select_related('referred_by').get(mobile=identifier)
             except User.DoesNotExist:
                 raise serializers.ValidationError(
                     "User not found. Please use /api/auth/signup/ endpoint to register first."

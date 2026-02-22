@@ -326,13 +326,6 @@ class AsaTermsViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if user already accepted this version
-        if UserAsaAcceptance.objects.filter(user=user, terms_version=asa_terms.version).exists():
-            return Response(
-                {'error': f'You have already accepted ASA Terms version {asa_terms.version}.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         # Validate checkboxes
         serializer = InitiateAsaAcceptanceSerializer(data=request.data)
         if not serializer.is_valid():

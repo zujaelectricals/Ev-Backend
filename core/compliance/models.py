@@ -204,7 +204,7 @@ class PaymentTerms(models.Model):
 class UserAsaAcceptance(models.Model):
     """
     Records of users accepting ASA Terms with OTP verification
-    User can accept an ASA version ONLY ONCE
+    User can accept an ASA version multiple times
     PDF is ALWAYS REQUIRED and generated on backend
     """
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='asa_acceptances')
@@ -238,8 +238,6 @@ class UserAsaAcceptance(models.Model):
             models.Index(fields=['accepted_at']),
             models.Index(fields=['ip_address']),
         ]
-        # User can accept an ASA version ONLY ONCE
-        unique_together = [['user', 'terms_version']]
     
     def __str__(self):
         return f"{self.user.username} - ASA Terms v{self.terms_version} ({self.accepted_at})"
