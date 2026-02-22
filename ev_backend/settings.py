@@ -281,6 +281,11 @@ RAZORPAYX_KEY_ID = env("RAZORPAYX_KEY_ID", default="")
 RAZORPAYX_KEY_SECRET = env("RAZORPAYX_KEY_SECRET", default="")
 RAZORPAYX_ACCOUNT_NUMBER = env("RAZORPAYX_ACCOUNT_NUMBER", default="")
 RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET", default="")
+# Razorpay API timeout configuration (in seconds)
+# Connect timeout: time to establish connection (DNS resolution, SSL handshake)
+# Read timeout: time to wait for response after connection is established
+RAZORPAY_CONNECT_TIMEOUT = env.int("RAZORPAY_CONNECT_TIMEOUT", default=15)
+RAZORPAY_READ_TIMEOUT = env.int("RAZORPAY_READ_TIMEOUT", default=30)
 # --------------------------------------------------
 # BUSINESS RULES
 # --------------------------------------------------
