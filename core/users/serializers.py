@@ -3,6 +3,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.conf import settings
 from .models import User, KYC, Nominee, DistributorApplication
 from django.utils import timezone
+from urllib.parse import quote
 
 
 class ReferredByUserSerializer(serializers.Serializer):
@@ -214,14 +215,21 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return None
     
     def get_referral_link(self, obj):
-        """Generate referral link using FRONTEND_BASE_URL and user's referral code"""
+        """Generate referral link using FRONTEND_BASE_URL and user's referral code with name parameter"""
         if not obj.referral_code:
             return None
         
         frontend_base_url = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:8080')
         # Remove trailing slash if present
         frontend_base_url = frontend_base_url.rstrip('/')
-        return f"{frontend_base_url}/ref/{obj.referral_code}"
+        
+        # Get user's full name and URL encode it
+        fullname = obj.get_full_name()
+        if fullname:
+            encoded_name = quote(fullname)
+            return f"{frontend_base_url}/ref/{obj.referral_code}?name={encoded_name}"
+        else:
+            return f"{frontend_base_url}/ref/{obj.referral_code}"
     
     def get_booking_payment_receipt_url(self, obj):
         """Get the payment receipt URL for the user's most recent booking with a receipt"""
