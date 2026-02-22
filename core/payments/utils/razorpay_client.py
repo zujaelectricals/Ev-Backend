@@ -15,8 +15,9 @@ _client = None
 # Connect timeout: time to establish connection (increased for first connection)
 # Read timeout: time to wait for response after connection
 # Increased defaults to handle cold start scenarios (DNS resolution, SSL handshake)
+# Read timeout increased to 60s to handle slow Razorpay API responses during peak times
 RAZORPAY_CONNECT_TIMEOUT = getattr(settings, 'RAZORPAY_CONNECT_TIMEOUT', 15)
-RAZORPAY_READ_TIMEOUT = getattr(settings, 'RAZORPAY_READ_TIMEOUT', 30)
+RAZORPAY_READ_TIMEOUT = getattr(settings, 'RAZORPAY_READ_TIMEOUT', 60)
 RAZORPAY_TIMEOUT = (RAZORPAY_CONNECT_TIMEOUT, RAZORPAY_READ_TIMEOUT)
 
 

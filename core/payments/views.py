@@ -13,6 +13,8 @@ import logging
 import hashlib
 import time
 import requests
+from functools import wraps
+from urllib3.exceptions import ReadTimeoutError as Urllib3ReadTimeoutError
 
 from .models import Payment
 from .serializers import (
@@ -40,6 +42,76 @@ logger = logging.getLogger(__name__)
 # Fee: 2% + 18% GST on fee = 2.36% effective rate
 RAZORPAY_CHARGE_RATE = 0.0236  # 2.36%
 RAZORPAY_NET_TO_GROSS_DIVISOR = 0.9764  # 1 - 0.0236
+
+# Retry configuration for Razorpay API calls
+RAZORPAY_MAX_RETRIES = getattr(settings, 'RAZORPAY_MAX_RETRIES', 2)  # Maximum retry attempts
+RAZORPAY_RETRY_BACKOFF_BASE = getattr(settings, 'RAZORPAY_RETRY_BACKOFF_BASE', 1)  # Base delay in seconds
+
+
+def retry_on_timeout(max_retries=RAZORPAY_MAX_RETRIES, backoff_base=RAZORPAY_RETRY_BACKOFF_BASE):
+    """
+    Decorator to retry Razorpay API calls on timeout errors with exponential backoff.
+    
+    Args:
+        max_retries: Maximum number of retry attempts (default: 2)
+        backoff_base: Base delay in seconds for exponential backoff (default: 1)
+    
+    Usage:
+        @retry_on_timeout(max_retries=2)
+        def create_razorpay_order(client, order_data):
+            return client.order.create(data=order_data)
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries + 1):  # +1 for initial attempt
+                try:
+                    return func(*args, **kwargs)
+                except (requests.exceptions.Timeout, Urllib3ReadTimeoutError) as timeout_error:
+                    last_exception = timeout_error
+                    if attempt < max_retries:
+                        # Calculate exponential backoff delay: base * 2^attempt
+                        delay = backoff_base * (2 ** attempt)
+                        logger.warning(
+                            f"Razorpay API timeout (attempt {attempt + 1}/{max_retries + 1}). "
+                            f"Retrying in {delay}s... Error: {timeout_error}"
+                        )
+                        time.sleep(delay)
+                    else:
+                        # Final attempt failed, log and re-raise
+                        logger.error(
+                            f"Razorpay API timeout after {max_retries + 1} attempts. "
+                            f"Giving up. Error: {timeout_error}",
+                            exc_info=True
+                        )
+                        raise
+                except requests.exceptions.ConnectionError as conn_error:
+                    # Connection errors are usually transient, retry with backoff
+                    last_exception = conn_error
+                    if attempt < max_retries:
+                        delay = backoff_base * (2 ** attempt)
+                        logger.warning(
+                            f"Razorpay API connection error (attempt {attempt + 1}/{max_retries + 1}). "
+                            f"Retrying in {delay}s... Error: {conn_error}"
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.error(
+                            f"Razorpay API connection error after {max_retries + 1} attempts. "
+                            f"Giving up. Error: {conn_error}",
+                            exc_info=True
+                        )
+                        raise
+                except Exception as e:
+                    # For other exceptions, don't retry, just re-raise
+                    raise
+            
+            # Should never reach here, but just in case
+            if last_exception:
+                raise last_exception
+        return wrapper
+    return decorator
 
 
 def _calculate_gross_amount_with_charges(net_amount_rupees):
@@ -523,8 +595,13 @@ def create_order(request):
             }
         }
         
+        # Retry wrapper for order creation with exponential backoff
+        @retry_on_timeout(max_retries=RAZORPAY_MAX_RETRIES)
+        def create_razorpay_order_with_retry(client, order_data):
+            return client.order.create(data=order_data)
+        
         try:
-            razorpay_order = client.order.create(data=order_data)
+            razorpay_order = create_razorpay_order_with_retry(client, order_data)
         except requests.exceptions.Timeout as timeout_error:
             logger.error(
                 f"Razorpay API timeout while creating order for user {request.user.id}, "

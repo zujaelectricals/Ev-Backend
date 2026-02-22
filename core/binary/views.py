@@ -607,14 +607,9 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Get authenticated user's BinaryNode
-        try:
-            owner_node = BinaryNode.objects.get(user=request.user)
-        except BinaryNode.DoesNotExist:
-            return Response(
-                {'error': 'No binary node found for current user. You must have a node in the tree to place users.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # Get or create authenticated user's BinaryNode
+        # If user doesn't have a node, create one (they become the root of their own tree)
+        owner_node, created = BinaryNode.objects.get_or_create(user=request.user)
         
         # Check if target_user is eligible to be placed
         if not self._can_place_user(request.user, target_user):
