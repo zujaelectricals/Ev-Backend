@@ -95,6 +95,69 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             
             return False
     
+    def _is_ancestor(self, ancestor_user, descendant_node):
+        """
+        Check if ancestor_user is an ancestor of the node (i.e., if the node is a descendant of ancestor_user)
+        This is the reverse of _is_tree_owner - checks if ancestor_user's node is in the ancestor chain of descendant_node
+        """
+        try:
+            ancestor_node = BinaryNode.objects.get(user=ancestor_user)
+        except BinaryNode.DoesNotExist:
+            return False
+        
+        # If the descendant node is the ancestor node itself, return False (not an ancestor, it's the same node)
+        if descendant_node.id == ancestor_node.id:
+            return False
+        
+        # Use recursive CTE to check if ancestor_node is in the ancestor chain of descendant_node
+        from django.db import connection
+        
+        try:
+            with connection.cursor() as cursor:
+                # Get all ancestors of descendant_node and check if ancestor_node is among them
+                cursor.execute("""
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id, 0 as depth
+                        FROM binary_nodes WHERE id = %s
+                        UNION ALL
+                        SELECT bn.id, bn.parent_id, a.depth + 1
+                        FROM binary_nodes bn
+                        INNER JOIN ancestors a ON bn.id = a.parent_id
+                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                    )
+                    SELECT id FROM ancestors WHERE id = %s
+                """, [descendant_node.id, ancestor_node.id])
+                
+                result = cursor.fetchone()
+                return result is not None
+        except Exception as e:
+            # Fallback to simple traversal with depth limit if CTE fails
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CTE query failed in _is_ancestor, using fallback: {str(e)}")
+            
+            # Fallback: traverse up from descendant_node to see if we reach ancestor_node
+            current = descendant_node
+            max_depth = 100
+            depth = 0
+            
+            while current and depth < max_depth:
+                if current.parent_id == ancestor_node.id:
+                    return True
+                try:
+                    if current.parent_id:
+                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                    else:
+                        current = None
+                except BinaryNode.DoesNotExist:
+                    current = None
+                except Exception as e:
+                    logger.error(f"Error accessing parent in _is_ancestor: {str(e)}")
+                    return False
+                depth += 1
+            
+            return False
+    
     def _can_place_user(self, referrer, target_user):
         """Check if target_user can be placed in referrer's tree"""
         from .utils import can_user_be_placed
@@ -352,6 +415,16 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         
         pending_users = []
         for user in all_referred_users:
+            # Skip if user is the referrer themselves
+            if user.id == referrer.id:
+                continue
+            
+            # Check if user is the referrer's parent (via User.referred_by)
+            # This check works regardless of whether BinaryNodes exist
+            # A parent cannot be placed as a child of their own child
+            if referrer.referred_by and referrer.referred_by.id == user.id:
+                continue
+            
             try:
                 # Use select_related to prefetch parent relationship
                 # This helps with the fallback case in _is_tree_owner
@@ -371,6 +444,7 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 # If in tree, don't include (already placed)
             except BinaryNode.DoesNotExist:
                 # User doesn't have a node yet
+                # Parent check already done above, so safe to add to pending
                 pending_users.append({
                     'user_id': user.id,
                     'user_email': user.email,
@@ -818,12 +892,35 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         # Combine both sets
         all_referred_users = (referred_users | booking_users).distinct()
         
+        # Get referrer's node if it exists (to check for ancestors)
+        try:
+            referrer_node = BinaryNode.objects.get(user=referrer)
+        except BinaryNode.DoesNotExist:
+            referrer_node = None
+        
         pending_users = []
         for user in all_referred_users:
+            # Skip if user is the referrer themselves
+            if user.id == referrer.id:
+                continue
+            
+            # Check if user is the referrer's parent (via User.referred_by)
+            # This check works regardless of whether BinaryNodes exist
+            # A parent cannot be placed as a child of their own child
+            if referrer.referred_by and referrer.referred_by.id == user.id:
+                continue
+            
             try:
                 # Use select_related to prefetch parent relationship
                 # This helps with the fallback case in _is_tree_owner
                 user_node = BinaryNode.objects.select_related('parent').get(user=user)
+                
+                # Check if user is an ancestor of the referrer (parent, grandparent, etc.)
+                # If so, exclude them - a parent cannot be placed as a child
+                # This check works when both users have BinaryNodes
+                if referrer_node and self._is_ancestor(user, referrer_node):
+                    continue
+                
                 # Check if user is in referrer's tree
                 is_in_tree = self._is_tree_owner(referrer, user_node)
                 if not is_in_tree:
@@ -839,6 +936,7 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 # If in tree, don't include (already placed)
             except BinaryNode.DoesNotExist:
                 # User doesn't have a node yet
+                # Parent check already done above, so safe to add to pending
                 pending_users.append({
                     'user_id': user.id,
                     'user_email': user.email,
