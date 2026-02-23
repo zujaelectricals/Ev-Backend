@@ -216,18 +216,31 @@ class Booking(models.Model):
                 # Payment doesn't exist or not completed, proceed with processing
                 pass
         
-        # Calculate expected total_paid after this payment
-        expected_total = Decimal(str(self.total_paid)) + Decimal(str(amount))
-        
-        # Final check: if expected total matches or exceeds actual sum, payment might be duplicate
-        # Account for bonuses when checking (total_paid might include bonus)
-        # Check if total_paid (minus bonus) matches payments_sum
-        if abs(total_paid_without_bonus - completed_payments_sum) <= Decimal('0.01'):
-            # Calculate expected total without bonus for comparison
-            expected_total_without_bonus = total_paid_without_bonus + Decimal(str(amount))
-            if abs(expected_total_without_bonus - completed_payments_sum) <= Decimal('0.01'):
-                # Payment already processed, skip
-                return self
+        # Final check: detect if this payment amount is already reflected in completed_payments_sum.
+        # This happens when Payment.save() already called make_payment() first (triggered by
+        # creating a BookingPayment with status='completed'), and now we're being called a
+        # second time.  In that situation:
+        #   current total_paid (without bonus) + this amount ≈ completed_payments_sum
+        # because the new payment is already counted in the DB sum but total_paid hasn't
+        # been incremented yet in this in-memory object.
+        # When this is true, sync total_paid to the DB sum (+ bonus) and return — do NOT
+        # add the amount again, which would cause double-counting.
+        if abs(total_paid_without_bonus + Decimal(str(amount)) - completed_payments_sum) <= Decimal('0.01'):
+            logger.info(
+                f"Booking {self.id}: payment amount {amount} is already reflected in "
+                f"completed_payments_sum ({completed_payments_sum}). "
+                f"Syncing total_paid and skipping duplicate add."
+            )
+            self.total_paid = completed_payments_sum + bonus_amount
+            self.remaining_amount = self.total_amount - self.total_paid
+            if self.total_paid >= self.booking_amount and self.status == 'pending':
+                self.status = 'active'
+                self.confirmed_at = timezone.now()
+            if self.remaining_amount <= 0 and self.status != 'completed':
+                self.status = 'completed'
+                self.completed_at = timezone.now()
+            self.save()
+            return self
         
         # Process the payment
         self.total_paid += amount
