@@ -13,7 +13,7 @@ ENV DJANGO_SETTINGS_MODULE=ev_backend.settings
 WORKDIR /app
 
 # --------------------------------------------------
-# System dependencies (IMPORTANT for Azure SSH)
+# System dependencies (Azure compatible)
 # --------------------------------------------------
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -38,7 +38,7 @@ RUN pip install --upgrade pip \
 COPY . .
 
 # --------------------------------------------------
-# Non-root user (Azure + security friendly)
+# Non-root user (Azure-friendly)
 # --------------------------------------------------
 RUN useradd -m django \
     && chown -R django:django /app
@@ -50,12 +50,24 @@ USER django
 EXPOSE 8000
 
 # --------------------------------------------------
-# Startup command
+# Entry command (ROLE BASED)
 # --------------------------------------------------
-CMD ["/bin/bash", "-c", \
-     "python manage.py migrate && \
-      python manage.py collectstatic --noinput && \
-      gunicorn ev_backend.wsgi:application \
-      --bind 0.0.0.0:8000 \
-      --workers 3 \
-      --timeout 120"]
+CMD ["bash", "-c", "\
+if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
+  echo 'Starting Django Web (Gunicorn)'; \
+  python manage.py migrate && \
+  python manage.py collectstatic --noinput && \
+  gunicorn ev_backend.wsgi:application \
+    --bind 0.0.0.0:8000 \
+    --workers 3 \
+    --timeout 120; \
+elif [ \"$SERVICE_ROLE\" = \"celery\" ]; then \
+  echo 'Starting Celery Worker'; \
+  celery -A ev_backend worker --loglevel=info; \
+elif [ \"$SERVICE_ROLE\" = \"beat\" ]; then \
+  echo 'Starting Celery Beat'; \
+  celery -A ev_backend beat --loglevel=info; \
+else \
+  echo 'ERROR: SERVICE_ROLE not set (web | celery | beat)'; \
+  exit 1; \
+fi"]
