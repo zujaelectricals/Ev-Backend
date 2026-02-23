@@ -289,6 +289,15 @@ def _process_booking_payment(razorpay_payment):
             )
             raise ValueError("booking_payment was not created")
         
+        # CRITICAL: Refresh booking from DB after get_or_create.
+        # When BookingPayment was created above with status='completed', Payment.save() fired
+        # automatically and called booking.make_payment() internally (first call).
+        # The local `booking` object is now stale — it still holds total_paid from before
+        # that save.  Without this refresh the safeguard check below would use the stale
+        # value, miss that total_paid was already updated, and call make_payment() a second
+        # time — causing the ⚠️ total_paid mismatch warning (Expected N, Actual N-amount).
+        booking.refresh_from_db()
+        
         # CRITICAL SAFEGUARD: Check if this exact payment amount was already added to total_paid
         # by checking if there's a BookingPayment with this transaction_id that was already processed
         # This prevents double-counting if _process_booking_payment is called multiple times
