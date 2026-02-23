@@ -1,7 +1,11 @@
 from django.db import models
+from django.db.models import Sum
 from django.utils import timezone
 from django.conf import settings
 from core.users.models import User
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Booking(models.Model):
@@ -117,16 +121,11 @@ class Booking(models.Model):
         
         # Refresh from DB to get latest state
         self.refresh_from_db()
-        
-        # Calculate actual sum of completed payments (source of truth)
-        completed_payments_sum = sum(
-            Decimal(str(p.amount)) 
-            for p in self.payments.filter(status='completed')
-        )
-        
-        # Import logger for logging
-        import logging
-        logger = logging.getLogger(__name__)
+
+        # Calculate actual sum of completed payments using a single DB aggregate query
+        # (replaces a Python-side loop that fetched every payment row into memory)
+        _result = self.payments.filter(status='completed').aggregate(total=Sum('amount'))
+        completed_payments_sum = Decimal(str(_result['total'] or 0))
         
         # CRITICAL: If total_paid doesn't match actual payments, sync it first
         # This prevents issues where total_paid is incorrect due to previous errors
