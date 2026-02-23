@@ -48,8 +48,11 @@ def auto_fill_emi_from_payout(user, payout_amount):
         if months_to_pay > 0:
             booking.emi_paid_count += months_to_pay
             booking.total_paid += booking.emi_amount * months_to_pay
-            booking.remaining_amount = booking.total_amount - booking.total_paid
-            
+            booking.remaining_amount = (
+                booking.total_amount - booking.total_paid
+                - booking.bonus_applied - booking.deductions_applied
+            )
+
             # Update booking status
             if booking.remaining_amount <= 0:
                 booking.status = 'completed'

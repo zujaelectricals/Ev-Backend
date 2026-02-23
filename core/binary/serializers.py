@@ -189,9 +189,9 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         return obj.left_count + obj.right_count
     
     def get_parent_name(self, obj):
-        """Get parent's full name"""
-        if obj.parent and obj.parent.user:
-            return obj.parent.user.get_full_name() or obj.parent.user.username
+        """Get the direct referrer's (referred_by) full name"""
+        if obj.user and obj.user.referred_by:
+            return obj.user.referred_by.get_full_name() or obj.user.referred_by.username
         return None
     
     def get_wallet_balance(self, obj):
@@ -337,7 +337,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             else:
                 # Fallback to query if prefetch not available
                 left_child = BinaryNode.objects.select_related(
-                    'user', 'user__wallet', 'parent', 'parent__user'
+                    'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
                 ).filter(parent=obj, side='left').first()
             
             if not left_child:
@@ -382,7 +382,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             else:
                 # Fallback to query if prefetch not available
                 right_child = BinaryNode.objects.select_related(
-                    'user', 'user__wallet', 'parent', 'parent__user'
+                    'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
                 ).filter(parent=obj, side='right').first()
             
             if not right_child:
@@ -422,7 +422,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         # First, collect all nodes and their users (without expensive queries)
         nodes_to_process = []
         children = BinaryNode.objects.select_related(
-            'user', 'user__wallet', 'parent', 'parent__user'
+            'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
         ).filter(parent=node, side=side)
         
         for child in children:
@@ -475,7 +475,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 'tds_current': batch_data['tds_current'].get(user_id, "0.00"),
                 'net_amount_total': batch_data['net_amount_total'].get(user_id, "0.00"),
                 'parent': child.parent.id if child.parent else None,
-                'parent_name': child.parent.user.get_full_name() or child.parent.user.username if child.parent and child.parent.user else None,
+                'parent_name': child.user.referred_by.get_full_name() or child.user.referred_by.username if child.user and child.user.referred_by else None,
                 'side': child.side,
                 'level': child.level,
                 'left_count': child.left_count,
@@ -499,7 +499,7 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         
         nodes = []
         children = BinaryNode.objects.select_related(
-            'user', 'user__wallet', 'parent', 'parent__user'
+            'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
         ).filter(parent=node, side=side)
         
         for child in children:

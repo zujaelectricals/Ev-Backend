@@ -325,8 +325,9 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
         
         # Update booking (only when admin/staff accepts payment)
-        # make_payment() is now idempotent and will check if payment was already processed
-        booking.make_payment(amount)
+        # Pass payment_id so Guard 2 in make_payment() detects that Payment.save()
+        # above already processed this payment and skips the duplicate add.
+        booking.make_payment(amount, payment_id=payment.id)
         
         # Handle special case: if reservation was released (expired), re-reserve it
         # make_payment() already handles 'reserved' -> 'completed' transition
@@ -700,8 +701,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment.completed_at = timezone.now()
             payment.save(update_fields=['completed_at'])
             booking = payment.booking
-            # make_payment() is now idempotent and will check if payment was already processed
-            booking.make_payment(payment.amount)
+            # Pass payment_id so Guard 2 in make_payment() can detect that
+            # Payment.save() already processed this payment (via status_changing_to_completed)
+            # and skip the duplicate add.
+            booking.make_payment(payment.amount, payment_id=payment.id)
             # Note: make_payment() now handles reservation completion automatically
             
             # Trigger Celery task for payment processing (direct user commission, etc.)

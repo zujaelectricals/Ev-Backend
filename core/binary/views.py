@@ -281,7 +281,7 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         matching_nodes = BinaryNode.objects.filter(
             id__in=descendant_ids
         ).select_related(
-            'user', 'user__wallet', 'parent', 'parent__user'
+            'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
         ).annotate(
             full_name_lower=Lower(Concat(
                 'user__first_name',
@@ -322,7 +322,7 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 'referral_code': node.user.referral_code,
                 'date_joined': node.user.date_joined,
                 'parent_id': node.parent.id if node.parent else None,
-                'parent_name': node.parent.user.get_full_name() if node.parent and node.parent.user else None,
+                'parent_name': node.user.referred_by.get_full_name() or node.user.referred_by.username if node.user and node.user.referred_by else None,
                 'side': node.side,
                 'tree_side': tree_side,  # Which side of the root tree (left/right)
                 'level': node.level,
@@ -467,20 +467,20 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             left_children_prefetch = Prefetch(
                 'children',
                 queryset=BinaryNode.objects.select_related(
-                    'user', 'user__wallet', 'parent', 'parent__user'
+                    'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
                 ).filter(side='left'),
                 to_attr='left_children_list'
             )
             right_children_prefetch = Prefetch(
                 'children',
                 queryset=BinaryNode.objects.select_related(
-                    'user', 'user__wallet', 'parent', 'parent__user'
+                    'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
                 ).filter(side='right'),
                 to_attr='right_children_list'
             )
             
             node = BinaryNode.objects.select_related(
-                'user', 'user__wallet', 'parent', 'parent__user'
+                'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
             ).prefetch_related(
                 left_children_prefetch,
                 right_children_prefetch
@@ -587,20 +587,20 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             left_children_prefetch = Prefetch(
                 'children',
                 queryset=BinaryNode.objects.select_related(
-                    'user', 'user__wallet', 'parent', 'parent__user'
+                    'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
                 ).filter(side='left'),
                 to_attr='left_children_list'
             )
             right_children_prefetch = Prefetch(
                 'children',
                 queryset=BinaryNode.objects.select_related(
-                    'user', 'user__wallet', 'parent', 'parent__user'
+                    'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
                 ).filter(side='right'),
                 to_attr='right_children_list'
             )
             
             node = BinaryNode.objects.select_related(
-                'user', 'user__wallet', 'parent', 'parent__user'
+                'user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user'
             ).prefetch_related(
                 left_children_prefetch,
                 right_children_prefetch
@@ -1320,10 +1320,14 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         if side_filter:
             queryset = queryset.filter(side=side_filter)
         
-        # Annotate with total_paid from bookings for each user
-        # Use Coalesce to handle None values (when user has no bookings)
+        # Annotate with the total amount applied toward each user's booking:
+        #   total_paid        – actual cash/online payments
+        #   bonus_applied     – company bonus credit
+        #   deductions_applied – TDS / commission-funded credits
         queryset = queryset.annotate(
             total_paid=Coalesce(Sum('user__bookings__total_paid'), Decimal('0'))
+                      + Coalesce(Sum('user__bookings__bonus_applied'), Decimal('0'))
+                      + Coalesce(Sum('user__bookings__deductions_applied'), Decimal('0'))
         )
         
         # Order by side (left first) and then by user id for consistency

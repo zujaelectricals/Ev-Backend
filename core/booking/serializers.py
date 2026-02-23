@@ -286,95 +286,53 @@ class BookingSerializer(serializers.ModelSerializer):
     
     def get_total_paid(self, obj):
         """
-        Calculate total_paid from actual completed payments + active buyer bonus.
-        The company bonus (₹5000) is added to total_paid when user becomes an active buyer.
-        This ensures the API reflects the actual total_paid including bonuses.
+        Returns the total amount actually paid by the customer (completed payments only).
+        The company bonus is NOT included here; it is shown separately in bonus_amount.
         """
         from decimal import Decimal
-        from core.wallet.models import WalletTransaction
-        
+
         payments_qs = getattr(obj, 'payments', None)
         if payments_qs is None:
             return str(obj.total_paid)  # Fallback to stored value
-        
-        # Sum all completed payments
+
         completed_payments_sum = sum(
             Decimal(str(p.amount))
             for p in payments_qs.filter(status='completed')
         )
-        
-        # Add active buyer bonus if it exists for this booking
-        # The bonus is added to booking.total_paid when user becomes an active buyer
-        bonus_amount = Decimal('0.00')
-        if obj.user:
-            bonus_exists = WalletTransaction.objects.filter(
-                user=obj.user,
-                transaction_type='ACTIVE_BUYER_BONUS',
-                reference_id=obj.id,
-                reference_type='booking'
-            ).exists()
-            
-            if bonus_exists:
-                bonus_amount = Decimal('5000.00')
-        
-        total_with_bonus = completed_payments_sum + bonus_amount
-        return str(total_with_bonus)
-    
+        return str(completed_payments_sum)
+
     def get_remaining_amount(self, obj):
         """
-        Calculate remaining_amount based on actual total_paid (payments + active buyer bonus).
-        The company bonus reduces the remaining balance.
+        Returns the remaining balance the customer must still pay.
+        remaining = total_amount - actual_payments - bonus_applied
+
+        We recompute from actual Payment records (same source as get_total_paid) so that
+        legacy bookings whose DB total_paid was inflated by the old bonus logic still
+        return the correct value.
         """
         from decimal import Decimal
-        from core.wallet.models import WalletTransaction
-        
-        total_amount = Decimal(str(obj.total_amount))
-        
-        # Get actual total_paid from completed payments + bonus
+
         payments_qs = getattr(obj, 'payments', None)
         if payments_qs is None:
-            total_paid = Decimal(str(obj.total_paid))  # Fallback to stored value
+            # Fallback: derive from stored total_paid + bonus_applied
+            actual_paid = Decimal(str(obj.total_paid))
         else:
-            # Sum completed payments
-            total_paid = sum(
+            actual_paid = sum(
                 Decimal(str(p.amount))
                 for p in payments_qs.filter(status='completed')
             )
-            
-            # Add active buyer bonus if it exists for this booking
-            if obj.user:
-                bonus_exists = WalletTransaction.objects.filter(
-                    user=obj.user,
-                    transaction_type='ACTIVE_BUYER_BONUS',
-                    reference_id=obj.id,
-                    reference_type='booking'
-                ).exists()
-                
-                if bonus_exists:
-                    total_paid += Decimal('5000.00')
-        
-        remaining = total_amount - total_paid
-        return str(max(remaining, Decimal('0')))  # Ensure non-negative
-    
+
+        bonus = Decimal(str(obj.bonus_applied))
+        deductions = Decimal(str(obj.deductions_applied))
+        remaining = Decimal(str(obj.total_amount)) - actual_paid - bonus - deductions
+        return str(max(remaining, Decimal('0')))
+
     def get_bonus_amount(self, obj):
         """
-        Get the active buyer bonus amount for this booking.
-        Returns the bonus amount (₹5000) if bonus was applied, otherwise 0.
+        Returns the company bonus that has been debited from the remaining balance.
+        Reads directly from the booking's bonus_applied field.
         """
-        from core.wallet.models import WalletTransaction
-        
-        if obj.user:
-            bonus_exists = WalletTransaction.objects.filter(
-                user=obj.user,
-                transaction_type='ACTIVE_BUYER_BONUS',
-                reference_id=obj.id,
-                reference_type='booking'
-            ).exists()
-            
-            if bonus_exists:
-                return "5000.00"
-        
-        return "0.00"
+        return str(obj.bonus_applied)
 
 
 class RefundDetailSerializer(serializers.Serializer):

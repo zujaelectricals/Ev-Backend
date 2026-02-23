@@ -669,14 +669,22 @@ def deduct_from_booking_balance(user, deduction_amount, deduction_type='EXTRA_DE
         actual_deduction = min(deduction_decimal, booking.remaining_amount)
         
         # Update booking
-        booking.total_paid += actual_deduction
-        booking.remaining_amount = booking.total_amount - booking.total_paid
-        
+        # TDS/extra deductions are NON-CASH credits (funded from commission earnings).
+        # They must NOT go into total_paid (which is reserved for actual customer payments).
+        # Instead they accumulate in deductions_applied, which save() subtracts from remaining_amount.
+        booking.deductions_applied += actual_deduction
+        # Compute projected remaining so the status check below uses the correct value.
+        # save() will recalculate remaining_amount automatically using the same formula.
+        booking.remaining_amount = (
+            booking.total_amount - booking.total_paid
+            - booking.bonus_applied - booking.deductions_applied
+        )
+
         # Update booking status if fully paid
         if booking.remaining_amount <= 0:
             booking.status = 'completed'
             booking.completed_at = timezone.now()
-        
+
         booking.save()
         
         # Create deduction transaction

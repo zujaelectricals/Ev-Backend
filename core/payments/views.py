@@ -8,6 +8,8 @@ from django.contrib.contenttypes.models import ContentType
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 from django.conf import settings
+from django.utils import timezone
+from datetime import timedelta
 import json
 import logging
 import hashlib
@@ -174,8 +176,17 @@ def _process_booking_payment(razorpay_payment):
     try:
         booking = razorpay_payment.content_object
         if not isinstance(booking, Booking):
+            logger.warning(
+                f"Payment {razorpay_payment.order_id} content_object is not a Booking "
+                f"(got {type(booking).__name__}). Skipping booking payment processing."
+            )
             return None, None
-    except Exception:
+    except Exception as e:
+        logger.error(
+            f"Failed to resolve content_object for payment {razorpay_payment.order_id} "
+            f"(content_type={razorpay_payment.content_type}, object_id={razorpay_payment.object_id}): {e}",
+            exc_info=True
+        )
         return None, None
     
     # Use transaction with select_for_update to prevent race conditions
@@ -321,13 +332,16 @@ def _process_booking_payment(razorpay_payment):
                 f"expected amount ({expected_total_paid_after}) for order {razorpay_payment.order_id}. "
                 f"Skipping make_payment() to prevent double-counting."
             )
-            # Just ensure remaining_amount is correct
-            booking.remaining_amount = booking.total_amount - booking.total_paid
+            # Ensure remaining_amount is correct (total_amount - total_paid - bonus_applied)
+            booking.remaining_amount = booking.total_amount - booking.total_paid - booking.bonus_applied
             booking.save(update_fields=['remaining_amount'])
             return booking_payment, booking
         
         try:
-            booking.make_payment(amount_rupees)
+            # Pass booking_payment.id so Guard 2 in make_payment() detects that
+            # Payment.save() (triggered by get_or_create above) already processed
+            # this payment and skips the duplicate add.
+            booking.make_payment(amount_rupees, payment_id=booking_payment.id)
             # If we reach here, make_payment() succeeded completely
             booking.refresh_from_db()
             total_paid_after = Decimal(str(booking.total_paid))
@@ -414,7 +428,7 @@ def _process_booking_payment(razorpay_payment):
                     f"Skipping duplicate update to prevent doubling. Exception: {e}"
                 )
                 # Just recalculate remaining_amount to be safe
-                booking.remaining_amount = booking.total_amount - booking.total_paid
+                booking.remaining_amount = booking.total_amount - booking.total_paid - booking.bonus_applied - booking.deductions_applied
                 booking.save(update_fields=['remaining_amount'])
                 return booking_payment, booking
             else:
@@ -426,7 +440,7 @@ def _process_booking_payment(razorpay_payment):
                     f"Updating booking manually: {e}"
                 )
                 booking.total_paid += amount_rupees
-                booking.remaining_amount = booking.total_amount - booking.total_paid
+                booking.remaining_amount = booking.total_amount - booking.total_paid - booking.bonus_applied - booking.deductions_applied
             
             # Update status based on payment
             # Status becomes 'active' when booking_amount is paid (initial booking fee)
@@ -597,83 +611,108 @@ def create_order(request):
             f"gateway_charges=₹{gateway_charges_rupees:.2f} ({gateway_charges_paise} paise)"
         )
         
-        # Create Razorpay order with gross amount (what user pays)
-        client = get_razorpay_client()
-        order_data = {
-            'amount': gross_amount_paise,  # User pays gross amount (includes charges)
-            'currency': 'INR',
-            'receipt': f'{entity_type}_{entity_id}',
-            'notes': {
-                'entity_type': entity_type,
-                'entity_id': str(entity_id),
-                'user_id': str(request.user.id),
-                'net_amount': str(net_amount_rupees),  # Store net amount in notes for reference
-                'gateway_charges': str(gateway_charges_rupees),  # Store charges in notes for reference
+        # ── ORDER REUSE: return existing uncompleted order if one exists ────────────
+        # If the user already has a CREATED (unpaid) order for this exact entity+amount
+        # within the last 30 minutes, reuse it — no Razorpay API call needed.
+        # This eliminates the external HTTP round-trip on repeated attempts (e.g. user
+        # dismissed the popup and clicked Pay again).
+        ORDER_REUSE_WINDOW_SECONDS = 30 * 60  # 30 minutes
+        reuse_cutoff = timezone.now() - timedelta(seconds=ORDER_REUSE_WINDOW_SECONDS)
+        existing_payment = Payment.objects.filter(
+            user=request.user,
+            content_type=content_type,
+            object_id=entity_id,
+            amount=gross_amount_paise,   # same gross amount
+            net_amount=net_amount_paise, # same net amount
+            status='CREATED',
+            created_at__gte=reuse_cutoff,
+        ).order_by('-created_at').first()
+
+        if existing_payment:
+            logger.info(
+                f"Reusing existing Razorpay order {existing_payment.order_id} for user {request.user.id}, "
+                f"entity_type={entity_type}, entity_id={entity_id} "
+                f"(created at {existing_payment.created_at}). Skipping Razorpay API call."
+            )
+            order_id = existing_payment.order_id
+            gateway_charges_paise = existing_payment.gateway_charges or gateway_charges_paise
+
+        else:
+            # No reusable order — call Razorpay API to create a fresh one
+            client = get_razorpay_client()
+            order_data = {
+                'amount': gross_amount_paise,
+                'currency': 'INR',
+                'receipt': f'{entity_type}_{entity_id}',
+                'notes': {
+                    'entity_type': entity_type,
+                    'entity_id': str(entity_id),
+                    'user_id': str(request.user.id),
+                    'net_amount': str(net_amount_rupees),
+                    'gateway_charges': str(gateway_charges_rupees),
+                }
             }
-        }
-        
-        # Retry wrapper for order creation with exponential backoff
-        @retry_on_timeout(max_retries=RAZORPAY_MAX_RETRIES)
-        def create_razorpay_order_with_retry(client, order_data):
-            return client.order.create(data=order_data)
-        
-        try:
-            razorpay_order = create_razorpay_order_with_retry(client, order_data)
-        except requests.exceptions.Timeout as timeout_error:
-            logger.error(
-                f"Razorpay API timeout while creating order for user {request.user.id}, "
-                f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {timeout_error}",
-                exc_info=True
+
+            @retry_on_timeout(max_retries=RAZORPAY_MAX_RETRIES)
+            def create_razorpay_order_with_retry(client, order_data):
+                return client.order.create(data=order_data)
+
+            try:
+                razorpay_order = create_razorpay_order_with_retry(client, order_data)
+            except requests.exceptions.Timeout as timeout_error:
+                logger.error(
+                    f"Razorpay API timeout while creating order for user {request.user.id}, "
+                    f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {timeout_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Payment gateway request timed out. Please try again.'},
+                    status=status.HTTP_504_GATEWAY_TIMEOUT
+                )
+            except requests.exceptions.ConnectionError as conn_error:
+                logger.error(
+                    f"Razorpay API connection error while creating order for user {request.user.id}, "
+                    f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {conn_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Unable to connect to payment gateway. Please try again later.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            except requests.exceptions.RequestException as req_error:
+                logger.error(
+                    f"Razorpay API request error while creating order for user {request.user.id}, "
+                    f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {req_error}",
+                    exc_info=True
+                )
+                return Response(
+                    {'error': 'Payment gateway request failed. Please try again.'},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+
+            order_id = razorpay_order['id']
+
+            # Save new Payment with CREATED status
+            with transaction.atomic():
+                Payment.objects.create(
+                    user=request.user,
+                    order_id=order_id,
+                    amount=gross_amount_paise,
+                    net_amount=net_amount_paise,
+                    gateway_charges=gateway_charges_paise,
+                    status='CREATED',
+                    content_type=content_type,
+                    object_id=entity_id,
+                    raw_payload=razorpay_order,
+                )
+
+            logger.info(
+                f"Created Razorpay order {order_id} for user {request.user.id}, "
+                f"entity_type={entity_type}, entity_id={entity_id}, "
+                f"gross_amount={gross_amount_paise} paise (₹{gross_amount_rupees:.2f}), "
+                f"net_amount={net_amount_paise} paise (₹{net_amount_rupees:.2f}), "
+                f"gateway_charges={gateway_charges_paise} paise (₹{gateway_charges_rupees:.2f})"
             )
-            return Response(
-                {'error': 'Payment gateway request timed out. Please try again.'},
-                status=status.HTTP_504_GATEWAY_TIMEOUT
-            )
-        except requests.exceptions.ConnectionError as conn_error:
-            logger.error(
-                f"Razorpay API connection error while creating order for user {request.user.id}, "
-                f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {conn_error}",
-                exc_info=True
-            )
-            return Response(
-                {'error': 'Unable to connect to payment gateway. Please try again later.'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE
-            )
-        except requests.exceptions.RequestException as req_error:
-            logger.error(
-                f"Razorpay API request error while creating order for user {request.user.id}, "
-                f"entity_type={entity_type}, entity_id={entity_id}, gross_amount={gross_amount_paise} paise: {req_error}",
-                exc_info=True
-            )
-            return Response(
-                {'error': 'Payment gateway request failed. Please try again.'},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
-        
-        order_id = razorpay_order['id']
-        
-        # Save Payment with CREATED status
-        # Store both gross amount (what user pays) and net amount (what gets credited)
-        with transaction.atomic():
-            payment = Payment.objects.create(
-                user=request.user,
-                order_id=order_id,
-                amount=gross_amount_paise,  # Gross amount (what user pays, includes charges)
-                net_amount=net_amount_paise,  # Net amount (what gets credited)
-                gateway_charges=gateway_charges_paise,  # Gateway charges
-                status='CREATED',
-                content_type=content_type,
-                object_id=entity_id,
-                raw_payload=razorpay_order,
-            )
-        
-        logger.info(
-            f"Created Razorpay order {order_id} for user {request.user.id}, "
-            f"entity_type={entity_type}, entity_id={entity_id}, "
-            f"gross_amount={gross_amount_paise} paise (₹{gross_amount_rupees:.2f}), "
-            f"net_amount={net_amount_paise} paise (₹{net_amount_rupees:.2f}), "
-            f"gateway_charges={gateway_charges_paise} paise (₹{gateway_charges_rupees:.2f})"
-        )
         
         # Return response with gross amount and breakdown (what user needs to pay)
         response_serializer = CreateOrderResponseSerializer({

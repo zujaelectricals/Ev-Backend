@@ -8,8 +8,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .utils import (
     send_email_otp, send_mobile_otp, verify_otp, generate_referral_code,
     generate_otp, store_signup_session, get_signup_session, delete_signup_session,
-    ensure_dummy_user, DUMMY_USER_EMAIL
+    ensure_dummy_user, DUMMY_USER_EMAIL, ensure_company_referral_user
 )
+from core.settings.models import PlatformSettings
 
 User = get_user_model()
 
@@ -336,10 +337,21 @@ class SignupSerializer(serializers.Serializer):
         if not referral_code:
             raise serializers.ValidationError("Referral code is required")
 
+        referral_code = referral_code.upper()
+        
+        # Check if this is the company referral code from settings
+        platform_settings = PlatformSettings.get_settings()
+        company_referral_code = platform_settings.company_referral_code.strip().upper() if platform_settings.company_referral_code else None
+        
+        if company_referral_code and referral_code == company_referral_code:
+            # Company referral code is allowed even if user doesn't exist yet
+            return referral_code
+        
+        # For other referral codes, check if user exists
         if not User.objects.filter(referral_code__iexact=referral_code).exists():
             raise serializers.ValidationError("Invalid referral code")
 
-        return referral_code.upper()
+        return referral_code
     
     def validate(self, attrs):
         """Validate mobile number format"""
@@ -527,14 +539,23 @@ class VerifySignupOTPSerializer(serializers.Serializer):
                 })
         
         # Resolve and validate referral before creating the user.
-        referral_code = (signup_data.get('referral_code') or '').strip()
+        referral_code = (signup_data.get('referral_code') or '').strip().upper()
         if not referral_code:
             raise serializers.ValidationError({'referral_code': 'Referral code is required'})
 
-        try:
-            referrer = User.objects.get(referral_code__iexact=referral_code)
-        except User.DoesNotExist:
-            raise serializers.ValidationError({'referral_code': 'Invalid referral code'})
+        # Check if this is the company referral code from settings
+        platform_settings = PlatformSettings.get_settings()
+        company_referral_code = platform_settings.company_referral_code.strip().upper() if platform_settings.company_referral_code else None
+        
+        if company_referral_code and referral_code == company_referral_code:
+            # Ensure company user exists with this referral code
+            referrer = ensure_company_referral_user(company_referral_code)
+        else:
+            # For other referral codes, validate that user exists
+            try:
+                referrer = User.objects.get(referral_code__iexact=referral_code)
+            except User.DoesNotExist:
+                raise serializers.ValidationError({'referral_code': 'Invalid referral code'})
 
         # Create new user (email, mobile, and PAN are all unique at this point)
         username = email or mobile

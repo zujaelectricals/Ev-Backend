@@ -37,6 +37,14 @@ class Booking(models.Model):
     payment_option = models.CharField(max_length=100, choices=PAYMENT_OPTION_CHOICES, default='full_payment')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     total_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    bonus_applied = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0,
+        help_text="Company bonus debited from remaining balance (not added to total_paid)"
+    )
+    deductions_applied = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0,
+        help_text="Non-cash credits (TDS/extra deductions from commission earnings) debited from remaining balance"
+    )
     remaining_amount = models.DecimalField(max_digits=10, decimal_places=2)
     
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
@@ -92,7 +100,11 @@ class Booking(models.Model):
         if not self.booking_number:
             self.booking_number = self.generate_booking_number()
 
-        self.remaining_amount = self.total_amount - self.total_paid
+        # remaining_amount = what is still owed after:
+        #   - actual customer payments  (total_paid)
+        #   - company bonus credit      (bonus_applied)
+        #   - non-cash commission credits (deductions_applied)
+        self.remaining_amount = self.total_amount - self.total_paid - self.bonus_applied - self.deductions_applied
 
         if not self.expires_at:
             from datetime import timedelta
@@ -112,152 +124,95 @@ class Booking(models.Model):
     def make_payment(self, amount, payment_id=None):
         """
         Record payment and update booking status.
-        
+
+        total_paid  = sum of actual customer payments only (no bonus).
+        bonus_applied = company bonus that is debited from remaining_balance separately.
+        remaining_amount = total_amount - total_paid - bonus_applied  (computed in save()).
+
         Args:
             amount: Payment amount to add
             payment_id: Optional Payment ID to prevent double-processing the same payment
         """
         from decimal import Decimal
-        
+
         # Refresh from DB to get latest state
         self.refresh_from_db()
 
-        # Calculate actual sum of completed payments using a single DB aggregate query
-        # (replaces a Python-side loop that fetched every payment row into memory)
+        # Calculate actual sum of completed payments
         _result = self.payments.filter(status='completed').aggregate(total=Sum('amount'))
         completed_payments_sum = Decimal(str(_result['total'] or 0))
-        
-        # CRITICAL: If total_paid doesn't match actual payments, sync it first
-        # This prevents issues where total_paid is incorrect due to previous errors
-        # BUT: Preserve bonuses (like active buyer bonus) that are added to total_paid
-        # Check if user has received active buyer bonus
-        from core.wallet.models import WalletTransaction
-        has_active_buyer_bonus = WalletTransaction.objects.filter(
-            user=self.user,
-            transaction_type='ACTIVE_BUYER_BONUS',
-            reference_id=self.id,
-            reference_type='booking'
-        ).exists()
-        
-        bonus_amount = Decimal('5000.00') if has_active_buyer_bonus else Decimal('0.00')
-        expected_total_with_bonus = completed_payments_sum + bonus_amount
-        
-        # Only sync if total_paid is significantly different AND not due to bonus
-        # If total_paid is greater than payments_sum by exactly the bonus amount, preserve it
+
         total_paid_decimal = Decimal(str(self.total_paid))
-        difference = abs(total_paid_decimal - completed_payments_sum)
-        
-        if difference > Decimal('0.01'):
-            # Check if the difference is due to bonus
-            if has_active_buyer_bonus and abs(total_paid_decimal - expected_total_with_bonus) <= Decimal('0.01'):
-                # total_paid includes bonus, which is correct - don't sync
-                logger.debug(
-                    f"Booking {self.id} total_paid includes active buyer bonus. "
-                    f"total_paid: {self.total_paid}, payments: {completed_payments_sum}, bonus: {bonus_amount}"
-                )
-            elif total_paid_decimal < completed_payments_sum:
-                # total_paid is less than payments - this is an error, sync it
-                # But check if the current payment is already included in completed_payments_sum
-                # If payment_id is provided and payment exists, check if it's in the sum
-                payment_already_included = False
-                if payment_id:
-                    try:
-                        Payment = self.payments.model
-                        payment = self.payments.get(id=payment_id, status='completed')
-                        # Payment exists - it's already in completed_payments_sum
-                        payment_already_included = True
-                    except self.payments.model.DoesNotExist:
-                        pass
-                
-                logger.warning(
-                    f"Booking {self.id} total_paid is less than actual payments! "
-                    f"DB total_paid: {self.total_paid}, Actual payments sum: {completed_payments_sum}. "
-                    f"Syncing total_paid to match actual payments. Payment already included: {payment_already_included}"
-                )
-                self.total_paid = completed_payments_sum
-                self.remaining_amount = self.total_amount - self.total_paid
-                # Recalculate total_paid_decimal after syncing
-                total_paid_decimal = Decimal(str(self.total_paid))
-            elif total_paid_decimal > expected_total_with_bonus:
-                # total_paid is significantly more than payments + bonus - might be an error
-                logger.warning(
-                    f"Booking {self.id} total_paid is significantly more than expected! "
-                    f"DB total_paid: {self.total_paid}, Expected (payments + bonus): {expected_total_with_bonus}. "
-                    f"Syncing total_paid to match expected amount."
-                )
-                self.total_paid = expected_total_with_bonus
-                self.remaining_amount = self.total_amount - self.total_paid
-                # Recalculate total_paid_decimal after syncing
-                total_paid_decimal = Decimal(str(self.total_paid))
-            # If total_paid is between payments_sum and expected_total_with_bonus, preserve it (might be bonus being applied)
-        
-        # Check if this specific payment was already processed
-        # If payment_id is provided, check if that payment was already counted
-        # Account for bonuses when checking (total_paid might include bonus)
-        # Use current total_paid value (after any syncing)
-        total_paid_without_bonus = Decimal(str(self.total_paid)) - bonus_amount
-        if payment_id:
-            try:
-                # Import Payment here to avoid circular import
-                Payment = self.payments.model
-                payment = self.payments.get(id=payment_id, status='completed')
-                # Payment exists and is completed, check if it's already counted
-                # If total_paid (minus bonus) matches payments_sum and adding this amount would exceed, it's duplicate
-                if abs(total_paid_without_bonus - completed_payments_sum) <= Decimal('0.01'):
-                    # total_paid (minus bonus) matches payments_sum, so check if this payment would create a duplicate
-                    if abs(total_paid_without_bonus + Decimal(str(amount)) - completed_payments_sum) <= Decimal('0.01'):
-                        # This payment amount is already included in the sum
-                        logger.info(
-                            f"Payment {payment_id} (amount: {amount}) already processed for booking {self.id}. Skipping."
-                        )
-                        return self
-            except self.payments.model.DoesNotExist:
-                # Payment doesn't exist or not completed, proceed with processing
-                pass
-        
-        # Final check: detect if this payment amount is already reflected in completed_payments_sum.
-        # This happens when Payment.save() already called make_payment() first (triggered by
-        # creating a BookingPayment with status='completed'), and now we're being called a
-        # second time.  In that situation:
-        #   current total_paid (without bonus) + this amount ≈ completed_payments_sum
-        # because the new payment is already counted in the DB sum but total_paid hasn't
-        # been incremented yet in this in-memory object.
-        # When this is true, sync total_paid to the DB sum (+ bonus) and return — do NOT
-        # add the amount again, which would cause double-counting.
-        if abs(total_paid_without_bonus + Decimal(str(amount)) - completed_payments_sum) <= Decimal('0.01'):
+        amount_decimal = Decimal(str(amount))
+
+        # ── Guard 1 ──────────────────────────────────────────────────────────
+        # The payment was already saved to the DB (e.g. Payment.save() → DB
+        # aggregate) but total_paid hasn't been updated yet.  Detect this by
+        # checking:  current_total_paid + this_amount ≈ completed_payments_sum
+        # IMPORTANT: this check must run BEFORE we sync total_paid to the DB
+        # sum, otherwise the guard can no longer detect the duplicate.
+        if abs(total_paid_decimal + amount_decimal - completed_payments_sum) <= Decimal('0.01'):
             logger.info(
-                f"Booking {self.id}: payment amount {amount} is already reflected in "
+                f"Booking {self.id}: payment {amount} already reflected in "
                 f"completed_payments_sum ({completed_payments_sum}). "
                 f"Syncing total_paid and skipping duplicate add."
             )
-            self.total_paid = completed_payments_sum + bonus_amount
-            self.remaining_amount = self.total_amount - self.total_paid
+            self.total_paid = completed_payments_sum
             if self.total_paid >= self.booking_amount and self.status == 'pending':
                 self.status = 'active'
                 self.confirmed_at = timezone.now()
-            if self.remaining_amount <= 0 and self.status != 'completed':
+            if (self.total_amount - self.total_paid - self.bonus_applied - self.deductions_applied) <= 0 and self.status != 'completed':
                 self.status = 'completed'
                 self.completed_at = timezone.now()
             self.save()
+            # Guard 1: payment was already in DB before total_paid was synced.
+            # Still trigger active-buyer bonus – the user may have just qualified.
+            self.user.update_active_buyer_status(booking=self)
             return self
-        
-        # Process the payment
-        self.total_paid += amount
-        self.remaining_amount = self.total_amount - self.total_paid
-        
-        # Update status based on payment
-        # Status becomes 'active' when booking_amount is paid (initial booking fee)
-        # This confirms the booking. If booking_amount < ₹5000, we still activate
-        # because the user has paid the required booking fee.
-        if self.total_paid >= self.booking_amount:
-            if self.status == 'pending':
-                self.status = 'active'
-                self.confirmed_at = timezone.now()
 
-        if self.remaining_amount <= 0:
+        # ── Guard 2 ──────────────────────────────────────────────────────────
+        # Explicit payment_id check: payment is completed AND already counted
+        # (total_paid already matches the DB sum without this payment).
+        if payment_id:
+            try:
+                self.payments.get(id=payment_id, status='completed')
+                if abs(total_paid_decimal - completed_payments_sum) <= Decimal('0.01'):
+                    logger.info(
+                        f"Payment {payment_id} (amount: {amount}) already processed "
+                        f"for booking {self.id}. Skipping."
+                    )
+                    # Guard 2: duplicate call – totals are already correct in DB.
+                    # Still trigger active-buyer bonus in case it wasn't applied yet.
+                    self.user.update_active_buyer_status(booking=self)
+                    return self
+            except self.payments.model.DoesNotExist:
+                pass
+
+        # ── Sync ─────────────────────────────────────────────────────────────
+        # If total_paid drifted away from the DB sum for reasons other than the
+        # current payment, log a warning and re-anchor before adding.
+        if abs(total_paid_decimal - completed_payments_sum) > Decimal('0.01'):
+            logger.warning(
+                f"Booking {self.id} total_paid mismatch! "
+                f"DB total_paid: {self.total_paid}, actual payments: {completed_payments_sum}. "
+                f"Re-anchoring before adding new payment."
+            )
+            self.total_paid = completed_payments_sum
+            total_paid_decimal = completed_payments_sum
+
+        # Process the payment – only actual customer payment goes into total_paid
+        self.total_paid += amount_decimal
+
+        # Status: 'active' once booking_amount is covered by real payments
+        if self.total_paid >= self.booking_amount and self.status == 'pending':
+            self.status = 'active'
+            self.confirmed_at = timezone.now()
+
+        # Status: 'completed' when nothing remains (payments + bonus + deductions cover total)
+        if (self.total_amount - self.total_paid - self.bonus_applied - self.deductions_applied) <= 0:
             self.status = 'completed'
             self.completed_at = timezone.now()
-        
+
         self.save()
         
         # Complete the stock reservation if it exists (when first payment is confirmed)
