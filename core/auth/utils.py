@@ -22,6 +22,143 @@ def generate_otp(length=6):
     return ''.join(random.choices(string.digits, k=length))
 
 
+def format_indian_mobile(mobile):
+    """
+    Format mobile number to Indian format: 91XXXXXXXXXX (12 digits, no + prefix).
+    Accepts 10-digit numbers or numbers already prefixed with 91 or +91.
+    Returns the formatted mobile string, or None if invalid.
+    """
+    if not mobile:
+        return None
+    digits = ''.join(filter(str.isdigit, str(mobile)))
+    if len(digits) == 10:
+        return f"91{digits}"
+    elif len(digits) == 12 and digits.startswith('91'):
+        return digits
+    else:
+        logger.warning(f"Unexpected mobile number format: {mobile}. Expected 10-digit Indian number.")
+        return None
+
+
+def send_otp_via_msg91_unified(otp_code, email=None, mobile=None, user_name=None, company_name=None):
+    """
+    Send OTP via MSG91 unified SMS + Email campaign API.
+    Endpoint: POST https://control.msg91.com/api/v5/campaign/api/campaigns/sms-and-email/run
+    At least one of email or mobile must be provided.
+    Mobile must be a 10-digit Indian number; it will be formatted as 91XXXXXXXXXX.
+    Returns (success, error_message)
+    """
+    if not settings.MSG91_AUTH_KEY:
+        logger.error("MSG91_AUTH_KEY is not configured in settings")
+        return False, "MSG91 authentication key not configured. Please set MSG91_AUTH_KEY in environment variables."
+
+    if not email and not mobile:
+        return False, "At least one of email or mobile must be provided."
+
+    try:
+        url = "https://control.msg91.com/api/v5/campaign/api/campaigns/sms-and-email/run"
+        headers = {
+            "Content-Type": "application/json",
+            "authkey": settings.MSG91_AUTH_KEY
+        }
+
+        # Resolve company name
+        if not company_name:
+            company_name = getattr(settings, 'MSG91_COMPANY_NAME', 'Company')
+
+        # Resolve user name
+        if not user_name:
+            if email:
+                user_name = email.split("@")[0]
+            else:
+                user_name = "User"
+
+        # Format mobile for Indian numbers (91XXXXXXXXXX, no +)
+        formatted_mobile = format_indian_mobile(mobile)
+
+        # Build the recipient object
+        recipient = {
+            "name": user_name,
+            "variables": {
+                "numeric": {
+                    "type": "text",
+                    "value": str(otp_code)
+                }
+            }
+        }
+        if email:
+            recipient["email"] = email
+        if formatted_mobile:
+            recipient["mobiles"] = formatted_mobile
+
+        payload = {
+            "data": {
+                "sendTo": [
+                    {
+                        "to": [recipient],
+                        "variables": {
+                            "numeric": {
+                                "type": "text",
+                                "value": str(otp_code)
+                            },
+                            "company_name": {
+                                "type": "text",
+                                "value": company_name
+                            },
+                            "otp": {
+                                "type": "text",
+                                "value": str(otp_code)
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+
+        logger.info(f"MSG91 OTP Send Request - Email: {email}, Mobile: {formatted_mobile}, User: {user_name}")
+        logger.debug(f"MSG91 OTP Send Request Payload: {json.dumps(payload, indent=2)}")
+
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+
+        # Handle 401 Unauthorized specifically
+        if response.status_code == 401:
+            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly."
+            logger.error(f"MSG91 OTP Send 401 Unauthorized - Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
+            try:
+                error_data = response.json()
+                logger.error(f"MSG91 Error Response: {json.dumps(error_data, indent=2)}")
+            except Exception:
+                logger.error(f"MSG91 Error Response (raw): {response.text}")
+            return False, error_msg
+
+        response.raise_for_status()
+
+        try:
+            data = response.json()
+        except Exception:
+            data = {"text": response.text}
+
+        logger.info(f"MSG91 OTP Send Response - Email: {email}, Mobile: {formatted_mobile}, Response: {json.dumps(data, indent=2)}")
+
+        if response.status_code == 200:
+            logger.info(f"MSG91 OTP Send Success - Email: {email}, Mobile: {formatted_mobile}")
+            return True, None
+        else:
+            errors = data.get("errors", {}) if isinstance(data, dict) else {}
+            error_msg = str(errors) if errors else "Failed to send OTP"
+            logger.warning(f"MSG91 OTP Send Failed - Email: {email}, Mobile: {formatted_mobile}, Errors: {errors}")
+            return False, error_msg
+
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error sending OTP: {str(e)}"
+        logger.error(f"MSG91 OTP Send Network Error - Email: {email}, Mobile: {mobile}, Error: {error_msg}")
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Unexpected error sending OTP: {str(e)}"
+        logger.error(f"MSG91 OTP Send Unexpected Error - Email: {email}, Mobile: {mobile}, Error: {error_msg}")
+        return False, error_msg
+
+
 def send_email_otp(email, otp_code=None, user=None, user_name=None):
     """
     Send OTP via email using MSG91.
@@ -31,7 +168,7 @@ def send_email_otp(email, otp_code=None, user=None, user_name=None):
     """
     if otp_code is None:
         otp_code = generate_otp(settings.OTP_LENGTH)
-    
+
     # Print OTP to terminal
     print(f"\n{'='*60}")
     print(f"OTP SENT VIA EMAIL")
@@ -39,11 +176,11 @@ def send_email_otp(email, otp_code=None, user=None, user_name=None):
     print(f"Email: {email}")
     print(f"OTP Code: {otp_code}")
     print(f"{'='*60}\n")
-    
+
     # Store OTP in Redis with expiry
     cache_key = f"otp:email:{email}"
     cache.set(cache_key, otp_code, timeout=settings.OTP_EXPIRY_MINUTES * 60)
-    
+
     # Also store in database
     expires_at = timezone.now() + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
     OTP.objects.create(
@@ -52,134 +189,31 @@ def send_email_otp(email, otp_code=None, user=None, user_name=None):
         otp_code=otp_code,
         expires_at=expires_at
     )
-    
-    # Extract user name if user object is provided, otherwise use user_name parameter
+
+    # Extract user name and mobile if user object is provided
     final_user_name = user_name
-    if not final_user_name and user:
-        final_user_name = user.get_full_name() or (user.first_name or user.last_name)
+    user_mobile = None
+    if user:
         if not final_user_name:
-            final_user_name = user.email.split("@")[0] if user.email else None
-    
-    # Print OTP to terminal for debugging
+            final_user_name = user.get_full_name() or (user.first_name or user.last_name)
+            if not final_user_name:
+                final_user_name = user.email.split("@")[0] if user.email else None
+        user_mobile = getattr(user, 'mobile', None) or None
+
     print(f"Email OTP for {email}: {otp_code}")
-    
-    # Send OTP via MSG91
-    success, error_msg = send_otp_via_msg91(email, otp_code, user_name=final_user_name)
-    
+
+    # Send OTP via MSG91 unified endpoint (include mobile if available on user)
+    success, error_msg = send_otp_via_msg91_unified(
+        otp_code,
+        email=email,
+        mobile=user_mobile,
+        user_name=final_user_name
+    )
+
     if not success:
-        # If MSG91 fails, fallback to regular email (optional)
-        # For now, raise error as per requirements
         raise ValueError(error_msg or "Failed to send OTP")
-    
+
     return True
-
-
-def send_sms_via_msg91(mobile, otp_code, user_name=None, company_name=None):
-    """
-    Send OTP via MSG91 SMS API
-    Returns (success, error_message)
-    """
-    if not settings.MSG91_AUTH_KEY:
-        logger.error("MSG91_AUTH_KEY is not configured in settings")
-        return False, "MSG91 authentication key not configured. Please set MSG91_AUTH_KEY in environment variables."
-    
-    try:
-        # MSG91 SMS API endpoint
-        url = "https://control.msg91.com/api/v5/flow/"
-        headers = {
-            "Content-Type": "application/json",
-            "authkey": settings.MSG91_AUTH_KEY
-        }
-        
-        # Use company name from settings or default
-        if not company_name:
-            company_name = getattr(settings, 'MSG91_COMPANY_NAME', 'Company')
-        
-        # MSG91 SMS flow payload
-        # Note: This assumes you have configured an SMS flow template in MSG91
-        # You may need to adjust the payload structure based on your MSG91 SMS template configuration
-        payload = {
-            "flow_id": getattr(settings, 'MSG91_SMS_FLOW_ID', None),  # SMS Flow ID from MSG91 dashboard
-            "sender": getattr(settings, 'MSG91_SMS_SENDER_ID', 'MSG91'),  # Sender ID
-            "mobiles": mobile,
-            "otp": str(otp_code),
-            "company_name": company_name
-        }
-        
-        # If flow_id is not configured, use the older SMS API endpoint
-        if not payload.get("flow_id"):
-            # Fallback to older MSG91 SMS API
-            url = "https://control.msg91.com/api/sendotp.php"
-            params = {
-                "authkey": settings.MSG91_AUTH_KEY,
-                "mobile": mobile,
-                "message": f"Your OTP is {otp_code}. {company_name}",
-                "sender": payload.get("sender", "MSG91"),
-                "otp": otp_code
-            }
-            logger.info(f"MSG91 SMS OTP Send Request - Mobile: {mobile}")
-            logger.debug(f"MSG91 SMS OTP Send Request Params: {params}")
-            
-            response = requests.get(url, params=params, timeout=10)
-        else:
-            logger.info(f"MSG91 SMS OTP Send Request - Mobile: {mobile}, User: {user_name}")
-            logger.debug(f"MSG91 SMS OTP Send Request Payload: {json.dumps(payload, indent=2)}")
-            
-            response = requests.post(url, json=payload, headers=headers, timeout=10)
-        
-        # Handle 401 Unauthorized specifically
-        if response.status_code == 401:
-            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly."
-            logger.error(f"MSG91 SMS OTP Send 401 Unauthorized - Mobile: {mobile}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
-            try:
-                error_data = response.json()
-                logger.error(f"MSG91 SMS Error Response: {json.dumps(error_data, indent=2)}")
-            except:
-                logger.error(f"MSG91 SMS Error Response (raw): {response.text}")
-            return False, error_msg
-        
-        response.raise_for_status()
-        
-        # For GET requests (older API), response might be text
-        try:
-            data = response.json()
-        except:
-            data = {"text": response.text}
-        
-        # Log the response
-        logger.info(f"MSG91 SMS OTP Send Response - Mobile: {mobile}, Response: {json.dumps(data, indent=2)}")
-        
-        # Check if OTP was sent successfully
-        # MSG91 SMS API returns different formats, check for success indicators
-        if response.status_code == 200:
-            # Check response content for success
-            if isinstance(data, dict):
-                if data.get("type") == "success" or data.get("status") == "success" or "success" in str(data).lower():
-                    logger.info(f"MSG91 SMS OTP Send Success - Mobile: {mobile}")
-                    return True, None
-            elif isinstance(data, str) and "success" in data.lower():
-                logger.info(f"MSG91 SMS OTP Send Success - Mobile: {mobile}")
-                return True, None
-            # If we get here, assume success for 200 status
-            logger.info(f"MSG91 SMS OTP Send Success (200 status) - Mobile: {mobile}")
-            return True, None
-        else:
-            errors = data.get("errors", {}) if isinstance(data, dict) else {}
-            if errors:
-                error_msg = str(errors)
-            else:
-                error_msg = "Failed to send SMS OTP"
-            logger.warning(f"MSG91 SMS OTP Send Failed - Mobile: {mobile}, Errors: {errors}")
-            return False, error_msg
-            
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Network error sending SMS OTP: {str(e)}"
-        logger.error(f"MSG91 SMS OTP Send Network Error - Mobile: {mobile}, Error: {error_msg}")
-        return False, error_msg
-    except Exception as e:
-        error_msg = f"Unexpected error sending SMS OTP: {str(e)}"
-        logger.error(f"MSG91 SMS OTP Send Unexpected Error - Mobile: {mobile}, Error: {error_msg}")
-        return False, error_msg
 
 
 def send_mobile_otp(mobile, otp_code=None, user=None, user_name=None):
@@ -191,7 +225,7 @@ def send_mobile_otp(mobile, otp_code=None, user=None, user_name=None):
     """
     if otp_code is None:
         otp_code = generate_otp(settings.OTP_LENGTH)
-    
+
     # Print OTP to terminal
     print(f"\n{'='*60}")
     print(f"OTP SENT VIA SMS")
@@ -199,11 +233,11 @@ def send_mobile_otp(mobile, otp_code=None, user=None, user_name=None):
     print(f"Mobile: {mobile}")
     print(f"OTP Code: {otp_code}")
     print(f"{'='*60}\n")
-    
+
     # Store OTP in Redis with expiry
     cache_key = f"otp:mobile:{mobile}"
     cache.set(cache_key, otp_code, timeout=settings.OTP_EXPIRY_MINUTES * 60)
-    
+
     # Also store in database
     expires_at = timezone.now() + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
     OTP.objects.create(
@@ -212,29 +246,34 @@ def send_mobile_otp(mobile, otp_code=None, user=None, user_name=None):
         otp_code=otp_code,
         expires_at=expires_at
     )
-    
-    # Extract user name if user object is provided, otherwise use user_name parameter
+
+    # Extract user name and email if user object is provided
     final_user_name = user_name
-    if not final_user_name and user:
-        final_user_name = user.get_full_name() or (user.first_name or user.last_name)
+    user_email = None
+    if user:
         if not final_user_name:
-            final_user_name = user.mobile if user.mobile else None
-    
-    # Send SMS via MSG91
-    success, error_msg = send_sms_via_msg91(mobile, otp_code, user_name=final_user_name)
-    
+            final_user_name = user.get_full_name() or (user.first_name or user.last_name)
+            if not final_user_name:
+                final_user_name = user.mobile if user.mobile else None
+        user_email = getattr(user, 'email', None) or None
+
+    # Send SMS via MSG91 unified endpoint (include email if available on user)
+    success, error_msg = send_otp_via_msg91_unified(
+        otp_code,
+        email=user_email,
+        mobile=mobile,
+        user_name=final_user_name
+    )
+
     if not success:
-        # If MSG91 fails, log error but don't raise (to allow fallback behavior)
         logger.warning(f"Failed to send SMS OTP via MSG91 for {mobile}: {error_msg}")
-        # Still return True as OTP is stored and can be verified
-        # In production, you might want to raise an error here
-    
+
     return True
 
 
 def send_otp_dual_channel(user, otp_code=None):
     """
-    Send OTP to both email and SMS simultaneously
+    Send OTP to both email and SMS in a single MSG91 API call.
     Returns dict with success status for both channels:
     {
         'email': {'success': bool, 'error': str or None},
@@ -244,10 +283,10 @@ def send_otp_dual_channel(user, otp_code=None):
     """
     if otp_code is None:
         otp_code = generate_otp(settings.OTP_LENGTH)
-    
+
     # Print OTP to terminal
     print(f"\n{'='*60}")
-    print(f"OTP SENT VIA DUAL CHANNEL")
+    print(f"OTP SENT VIA DUAL CHANNEL (SMS + EMAIL)")
     print(f"{'='*60}")
     print(f"OTP Code: {otp_code}")
     if user.email:
@@ -255,37 +294,71 @@ def send_otp_dual_channel(user, otp_code=None):
     if user.mobile:
         print(f"Mobile: {user.mobile}")
     print(f"{'='*60}\n")
-    
+
     result = {
         'email': {'success': False, 'error': None},
         'sms': {'success': False, 'error': None},
         'otp_code': otp_code
     }
-    
-    # Send email OTP if user has email
+
+    expires_at = timezone.now() + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
+
+    # Store OTP in Redis and DB for email channel
     if user.email:
-        try:
-            send_email_otp(user.email, otp_code, user=user)
-            result['email']['success'] = True
-        except Exception as e:
-            error_msg = str(e)
-            result['email']['error'] = error_msg
-            logger.error(f"Failed to send email OTP to {user.email}: {error_msg}")
-    
-    # Send SMS OTP if user has mobile
+        cache.set(f"otp:email:{user.email}", otp_code, timeout=settings.OTP_EXPIRY_MINUTES * 60)
+        OTP.objects.create(
+            identifier=user.email,
+            otp_type='email',
+            otp_code=otp_code,
+            expires_at=expires_at
+        )
+
+    # Store OTP in Redis and DB for mobile channel
     if user.mobile:
-        try:
-            send_mobile_otp(user.mobile, otp_code, user=user)
-            result['sms']['success'] = True
-        except Exception as e:
-            error_msg = str(e)
+        cache.set(f"otp:mobile:{user.mobile}", otp_code, timeout=settings.OTP_EXPIRY_MINUTES * 60)
+        OTP.objects.create(
+            identifier=user.mobile,
+            otp_type='mobile',
+            otp_code=otp_code,
+            expires_at=expires_at
+        )
+
+    # Resolve user name
+    user_name = user.get_full_name() or (user.first_name or user.last_name)
+    if not user_name:
+        user_name = user.email.split("@")[0] if user.email else (user.mobile or "User")
+
+    # Single unified MSG91 API call for both email and SMS
+    try:
+        success, error_msg = send_otp_via_msg91_unified(
+            otp_code,
+            email=user.email if user.email else None,
+            mobile=user.mobile if user.mobile else None,
+            user_name=user_name
+        )
+        if success:
+            if user.email:
+                result['email']['success'] = True
+            if user.mobile:
+                result['sms']['success'] = True
+        else:
+            if user.email:
+                result['email']['error'] = error_msg
+            if user.mobile:
+                result['sms']['error'] = error_msg
+            logger.error(f"MSG91 dual channel OTP send failed: {error_msg}")
+    except Exception as e:
+        error_msg = str(e)
+        if user.email:
+            result['email']['error'] = error_msg
+        if user.mobile:
             result['sms']['error'] = error_msg
-            logger.error(f"Failed to send SMS OTP to {user.mobile}: {error_msg}")
-    
+        logger.error(f"Dual channel OTP send exception: {error_msg}")
+
     # At least one channel should succeed
     if not result['email']['success'] and not result['sms']['success']:
         raise ValueError("Failed to send OTP via both email and SMS channels")
-    
+
     return result
 
 
@@ -365,98 +438,6 @@ def verify_otp(identifier, otp_code, otp_type):
     return False
 
 
-def send_otp_via_msg91(email, otp_code, user_name=None, company_name=None):
-    """
-    Send OTP via MSG91 campaign API
-    Returns (success, error_message)
-    """
-    if not settings.MSG91_AUTH_KEY:
-        logger.error("MSG91_AUTH_KEY is not configured in settings")
-        return False, "MSG91 authentication key not configured. Please set MSG91_AUTH_KEY in environment variables."
-    
-    try:
-        url = "https://control.msg91.com/api/v5/campaign/api/campaigns/otp/run"
-        headers = {
-            "Content-Type": "application/json",
-            "authkey": settings.MSG91_AUTH_KEY
-        }
-        
-        # Use provided name or default to first part of email
-        if not user_name:
-            user_name = email.split("@")[0]
-        
-        # Use company name from settings or default
-        if not company_name:
-            company_name = settings.MSG91_COMPANY_NAME
-        
-        payload = {
-            "data": {
-                "sendTo": [
-                    {
-                        "to": [
-                            {
-                                "name": user_name,
-                                "email": email
-                            }
-                        ],
-                        "variables": {
-                            "company_name": {
-                                "type": "text",
-                                "value": company_name
-                            },
-                            "otp": {
-                                "type": "text",
-                                "value": str(otp_code)
-                            }
-                        }
-                    }
-                ]
-            }
-        }
-        
-        logger.info(f"MSG91 OTP Send Request - Email: {email}, User: {user_name}")
-        logger.debug(f"MSG91 OTP Send Request Payload: {json.dumps(payload, indent=2)}")
-        
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        
-        # Handle 401 Unauthorized specifically
-        if response.status_code == 401:
-            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly in production environment."
-            logger.error(f"MSG91 OTP Send 401 Unauthorized - Email: {email}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
-            try:
-                error_data = response.json()
-                logger.error(f"MSG91 Error Response: {json.dumps(error_data, indent=2)}")
-            except:
-                logger.error(f"MSG91 Error Response (raw): {response.text}")
-            return False, error_msg
-        
-        response.raise_for_status()
-        data = response.json()
-        
-        # Log the response
-        logger.info(f"MSG91 OTP Send Response - Email: {email}, Response: {json.dumps(data, indent=2)}")
-        
-        # Check if OTP was sent successfully
-        if data.get("status") == "success" or response.status_code == 200:
-            logger.info(f"MSG91 OTP Send Success - Email: {email}")
-            return True, None
-        else:
-            errors = data.get("errors", {})
-            if errors:
-                error_msg = str(errors)
-            else:
-                error_msg = "Failed to send OTP"
-            logger.warning(f"MSG91 OTP Send Failed - Email: {email}, Errors: {errors}")
-            return False, error_msg
-            
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Network error sending OTP: {str(e)}"
-        logger.error(f"MSG91 OTP Send Network Error - Email: {email}, Error: {error_msg}")
-        return False, error_msg
-    except Exception as e:
-        error_msg = f"Unexpected error sending OTP: {str(e)}"
-        logger.error(f"MSG91 OTP Send Unexpected Error - Email: {email}, Error: {error_msg}")
-        return False, error_msg
 
 
 def generate_referral_code(user):
@@ -477,6 +458,51 @@ def generate_referral_code(user):
     user.referral_code = code
     user.save(update_fields=['referral_code'])
     return code
+
+
+def ensure_company_referral_user(company_referral_code):
+    """
+    Ensure a superadmin user exists with the company referral code.
+    Returns the user with the company referral code.
+    """
+    from core.users.models import User
+    
+    # First, try to find an existing user with this referral code
+    try:
+        company_user = User.objects.get(referral_code=company_referral_code)
+        # If found, ensure it's a superadmin
+        if not company_user.is_superuser:
+            company_user.is_superuser = True
+            company_user.is_staff = True
+            company_user.role = 'admin'
+            company_user.save(update_fields=['is_superuser', 'is_staff', 'role'])
+        return company_user
+    except User.DoesNotExist:
+        # Create a new superadmin user with the company referral code
+        # Use a default username/email for the company user
+        username = f"company_{company_referral_code.lower()}"
+        email = f"company@{company_referral_code.lower()}.local"
+        
+        # Check if username or email already exists, adjust if needed
+        base_username = username
+        base_email = email
+        counter = 1
+        while User.objects.filter(username=username).exists() or User.objects.filter(email=email).exists():
+            username = f"{base_username}{counter}"
+            email = f"company{counter}@{company_referral_code.lower()}.local"
+            counter += 1
+        
+        company_user = User.objects.create(
+            username=username,
+            email=email,
+            first_name='Company',
+            last_name='Admin',
+            role='admin',
+            is_staff=True,
+            is_superuser=True,
+            referral_code=company_referral_code
+        )
+        return company_user
 
 
 def store_signup_session(email, mobile, signup_data, expiry_minutes=15):
