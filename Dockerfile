@@ -56,11 +56,8 @@ if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
         --workers 3 \
         --timeout 120; \
 elif [ \"$SERVICE_ROLE\" = \"celery\" ]; then \
-    echo 'Starting Celery Worker'; \
-    python -m celery worker \
-        -A ev_backend \
-        --loglevel=info \
-        --pool=solo; \
+    echo 'Starting Celery Worker' && \
+    python -m celery -A ev_backend worker --loglevel=info --pool=solo ; \
 else \
     echo 'ERROR: SERVICE_ROLE not set (web | celery)'; \
     exit 1; \
