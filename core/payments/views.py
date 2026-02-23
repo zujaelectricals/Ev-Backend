@@ -181,10 +181,10 @@ def _process_booking_payment(razorpay_payment):
     # Use transaction with select_for_update to prevent race conditions
     # This ensures only one process can update the booking at a time
     with transaction.atomic():
-        # Lock the booking row to prevent concurrent updates
-        # Refresh from database to ensure we have the latest total_paid value
+        # Lock the booking row to prevent concurrent updates.
+        # select_for_update().get() already fetches a fresh row from DB with a row-level lock,
+        # so a separate refresh_from_db() immediately after is redundant.
         booking = Booking.objects.select_for_update().get(pk=booking.pk)
-        booking.refresh_from_db()  # Ensure we have latest values, especially total_paid
         
         # Use net_amount (what gets credited) instead of gross amount (what user paid)
         # If net_amount is not set (for old payments), fallback to gross amount
@@ -344,8 +344,44 @@ def _process_booking_payment(razorpay_payment):
                     f"Difference: {total_paid_after - expected_total_paid_after}"
                 )
             
-            # Send booking confirmation email if booking just became active
-            if booking.status == 'active':
+            # Wire payment terms acceptance PDF as booking receipt
+            # When booking becomes active, use the user's latest payment terms acceptance PDF
+            # (generated during OTP-verified payment terms acceptance) as the booking receipt.
+            # This avoids generating a separate PDF here and reuses the already-existing compliance doc.
+            if booking.status == 'active' and not booking.payment_receipt:
+                try:
+                    from core.compliance.models import UserPaymentAcceptance
+                    latest_acceptance = (
+                        UserPaymentAcceptance.objects
+                        .filter(user=booking.user, otp_verified=True)
+                        .exclude(receipt_pdf_url='')
+                        .exclude(receipt_pdf_url__isnull=True)
+                        .order_by('-accepted_at')
+                        .first()
+                    )
+                    if latest_acceptance and latest_acceptance.receipt_pdf_url:
+                        # Point booking.payment_receipt to the same file in storage
+                        # (no file copy — just reuse the existing path)
+                        booking.payment_receipt = latest_acceptance.receipt_pdf_url.name
+                        booking.save(update_fields=['payment_receipt'])
+                        logger.info(
+                            f"Wired payment terms acceptance PDF as booking receipt for "
+                            f"booking {booking.id} (acceptance {latest_acceptance.id})"
+                        )
+                    else:
+                        logger.warning(
+                            f"No OTP-verified payment terms acceptance PDF found for user "
+                            f"{booking.user.id}. booking.payment_receipt will remain unset."
+                        )
+                except Exception as receipt_error:
+                    logger.error(
+                        f"Failed to wire payment terms receipt for booking {booking.id}: {receipt_error}",
+                        exc_info=True
+                    )
+                    # Don't fail payment processing if receipt wiring fails
+
+            # Send booking confirmation email if booking just became active and receipt is set
+            if booking.status == 'active' and booking.payment_receipt:
                 try:
                     from core.booking.tasks import send_booking_confirmation_email_task
                     send_booking_confirmation_email_task.delay(booking.id)
@@ -433,20 +469,9 @@ def _process_booking_payment(razorpay_payment):
             booking.payment_gateway_ref = razorpay_payment.order_id
             booking.save(update_fields=['payment_gateway_ref'])
         
-        # Complete the stock reservation if it exists
-        from core.inventory.utils import complete_reservation
-        try:
-            reservation = booking.stock_reservation
-            if reservation and reservation.status == 'reserved':
-                complete_reservation(reservation)
-                logger.info(
-                    f"Completed stock reservation for booking {booking.id} "
-                    f"from Razorpay payment {razorpay_payment.order_id}"
-                )
-        except Exception as e:
-            # No reservation exists or error accessing it, skip
-            logger.debug(f"No reservation to complete for booking {booking.id}: {e}")
-        
+        # Note: complete_reservation() is already called inside booking.make_payment(),
+        # so no need to call it again here — doing so would be a duplicate DB hit.
+
         logger.info(
             f"Created booking payment {booking_payment.id} for booking {booking.id} "
             f"from Razorpay payment {razorpay_payment.order_id}"
