@@ -284,8 +284,15 @@ RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET", default="
 # Razorpay API timeout configuration (in seconds)
 # Connect timeout: time to establish connection (DNS resolution, SSL handshake)
 # Read timeout: time to wait for response after connection is established
-RAZORPAY_CONNECT_TIMEOUT = env.int("RAZORPAY_CONNECT_TIMEOUT", default=15)
-RAZORPAY_READ_TIMEOUT = env.int("RAZORPAY_READ_TIMEOUT", default=30)
+# Razorpay API timeout & retry tuning
+# Connect timeout: 10s is enough for a healthy connection to Razorpay
+# Read timeout: 20s — Razorpay order creation rarely takes >5s normally
+# Max retries: 1 — retrying once is enough; avoids 3x multiplier on latency
+# Backoff base: 1s — wait 1s before the single retry
+RAZORPAY_CONNECT_TIMEOUT = env.int("RAZORPAY_CONNECT_TIMEOUT", default=10)
+RAZORPAY_READ_TIMEOUT = env.int("RAZORPAY_READ_TIMEOUT", default=20)
+RAZORPAY_MAX_RETRIES = env.int("RAZORPAY_MAX_RETRIES", default=1)
+RAZORPAY_RETRY_BACKOFF_BASE = env.int("RAZORPAY_RETRY_BACKOFF_BASE", default=1)
 # --------------------------------------------------
 # BUSINESS RULES
 # --------------------------------------------------
