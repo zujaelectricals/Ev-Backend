@@ -83,17 +83,18 @@ def pair_matched(self, pair_id):
             # Here, we check AFTER creation, so we need to subtract 1 to get the count before this pair
             pairs_today_before_this = pairs_today - 1
             
-            # Now match the logic: if pairs_today_before_this >= daily_limit, block commission
-            # This means: if we already had daily_limit pairs before this one, block this one
-            if pairs_today_before_this >= daily_limit:
+            # CRITICAL: Block commission if daily limit is exceeded
+            # Use > instead of >= to be more strict: if pairs_today > daily_limit, block
+            # This handles edge cases where pairs_today_before_this calculation might be off
+            if pairs_today_before_this >= daily_limit or pairs_today > daily_limit:
                 logger.warning(
                     f"Pair {pair_id} exceeds daily limit for user {user.email}. "
-                    f"Pairs today (before this): {pairs_today_before_this}, Daily limit: {daily_limit}. "
+                    f"Pairs today (total): {pairs_today}, Pairs today (before this): {pairs_today_before_this}, Daily limit: {daily_limit}. "
                     f"Commission will NOT be credited."
                 )
                 # Mark as blocked
                 pair.commission_blocked = True
-                pair.blocked_reason = f"Daily limit exceeded. Pairs today (before this): {pairs_today_before_this}, Limit: {daily_limit}"
+                pair.blocked_reason = f"Daily limit exceeded. Pairs today (total): {pairs_today}, Pairs today (before this): {pairs_today_before_this}, Limit: {daily_limit}"
                 pair.status = 'processed'
                 pair.processed_at = timezone.now()
                 pair.save(update_fields=['commission_blocked', 'blocked_reason', 'status', 'processed_at'])
