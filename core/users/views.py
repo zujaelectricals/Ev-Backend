@@ -247,49 +247,6 @@ class UserViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
-    
-    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='documents')
-    def get_user_documents(self, request):
-        """
-        Get all document URLs for a specific user (Admin only)
-        Query parameter: user_id (required)
-        Returns: asa_document_acceptance_url, payment_receipt_urls, payment_terms_acceptance_document_url
-        """
-        # Check if user is admin or superuser
-        if not (request.user.is_superuser or request.user.role == 'admin'):
-            raise PermissionDenied("Only admin users can access this endpoint.")
-        
-        # Get user_id from query parameters
-        user_id = request.query_params.get('user_id')
-        if not user_id:
-            return Response(
-                {'error': 'user_id query parameter is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Get the target user
-        try:
-            target_user = User.objects.get(id=user_id)
-        except (User.DoesNotExist, ValueError):
-            return Response(
-                {'error': 'User not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Use UserProfileSerializer to get document URLs
-        serializer = UserProfileSerializer(target_user, context={'request': request})
-        
-        # Extract only the document URLs
-        documents = {
-            'user_id': target_user.id,
-            'user_email': target_user.email,
-            'user_full_name': target_user.get_full_name(),
-            'asa_document_acceptance_url': serializer.data.get('asa_document_acceptance_url'),
-            'payment_receipt_urls': serializer.data.get('payment_receipt_urls', []),
-            'payment_terms_acceptance_document_url': serializer.data.get('payment_terms_acceptance_document_url'),
-        }
-        
-        return Response(documents)
 
 
 class KYCViewSet(viewsets.ModelViewSet):

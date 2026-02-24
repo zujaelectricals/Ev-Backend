@@ -161,17 +161,10 @@ class Command(BaseCommand):
                     fixed_count += 1
                 else:
                     with db_transaction.atomic():
-                        # Reverse the TDS deduction from booking balance.
-                        # TDS deductions are stored in deductions_applied (not total_paid).
-                        booking.deductions_applied = max(
-                            Decimal('0'),
-                            Decimal(str(booking.deductions_applied)) - Decimal(str(total_tds_deducted))
-                        )
-                        booking.remaining_amount = (
-                            booking.total_amount - booking.total_paid
-                            - booking.bonus_applied - booking.deductions_applied
-                        )
-
+                        # Reverse the TDS deduction from booking balance
+                        booking.total_paid -= total_tds_deducted
+                        booking.remaining_amount = booking.total_amount - booking.total_paid
+                        
                         # Update booking status if needed
                         if booking.remaining_amount <= 0:
                             booking.status = 'completed'

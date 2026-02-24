@@ -107,10 +107,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     distributor_application_status = serializers.SerializerMethodField()
     profile_picture_url = serializers.SerializerMethodField()
     referral_link = serializers.SerializerMethodField()
-    payment_terms_acceptance_document_url = serializers.SerializerMethodField()
-    payment_receipt_urls = serializers.SerializerMethodField()
+    booking_payment_receipt_url = serializers.SerializerMethodField()
     vehicle_delivery_date = serializers.SerializerMethodField()
-    asa_document_acceptance_url = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -122,8 +120,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
                   'binary_commission_active', 'binary_pairs_matched', 'left_leg_count',
                   'right_leg_count', 'carry_forward_left', 'carry_forward_right',
                   'is_distributor_terms_and_conditions_accepted', 'distributor_application_status',
-                  'payment_terms_acceptance_document_url', 'payment_receipt_urls', 'vehicle_delivery_date',
-                  'asa_document_acceptance_url')
+                  'booking_payment_receipt_url', 'vehicle_delivery_date')
         read_only_fields = ('id', 'role', 'is_distributor', 'is_active_buyer',
                            'referral_code', 'referred_by', 'date_joined')
     
@@ -234,46 +231,25 @@ class UserProfileSerializer(serializers.ModelSerializer):
         else:
             return f"{frontend_base_url}/ref/{obj.referral_code}"
     
-    def get_payment_terms_acceptance_document_url(self, obj):
-        """Get the payment terms acceptance document URL for the user's most recent acceptance"""
-        from core.compliance.models import UserPaymentAcceptance
+    def get_booking_payment_receipt_url(self, obj):
+        """Get the payment receipt URL for the user's most recent booking with a receipt"""
+        from core.booking.models import Booking
         
-        # Find the most recent payment terms acceptance with a document
-        acceptance = UserPaymentAcceptance.objects.filter(
+        # Find the most recent booking with a payment receipt
+        # Include all statuses that could have receipts (active, completed, delivered, and even pending if receipt exists)
+        # A receipt indicates payment was made, so it should be accessible regardless of current status
+        booking = Booking.objects.filter(
             user=obj,
-            receipt_pdf_url__isnull=False
-        ).order_by('-accepted_at').first()
+            payment_receipt__isnull=False
+        ).order_by('-created_at').first()
         
-        if acceptance and acceptance.receipt_pdf_url:
+        if booking and booking.payment_receipt:
             request = self.context.get('request')
             if request:
-                return request.build_absolute_uri(acceptance.receipt_pdf_url.url)
-            return acceptance.receipt_pdf_url.url
+                return request.build_absolute_uri(booking.payment_receipt.url)
+            return booking.payment_receipt.url
         
         return None
-    
-    def get_payment_receipt_urls(self, obj):
-        """Get all payment receipt URLs for the user as an array"""
-        from core.booking.models import Payment
-        
-        # Get all completed payments with receipts for this user
-        payments = Payment.objects.filter(
-            user=obj,
-            status='completed',
-            receipt__isnull=False
-        ).exclude(receipt='').order_by('-completed_at', '-payment_date')
-        
-        request = self.context.get('request')
-        receipt_urls = []
-        
-        for payment in payments:
-            if payment.receipt:
-                if request:
-                    receipt_urls.append(request.build_absolute_uri(payment.receipt.url))
-                else:
-                    receipt_urls.append(payment.receipt.url)
-        
-        return receipt_urls
     
     def get_vehicle_delivery_date(self, obj):
         """Get vehicle delivery date (30 days after complete payment when remaining balance = 0)"""
@@ -294,24 +270,6 @@ class UserProfileSerializer(serializers.ModelSerializer):
             return delivery_date.date()
         
         return "Your vehicle will be delivered 30 days after completion of payment."
-    
-    def get_asa_document_acceptance_url(self, obj):
-        """Get the ASA document acceptance URL for the user's most recent acceptance"""
-        from core.compliance.models import UserAsaAcceptance
-        
-        # Find the most recent ASA acceptance with a PDF
-        acceptance = UserAsaAcceptance.objects.filter(
-            user=obj,
-            agreement_pdf_url__isnull=False
-        ).exclude(agreement_pdf_url='').order_by('-accepted_at').first()
-        
-        if acceptance and acceptance.agreement_pdf_url:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(acceptance.agreement_pdf_url.url)
-            return acceptance.agreement_pdf_url.url
-        
-        return None
     
     def validate_profile_picture(self, value):
         """Validate profile picture file"""

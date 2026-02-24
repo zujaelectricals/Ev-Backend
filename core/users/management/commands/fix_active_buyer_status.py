@@ -74,15 +74,11 @@ class Command(BaseCommand):
         correct_count = 0
 
         for user in users:
-            # Calculate from actual completed Payment records (not bookings.total_paid).
-            # bookings.total_paid no longer includes the company bonus; using Payment records
-            # is the authoritative source and is consistent with update_active_buyer_status().
-            from core.booking.models import Payment as BookingPayment
-            total_paid = BookingPayment.objects.filter(
-                booking__user=user,
-                booking__status__in=['active', 'completed'],
-                status='completed'
-            ).aggregate(total=Sum('amount'))['total'] or 0
+            # Calculate actual total_paid from bookings
+            total_paid = Booking.objects.filter(
+                user=user,
+                status__in=['active', 'completed']
+            ).aggregate(total=Sum('total_paid'))['total'] or 0
 
             # Determine correct status
             should_be_active = total_paid >= activation_amount

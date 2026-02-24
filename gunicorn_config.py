@@ -22,15 +22,10 @@ worker_class = "sync"
 worker_connections = 1000
 # Request timeout in seconds
 # Must be greater than: RAZORPAY_CONNECT_TIMEOUT + RAZORPAY_READ_TIMEOUT + processing overhead
-# Current: 10s (connect) + 20s (read) + 1 retry (1s sleep) + ~5s (processing) = ~36s worst case
-# Set to 60s to provide safety margin
-timeout = int(os.environ.get("GUNICORN_TIMEOUT", 60))
+# Current: 15s (connect) + 30s (read) + ~10s (processing) = ~55s worst case
+# Set to 120s to provide 2x safety margin for network delays and processing
+timeout = int(os.environ.get("GUNICORN_TIMEOUT", 120))
 keepalive = 5  # Keep-alive connections
-
-# Limit worker restart frequency to prevent restart storms
-worker_tmp_dir = None  # Use default temp directory
-capture_output = True  # Capture stdout/stderr
-enable_stdio_inheritance = False  # Don't inherit file descriptors
 
 # Worker lifecycle
 max_requests = 1000  # Restart worker after this many requests (prevents memory leaks)
@@ -108,15 +103,5 @@ def on_exit(server):
 
 def worker_abort(worker):
     """Called when a worker times out or is killed."""
-    import traceback
     worker.log.warning(f"Worker {worker.pid} aborted (timeout or killed)")
-    worker.log.warning(f"Worker abort traceback:\n{traceback.format_exc()}")
-
-def worker_exit(server, worker):
-    """Called just after a worker has been exited, in the master process."""
-    server.log.info(f"Worker {worker.pid} exited")
-
-def nworkers_changed(server, new_value, old_value):
-    """Called just after num_workers has been changed."""
-    server.log.info(f"Worker count changed from {old_value} to {new_value}")
 
