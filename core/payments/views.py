@@ -37,6 +37,7 @@ from .utils.razorpayx_client import (
     create_razorpayx_payout
 )
 from .utils.signature import verify_payment_signature, verify_webhook_signature
+from celery import shared_task
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,150 @@ def _calculate_gross_amount_with_charges(net_amount_rupees):
     gateway_charges_rupees = float(gateway_charges_decimal)
     
     return gross_amount_rupees, gateway_charges_rupees
+
+
+@shared_task
+def generate_payment_receipt_pdf_task(booking_payment_id, razorpay_payment_id):
+    """
+    Async Celery task to generate payment receipt PDF.
+    Fire-and-forget task that runs in background.
+    
+    Args:
+        booking_payment_id: ID of the BookingPayment instance
+        razorpay_payment_id: ID of the Razorpay Payment instance
+    """
+    try:
+        from core.booking.models import Payment as BookingPayment
+        from core.payments.models import Payment as RazorpayPayment
+        
+        # Fetch the payment objects
+        try:
+            booking_payment = BookingPayment.objects.get(id=booking_payment_id)
+            razorpay_payment = RazorpayPayment.objects.get(id=razorpay_payment_id)
+        except (BookingPayment.DoesNotExist, RazorpayPayment.DoesNotExist) as e:
+            logger.error(
+                f"Payment not found in generate_payment_receipt_pdf_task: "
+                f"booking_payment_id={booking_payment_id}, razorpay_payment_id={razorpay_payment_id}, error={e}"
+            )
+            return
+        
+        # Idempotency check: if receipt already exists, skip PDF generation
+        # But still trigger email task in case it wasn't sent before
+        if booking_payment.receipt:
+            logger.info(
+                f"Payment receipt already exists for booking_payment {booking_payment_id}. "
+                f"Skipping PDF generation, but triggering email task."
+            )
+            # Still trigger email task in case it wasn't sent before
+            try:
+                send_payment_receipt_email_task.delay(booking_payment_id)
+                logger.info(
+                    f"Triggered payment receipt email task (receipt already existed) for payment {booking_payment_id}"
+                )
+            except Exception as email_task_error:
+                logger.error(
+                    f"Failed to trigger email task for existing receipt, payment {booking_payment_id}: {email_task_error}",
+                    exc_info=True
+                )
+            return
+        
+        # Generate PDF
+        from core.booking.utils import generate_payment_receipt_pdf
+        receipt_file = generate_payment_receipt_pdf(booking_payment, razorpay_payment)
+        booking_payment.receipt = receipt_file
+        booking_payment.save(update_fields=['receipt'])
+        
+        logger.info(
+            f"Generated payment receipt PDF for payment {booking_payment_id} "
+            f"(transaction_id: {booking_payment.transaction_id})"
+        )
+        
+        # Trigger email task after PDF is generated (chain tasks)
+        # This ensures email is only sent when PDF is ready
+        try:
+            send_payment_receipt_email_task.delay(booking_payment_id)
+            logger.info(
+                f"Triggered payment receipt email task after PDF generation for payment {booking_payment_id}"
+            )
+        except Exception as email_task_error:
+            logger.error(
+                f"Failed to trigger email task after PDF generation for payment {booking_payment_id}: {email_task_error}",
+                exc_info=True
+            )
+    except Exception as e:
+        logger.error(
+            f"Error in generate_payment_receipt_pdf_task for booking_payment {booking_payment_id}: {e}",
+            exc_info=True
+        )
+        # Don't re-raise - this is a background task, errors should be logged only
+
+
+@shared_task
+def send_payment_receipt_email_task(booking_payment_id):
+    """
+    Async Celery task to send payment receipt email via MSG91.
+    Fire-and-forget task that runs in background.
+    Only sends email for the first payment of a booking.
+    
+    Args:
+        booking_payment_id: ID of the BookingPayment instance
+    """
+    try:
+        from core.booking.models import Payment as BookingPayment
+        
+        # Fetch the payment object
+        try:
+            booking_payment = BookingPayment.objects.select_related('booking', 'user').get(id=booking_payment_id)
+        except BookingPayment.DoesNotExist:
+            logger.error(
+                f"BookingPayment {booking_payment_id} not found in send_payment_receipt_email_task"
+            )
+            return
+        
+        # Check if receipt exists (PDF should be generated first)
+        if not booking_payment.receipt:
+            logger.warning(
+                f"Cannot send payment receipt email for payment {booking_payment_id}: receipt not generated"
+            )
+            return
+        
+        # Check if this is the first completed payment for this booking
+        booking = booking_payment.booking
+        completed_payments_count = BookingPayment.objects.filter(
+            booking=booking,
+            status='completed'
+        ).exclude(id=booking_payment_id).count()
+        
+        # Only send email if this is the first completed payment
+        is_first_payment = completed_payments_count == 0
+        
+        if not is_first_payment:
+            logger.info(
+                f"Skipping payment receipt email for payment {booking_payment_id} - "
+                f"not the first payment for booking {booking.id} "
+                f"(completed payments count: {completed_payments_count})"
+            )
+            return
+        
+        # Send email
+        from core.booking.utils import send_payment_receipt_email_msg91
+        success, error_msg = send_payment_receipt_email_msg91(booking_payment)
+        
+        if success:
+            logger.info(
+                f"Payment receipt email sent successfully for first payment {booking_payment_id} "
+                f"of booking {booking.id}"
+            )
+        else:
+            logger.warning(
+                f"Failed to send payment receipt email for payment {booking_payment_id}: {error_msg}"
+            )
+    except Exception as e:
+        logger.error(
+            f"Error in send_payment_receipt_email_task for booking_payment {booking_payment_id}: {e}",
+            exc_info=True
+        )
+        # Don't re-raise - this is a background task, errors should be logged only
 
 
 def _process_booking_payment(razorpay_payment):
@@ -359,67 +504,23 @@ def _process_booking_payment(razorpay_payment):
                     f"Difference: {total_paid_after - expected_total_paid_after}"
                 )
             
-            # Generate payment receipt PDF if it doesn't exist
-            receipt_was_generated = False
+            # Trigger async PDF generation (fire-and-forget)
+            # PDF generation is moved to background to reduce response time
+            # Note: Email task will be triggered automatically by PDF task after PDF is generated
             if not booking_payment.receipt:
                 try:
-                    from core.booking.utils import generate_payment_receipt_pdf
-                    receipt_file = generate_payment_receipt_pdf(booking_payment, razorpay_payment)
-                    booking_payment.receipt = receipt_file
-                    booking_payment.save(update_fields=['receipt'])
-                    receipt_was_generated = True
+                    generate_payment_receipt_pdf_task.delay(booking_payment.id, razorpay_payment.id)
                     logger.info(
-                        f"Generated payment receipt for payment {booking_payment.id} "
-                        f"(transaction_id: {booking_payment.transaction_id})"
+                        f"Triggered async PDF generation task for payment {booking_payment.id} "
+                        f"(transaction_id: {booking_payment.transaction_id}). "
+                        f"Email task will be triggered after PDF is generated."
                     )
-                except Exception as receipt_error:
+                except Exception as task_error:
                     logger.error(
-                        f"Failed to generate payment receipt for payment {booking_payment.id}: {receipt_error}",
+                        f"Failed to trigger PDF generation task for payment {booking_payment.id}: {task_error}",
                         exc_info=True
                     )
-                    # Don't fail payment processing if receipt generation fails
-            
-            # Send payment receipt email via MSG91 only for the first payment of the booking
-            # Check if this is the first completed payment for this booking
-            if booking_payment.receipt:
-                # Count completed payments for this booking (excluding this one if it's being updated)
-                completed_payments_count = BookingPayment.objects.filter(
-                    booking=booking,
-                    status='completed'
-                ).exclude(id=booking_payment.id).count()
-                
-                # Only send email if this is the first completed payment
-                is_first_payment = completed_payments_count == 0
-                
-                if is_first_payment:
-                    try:
-                        from core.booking.utils import send_payment_receipt_email_msg91
-                        success, error_msg = send_payment_receipt_email_msg91(booking_payment)
-                        if success:
-                            logger.info(
-                                f"Payment receipt email sent successfully for first payment {booking_payment.id} "
-                                f"of booking {booking.id}"
-                            )
-                        else:
-                            logger.warning(
-                                f"Failed to send payment receipt email for payment {booking_payment.id}: {error_msg}"
-                            )
-                    except Exception as email_error:
-                        logger.error(
-                            f"Error sending payment receipt email for payment {booking_payment.id}: {email_error}",
-                            exc_info=True
-                        )
-                        # Don't fail payment processing if email sending fails
-                else:
-                    logger.info(
-                        f"Skipping payment receipt email for payment {booking_payment.id} - "
-                        f"not the first payment for booking {booking.id} "
-                        f"(completed payments count: {completed_payments_count})"
-                    )
-            else:
-                logger.warning(
-                    f"Cannot send payment receipt email for payment {booking_payment.id}: receipt not generated"
-                )
+                    # Don't fail payment processing if task trigger fails
             
             # Wire payment terms acceptance PDF as booking receipt
             # When booking becomes active, use the user's latest payment terms acceptance PDF
