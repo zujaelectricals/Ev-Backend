@@ -563,6 +563,7 @@ def process_retroactive_commissions(user):
         return False
     
     # Get referrer (the user who referred this user)
+    # Note: This is only used for logging - process_direct_user_commission uses tree structure
     from core.booking.models import Booking
     referrer = user.referred_by
     if not referrer:
@@ -571,19 +572,32 @@ def process_retroactive_commissions(user):
         if booking:
             referrer = booking.referred_by
     
+    # CRITICAL FIX: Don't require referrer - process_direct_user_commission uses tree structure
+    # Get parent from tree structure if referrer not found
     if not referrer:
-        # No referrer found, nothing to process
-        logger.debug(
-            f"User {user.username} has no referrer. "
-            f"Skipping retroactive commission processing."
-        )
-        return False
+        # Get parent from binary tree structure
+        if user_node.parent:
+            referrer = user_node.parent.user
+            logger.info(
+                f"User {user.username} has no referrer in user/booking, "
+                f"using parent from tree structure: {referrer.username}"
+            )
+        else:
+            # No parent in tree either - this shouldn't happen if user is in tree
+            logger.warning(
+                f"User {user.username} is in binary tree but has no parent node. "
+                f"Commission will still be processed using tree structure."
+            )
+            # Use a dummy referrer - process_direct_user_commission will use tree structure anyway
+            referrer = user  # This will be ignored, but prevents None error
     
     # Process direct user commission for all eligible ancestors
     # This function handles:
     # 1. Paying commission to all ancestors who have < activation_count descendants
     # 2. Activating binary commission for ancestors who reach activation_count
     # 3. Skipping ancestors who already have binary_commission_activated
+    # NOTE: process_direct_user_commission uses get_all_ancestors() which gets ancestors from tree structure,
+    # so the referrer parameter is mainly for logging/backward compatibility
     commission_paid = process_direct_user_commission(referrer, user)
     
     if commission_paid:

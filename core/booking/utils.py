@@ -826,6 +826,18 @@ def send_payment_receipt_email_msg91(payment):
         logger.debug(f"MSG91 Payment Receipt Email Payload: {json.dumps(payload, indent=2)}")
         
         response = requests.post(url, json=payload, headers=headers, timeout=30)
+        
+        # Handle 401 Unauthorized specifically
+        if response.status_code == 401:
+            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly and has valid permissions for email API."
+            logger.error(f"MSG91 Payment Receipt Email 401 Unauthorized - Payment: {payment.id}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
+            try:
+                error_data = response.json()
+                logger.error(f"MSG91 Error Response: {json.dumps(error_data, indent=2)}")
+            except Exception:
+                logger.error(f"MSG91 Error Response (raw): {response.text}")
+            return False, error_msg
+        
         response.raise_for_status()
         data = response.json()
         
@@ -971,6 +983,18 @@ def send_booking_confirmation_email_msg91(booking):
         logger.debug(f"MSG91 Booking Confirmation Email Payload: {json.dumps(payload, indent=2)}")
         
         response = requests.post(url, json=payload, headers=headers, timeout=30)
+        
+        # Handle 401 Unauthorized specifically
+        if response.status_code == 401:
+            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly and has valid permissions for email API."
+            logger.error(f"MSG91 Booking Confirmation Email 401 Unauthorized - Booking: {booking.id}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
+            try:
+                error_data = response.json()
+                logger.error(f"MSG91 Error Response: {json.dumps(error_data, indent=2)}")
+            except Exception:
+                logger.error(f"MSG91 Error Response (raw): {response.text}")
+            return False, error_msg
+        
         response.raise_for_status()
         data = response.json()
         
