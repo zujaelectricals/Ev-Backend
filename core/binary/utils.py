@@ -1363,7 +1363,6 @@ def check_and_create_pair(user):
     with transaction.atomic():
         # Re-check daily limit inside transaction with row lock to prevent race conditions
         # CRITICAL: Lock all existing pairs for this user/date to prevent concurrent creation
-        from core.binary.models import BinaryPair
         # Get all pairs for locking (this ensures serialization)
         existing_pairs = list(BinaryPair.objects.filter(
             user=user,
