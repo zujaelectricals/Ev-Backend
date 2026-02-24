@@ -829,12 +829,22 @@ def send_payment_receipt_email_msg91(payment):
         
         # Handle 401 Unauthorized specifically
         if response.status_code == 401:
-            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly and has valid permissions for email API."
-            logger.error(f"MSG91 Payment Receipt Email 401 Unauthorized - Payment: {payment.id}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
             try:
                 error_data = response.json()
+                api_error_code = error_data.get("apiError", "")
+                
+                # Check for specific error codes
+                if api_error_code == "418":
+                    error_msg = "MSG91 IP whitelisting issue: Your server IP is not whitelisted in MSG91. Please add your server IP to the whitelist in MSG91 dashboard (Settings > IP Whitelist)."
+                elif api_error_code == "207":
+                    error_msg = "MSG91 invalid authentication key: The MSG91_AUTH_KEY is incorrect or expired. Please verify the key in MSG91 dashboard."
+                else:
+                    error_msg = f"MSG91 authentication failed (Error {api_error_code}). Please verify MSG91_AUTH_KEY is set correctly and has valid permissions for email API."
+                
+                logger.error(f"MSG91 Payment Receipt Email 401 Unauthorized - Payment: {payment.id}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}, API Error Code: {api_error_code}")
                 logger.error(f"MSG91 Error Response: {json.dumps(error_data, indent=2)}")
             except Exception:
+                error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly and has valid permissions for email API."
                 logger.error(f"MSG91 Error Response (raw): {response.text}")
             return False, error_msg
         
@@ -876,8 +886,12 @@ def send_booking_confirmation_email_msg91(booking):
     """
     Send booking confirmation email via MSG91 API.
     
+    Uses the actual payment receipt from the latest completed Payment, not the 
+    payment terms acceptance document stored in booking.payment_receipt.
+    
     Args:
-        booking: Booking instance (must have status='active' and payment_receipt)
+        booking: Booking instance (must have status='active' and at least one 
+                 completed payment with a receipt)
     
     Returns:
         tuple: (success: bool, error_message: str)
@@ -892,16 +906,30 @@ def send_booking_confirmation_email_msg91(booking):
         logger.warning(f"Booking {booking.id} has no user email. Skipping confirmation email.")
         return False, "User email not found"
     
-    if not booking.payment_receipt:
-        logger.warning(f"Booking {booking.id} has no payment receipt. Skipping confirmation email.")
-        return False, "Payment receipt not found"
-    
     if booking.status != 'active':
         logger.warning(f"Booking {booking.id} status is '{booking.status}', not 'active'. Skipping confirmation email.")
         return False, f"Booking status is '{booking.status}', not 'active'"
     
     user_email = booking.user.email
     user_full_name = booking.user.get_full_name() or booking.user.username
+    
+    # Get the actual payment receipt (not the payment terms acceptance document)
+    # Find the latest completed payment with a receipt for this booking
+    from core.booking.models import Payment
+    latest_payment = (
+        Payment.objects
+        .filter(booking=booking, status='completed', receipt__isnull=False)
+        .exclude(receipt='')
+        .order_by('-completed_at', '-payment_date')
+        .first()
+    )
+    
+    if not latest_payment or not latest_payment.receipt:
+        logger.warning(
+            f"Booking {booking.id} has no completed payment with receipt. "
+            f"Skipping confirmation email."
+        )
+        return False, "Payment receipt not found"
     
     # Prepare email data
     # Format booking date (confirmed_at or created_at as fallback)
@@ -912,8 +940,8 @@ def send_booking_confirmation_email_msg91(booking):
     expiry_date = booking_date + timedelta(days=30)
     expiry_date_str = expiry_date.strftime('%d-%m-%Y')
     
-    # Generate absolute receipt URL
-    receipt_url = booking.payment_receipt.url
+    # Generate absolute receipt URL from the payment receipt (not booking.payment_receipt)
+    receipt_url = latest_payment.receipt.url
     
     # If URL is already absolute (e.g., Azure blob storage), use it as-is
     if receipt_url.startswith('http'):
@@ -986,12 +1014,22 @@ def send_booking_confirmation_email_msg91(booking):
         
         # Handle 401 Unauthorized specifically
         if response.status_code == 401:
-            error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly and has valid permissions for email API."
-            logger.error(f"MSG91 Booking Confirmation Email 401 Unauthorized - Booking: {booking.id}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
             try:
                 error_data = response.json()
+                api_error_code = error_data.get("apiError", "")
+                
+                # Check for specific error codes
+                if api_error_code == "418":
+                    error_msg = "MSG91 IP whitelisting issue: Your server IP is not whitelisted in MSG91. Please add your server IP to the whitelist in MSG91 dashboard (Settings > IP Whitelist)."
+                elif api_error_code == "207":
+                    error_msg = "MSG91 invalid authentication key: The MSG91_AUTH_KEY is incorrect or expired. Please verify the key in MSG91 dashboard."
+                else:
+                    error_msg = f"MSG91 authentication failed (Error {api_error_code}). Please verify MSG91_AUTH_KEY is set correctly and has valid permissions for email API."
+                
+                logger.error(f"MSG91 Booking Confirmation Email 401 Unauthorized - Booking: {booking.id}, Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}, API Error Code: {api_error_code}")
                 logger.error(f"MSG91 Error Response: {json.dumps(error_data, indent=2)}")
             except Exception:
+                error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly and has valid permissions for email API."
                 logger.error(f"MSG91 Error Response (raw): {response.text}")
             return False, error_msg
         
