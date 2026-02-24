@@ -523,7 +523,7 @@ Super User: EVAdmin && EVAdmin@123
      "is_distributor": false,
      "is_active_buyer": true,
      "referral_code": "ABC123",
-     "referral_link": "http://localhost:8080/ref/ABC123",  // Format: {FRONTEND_BASE_URL}/ref/{referralCode}
+     "referral_link": "http://localhost:8080/ref/ABC123?name=John%20Doe",  // Format: {FRONTEND_BASE_URL}/ref/{referralCode}?name={fullname} (name is URL-encoded)
      "referred_by": null,  // Or nested object with id, fullname, email, profile_picture_url if referrer exists
      "kyc_status": "approved",
      "nominee_exists": true,
@@ -1498,11 +1498,61 @@ Super User: EVAdmin && EVAdmin@123
     - Admin actions set `kyc_verified_by` and timestamps.
 
 
+25. GET USER DOCUMENTS (Admin Only)
+    Method: GET
+    URL: /api/users/documents/
+    Authentication: Required (Admin/Superuser)
+    Description: Get all document URLs for a specific user. Returns ASA document acceptance URL, payment receipt URLs, and payment terms acceptance document URL. Only accessible by admin or superuser.
+    
+    Query Parameters:
+    - user_id (required): The ID of the user whose documents are to be retrieved
+    
+    Example Request:
+    GET /api/users/documents/?user_id=123
+    
+    Response (200 OK):
+    {
+      "user_id": 123,
+      "user_email": "user@example.com",
+      "user_full_name": "John Doe",
+      "asa_document_acceptance_url": "http://localhost:8000/media/compliance/asa_agreements/agreement_123_v1.0_20260217.pdf",
+      "payment_receipt_urls": [
+        "http://localhost:8000/media/booking_receipts/receipt_EV12345678_20260217_041830.pdf",
+        "http://localhost:8000/media/booking_receipts/receipt_EV12345679_20260218_052140.pdf"
+      ],
+      "payment_terms_acceptance_document_url": "http://localhost:8000/media/compliance/payment_receipts/payment_terms_123_v1.0_20260217.pdf"
+    }
+    
+    Response (400 Bad Request):
+    {
+      "error": "user_id query parameter is required"
+    }
+    
+    Response (404 Not Found):
+    {
+      "error": "User not found"
+    }
+    
+    Response (403 Forbidden):
+    {
+      "detail": "Only admin users can access this endpoint."
+    }
+    
+    Notes:
+    - Only admin or superuser can access this endpoint
+    - Returns null for document URLs if the user doesn't have those documents
+    - payment_receipt_urls is always an array (empty array if no receipts exist)
+    - All URLs are absolute URLs that can be directly accessed
+    - ASA document acceptance URL: Most recent ASA acceptance document with PDF
+    - Payment receipt URLs: All completed payments with receipts for the user
+    - Payment terms acceptance document URL: Most recent payment terms acceptance document with PDF
+
+
 ================================================================================
                             BOOKING APIs
 ================================================================================
 
-24. CREATE BOOKING
+26. CREATE BOOKING
     Method: POST
     URL: /api/booking/bookings/
     Authentication: Required
@@ -1640,7 +1690,7 @@ Super User: EVAdmin && EVAdmin@123
     Rate Limit: 10 requests per minute per IP
 
 
-25. LIST BOOKINGS
+27. LIST BOOKINGS
     Method: GET
     URL: /api/booking/bookings/
     Authentication: Required

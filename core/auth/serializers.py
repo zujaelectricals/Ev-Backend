@@ -69,12 +69,45 @@ class SendOTPSerializer(serializers.Serializer):
             # Generate single OTP code for both channels
             otp_code = generate_otp(settings.OTP_LENGTH)
             
+            # Print OTP to terminal for both channels before sending
+            print(f"\n{'='*60}")
+            print(f"OTP SENT TO BOTH EMAIL AND MOBILE")
+            print(f"{'='*60}")
+            print(f"Email: {user.email}")
+            print(f"Mobile: {user.mobile}")
+            print(f"OTP Code: {otp_code}")
+            print(f"{'='*60}\n")
+            
             # Send to both channels with the same OTP
+            email_success = True
+            mobile_success = True
+            email_error = None
+            mobile_error = None
+            
             try:
                 send_email_otp(user.email, otp_code, user=user)
             except ValueError as e:
-                raise serializers.ValidationError(str(e))
-            send_mobile_otp(user.mobile, otp_code)
+                email_success = False
+                email_error = str(e)
+            
+            try:
+                send_mobile_otp(user.mobile, otp_code)
+            except Exception as e:
+                mobile_success = False
+                mobile_error = str(e)
+            
+            # If both failed, raise error
+            if not email_success and not mobile_success:
+                raise serializers.ValidationError(
+                    f"Failed to send OTP via both channels. Email: {email_error}, Mobile: {mobile_error}"
+                )
+            elif not email_success:
+                raise serializers.ValidationError(f"Failed to send OTP via email: {email_error}")
+            elif not mobile_success:
+                # Email succeeded but mobile failed - log warning but don't fail
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to send OTP via mobile: {mobile_error}")
             
             return {
                 'message': f'OTP sent to both email ({user.email}) and mobile ({user.mobile})',
@@ -197,12 +230,45 @@ class SendAdminOTPSerializer(serializers.Serializer):
             # Generate single OTP code for both channels
             otp_code = generate_otp(settings.OTP_LENGTH)
             
+            # Print OTP to terminal for both channels before sending
+            print(f"\n{'='*60}")
+            print(f"OTP SENT TO BOTH EMAIL AND MOBILE (ADMIN/STAFF)")
+            print(f"{'='*60}")
+            print(f"Email: {user.email}")
+            print(f"Mobile: {user.mobile}")
+            print(f"OTP Code: {otp_code}")
+            print(f"{'='*60}\n")
+            
             # Send to both channels with the same OTP
+            email_success = True
+            mobile_success = True
+            email_error = None
+            mobile_error = None
+            
             try:
                 send_email_otp(user.email, otp_code, user=user)
             except ValueError as e:
-                raise serializers.ValidationError(str(e))
-            send_mobile_otp(user.mobile, otp_code)
+                email_success = False
+                email_error = str(e)
+            
+            try:
+                send_mobile_otp(user.mobile, otp_code)
+            except Exception as e:
+                mobile_success = False
+                mobile_error = str(e)
+            
+            # If both failed, raise error
+            if not email_success and not mobile_success:
+                raise serializers.ValidationError(
+                    f"Failed to send OTP via both channels. Email: {email_error}, Mobile: {mobile_error}"
+                )
+            elif not email_success:
+                raise serializers.ValidationError(f"Failed to send OTP via email: {email_error}")
+            elif not mobile_success:
+                # Email succeeded but mobile failed - log warning but don't fail
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to send OTP via mobile: {mobile_error}")
             
             return {
                 'message': f'OTP sent to both email ({user.email}) and mobile ({user.mobile})',
@@ -375,17 +441,50 @@ class SignupSerializer(serializers.Serializer):
         # Generate single OTP code for both channels
         otp_code = generate_otp(settings.OTP_LENGTH)
         
+        # Print OTP to terminal for both channels before sending
+        print(f"\n{'='*60}")
+        print(f"OTP SENT TO BOTH EMAIL AND MOBILE (SIGNUP)")
+        print(f"{'='*60}")
+        print(f"Email: {email}")
+        print(f"Mobile: {mobile}")
+        print(f"OTP Code: {otp_code}")
+        print(f"{'='*60}\n")
+        
         # Extract user name from signup data
         user_name = f"{validated_data.get('first_name', '')} {validated_data.get('last_name', '')}".strip()
         if not user_name:
             user_name = email.split("@")[0]
         
         # Send same OTP to both email and mobile
+        email_success = True
+        mobile_success = True
+        email_error = None
+        mobile_error = None
+        
         try:
             send_email_otp(email, otp_code, user_name=user_name)
         except ValueError as e:
-            raise serializers.ValidationError(str(e))
-        send_mobile_otp(mobile, otp_code)
+            email_success = False
+            email_error = str(e)
+        
+        try:
+            send_mobile_otp(mobile, otp_code)
+        except Exception as e:
+            mobile_success = False
+            mobile_error = str(e)
+        
+        # If both failed, raise error
+        if not email_success and not mobile_success:
+            raise serializers.ValidationError(
+                f"Failed to send OTP via both channels. Email: {email_error}, Mobile: {mobile_error}"
+            )
+        elif not email_success:
+            raise serializers.ValidationError(f"Failed to send OTP via email: {email_error}")
+        elif not mobile_success:
+            # Email succeeded but mobile failed - log warning but don't fail
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to send OTP via mobile: {mobile_error}")
         
         # Store signup session in Redis
         signup_token = store_signup_session(email, mobile, signup_data)
@@ -774,12 +873,45 @@ class SendUniversalOTPSerializer(serializers.Serializer):
             # Generate single OTP code for both channels
             otp_code = generate_otp(settings.OTP_LENGTH)
             
+            # Print OTP to terminal for both channels before sending
+            print(f"\n{'='*60}")
+            print(f"OTP SENT TO BOTH EMAIL AND MOBILE (UNIVERSAL)")
+            print(f"{'='*60}")
+            print(f"Email: {user.email}")
+            print(f"Mobile: {user.mobile}")
+            print(f"OTP Code: {otp_code}")
+            print(f"{'='*60}\n")
+            
             # Send to both channels with the same OTP
+            email_success = True
+            mobile_success = True
+            email_error = None
+            mobile_error = None
+            
             try:
                 send_email_otp(user.email, otp_code, user=user)
             except ValueError as e:
-                raise serializers.ValidationError(str(e))
-            send_mobile_otp(user.mobile, otp_code)
+                email_success = False
+                email_error = str(e)
+            
+            try:
+                send_mobile_otp(user.mobile, otp_code)
+            except Exception as e:
+                mobile_success = False
+                mobile_error = str(e)
+            
+            # If both failed, raise error
+            if not email_success and not mobile_success:
+                raise serializers.ValidationError(
+                    f"Failed to send OTP via both channels. Email: {email_error}, Mobile: {mobile_error}"
+                )
+            elif not email_success:
+                raise serializers.ValidationError(f"Failed to send OTP via email: {email_error}")
+            elif not mobile_success:
+                # Email succeeded but mobile failed - log warning but don't fail
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to send OTP via mobile: {mobile_error}")
             
             return {
                 'message': f'OTP sent to both email ({user.email}) and mobile ({user.mobile})',

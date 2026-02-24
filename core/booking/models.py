@@ -121,6 +121,48 @@ class Booking(models.Model):
         suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
         return f"{prefix}{suffix}"
     
+    def _update_reservation_status_if_needed(self):
+        """
+        Update stock reservation status to 'completed' if:
+        1. Payment has been made (total_paid >= booking_amount), OR
+        2. Remaining amount is zero or less
+        
+        This ensures reservation status reflects payment completion.
+        """
+        try:
+            # For OneToOne relationships, accessing the attribute raises DoesNotExist if it doesn't exist
+            # We'll catch ObjectDoesNotExist which is the base class for all DoesNotExist exceptions
+            from django.core.exceptions import ObjectDoesNotExist
+            try:
+                reservation = self.stock_reservation
+            except ObjectDoesNotExist:
+                # No reservation exists for this booking
+                logger.debug(f"No stock reservation found for booking {self.id}")
+                return
+            
+            # Update to 'completed' if:
+            # 1. Payment has been made (total_paid >= booking_amount), OR
+            # 2. Remaining amount is zero or less
+            remaining = self.total_amount - self.total_paid - self.bonus_applied - self.deductions_applied
+            should_complete = (
+                self.total_paid >= self.booking_amount or  # Initial payment completed
+                remaining <= 0  # Full payment completed
+            )
+            
+            if should_complete and reservation.status != 'completed':
+                from core.inventory.utils import complete_reservation
+                complete_reservation(reservation)
+                logger.info(
+                    f"Updated reservation status to 'completed' for booking {self.id} "
+                    f"(total_paid: {self.total_paid}, remaining: {remaining})"
+                )
+        except Exception as e:
+            # Log errors but don't fail the payment processing
+            logger.error(
+                f"Error updating reservation status for booking {self.id}: {e}",
+                exc_info=True
+            )
+    
     def make_payment(self, amount, payment_id=None):
         """
         Record payment and update booking status.
@@ -165,6 +207,8 @@ class Booking(models.Model):
                 self.status = 'completed'
                 self.completed_at = timezone.now()
             self.save()
+            # Update reservation status if needed
+            self._update_reservation_status_if_needed()
             # Guard 1: payment was already in DB before total_paid was synced.
             # Still trigger active-buyer bonus – the user may have just qualified.
             self.user.update_active_buyer_status(booking=self)
@@ -181,6 +225,8 @@ class Booking(models.Model):
                         f"Payment {payment_id} (amount: {amount}) already processed "
                         f"for booking {self.id}. Skipping."
                     )
+                    # Update reservation status if needed (even for duplicate calls)
+                    self._update_reservation_status_if_needed()
                     # Guard 2: duplicate call – totals are already correct in DB.
                     # Still trigger active-buyer bonus in case it wasn't applied yet.
                     self.user.update_active_buyer_status(booking=self)
@@ -215,16 +261,8 @@ class Booking(models.Model):
 
         self.save()
         
-        # Complete the stock reservation if it exists (when first payment is confirmed)
-        # This ensures reservation status is updated to 'completed' when payment is made
-        try:
-            reservation = self.stock_reservation
-            if reservation and reservation.status == 'reserved':
-                from core.inventory.utils import complete_reservation
-                complete_reservation(reservation)
-        except Exception:
-            # No reservation exists or error accessing it, skip
-            pass
+        # Update reservation status if payment is completed or remaining amount is zero
+        self._update_reservation_status_if_needed()
         
         # Update user's Active Buyer status (pass this booking for bonus processing)
         self.user.update_active_buyer_status(booking=self)
@@ -264,6 +302,9 @@ class Payment(models.Model):
     
     payment_date = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    
+    # Payment receipt PDF
+    receipt = models.FileField(upload_to='payment_receipts/', null=True, blank=True, help_text="PDF receipt generated after payment confirmation")
     
     # Additional details
     notes = models.TextField(blank=True)
@@ -307,6 +348,58 @@ class Payment(models.Model):
                 booking = self.booking
                 booking.make_payment(self.amount, payment_id=self.id)
                 # Note: make_payment() now handles reservation completion automatically
+                
+                # Generate payment receipt if not already generated
+                # (Receipts for Razorpay payments are generated in _process_booking_payment)
+                if not self.receipt:
+                    try:
+                        from core.booking.utils import generate_payment_receipt_pdf
+                        receipt_file = generate_payment_receipt_pdf(self, razorpay_payment=None)
+                        self.receipt = receipt_file
+                        # Save again to store the receipt
+                        super().save(update_fields=['receipt'])
+                        logger.info(f"Generated payment receipt for payment {self.id} (direct payment)")
+                        
+                        # Send payment receipt email via MSG91 only for the first payment of the booking
+                        # Check if this is the first completed payment for this booking
+                        # Use Payment.objects (self's class) to avoid circular import
+                        completed_payments_count = Payment.objects.filter(
+                            booking=self.booking,
+                            status='completed'
+                        ).exclude(id=self.id).count()
+                        
+                        # Only send email if this is the first completed payment
+                        is_first_payment = completed_payments_count == 0
+                        
+                        if is_first_payment:
+                            try:
+                                from core.booking.utils import send_payment_receipt_email_msg91
+                                success, error_msg = send_payment_receipt_email_msg91(self)
+                                if success:
+                                    logger.info(
+                                        f"Payment receipt email sent successfully for first payment {self.id} "
+                                        f"of booking {self.booking.id}"
+                                    )
+                                else:
+                                    logger.warning(f"Failed to send payment receipt email for payment {self.id}: {error_msg}")
+                            except Exception as email_error:
+                                logger.error(
+                                    f"Error sending payment receipt email for payment {self.id}: {email_error}",
+                                    exc_info=True
+                                )
+                                # Don't fail payment processing if email sending fails
+                        else:
+                            logger.info(
+                                f"Skipping payment receipt email for payment {self.id} - "
+                                f"not the first payment for booking {self.booking.id} "
+                                f"(completed payments count: {completed_payments_count})"
+                            )
+                    except Exception as receipt_error:
+                        logger.error(
+                            f"Failed to generate payment receipt for payment {self.id}: {receipt_error}",
+                            exc_info=True
+                        )
+                        # Don't fail payment processing if receipt generation fails
             except Exception as e:
                 # Log but don't fail - booking might not exist or other error
                 import logging

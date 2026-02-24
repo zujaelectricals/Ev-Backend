@@ -13,6 +13,8 @@ urlpatterns = [
     # Custom route to allow PUT/PATCH directly on /api/users/nominee/
     # This must come before the router URLs to take precedence
     path('nominee/', NomineeViewSet.as_view({'put': 'update_nominee', 'patch': 'update_nominee', 'get': 'list', 'post': 'create'}), name='nominee-list'),
+    # Custom route for admin to get user documents
+    path('documents/', UserViewSet.as_view({'get': 'get_user_documents'}), name='user-documents'),
     path('', include(router.urls)),
 ]
 

@@ -269,6 +269,7 @@ class BookingSerializer(serializers.ModelSerializer):
             return 'no_payment'
 
         # Evaluate statuses once to avoid multiple queries
+        # Use values_list to only fetch status field, avoiding receipt field if migration not applied
         statuses = list(payments_qs.values_list('status', flat=True))
         if not statuses:
             return 'no_payment'
@@ -295,9 +296,10 @@ class BookingSerializer(serializers.ModelSerializer):
         if payments_qs is None:
             return str(obj.total_paid)  # Fallback to stored value
 
+        # Use only() to select only needed fields, avoiding receipt field if migration not applied
         completed_payments_sum = sum(
             Decimal(str(p.amount))
-            for p in payments_qs.filter(status='completed')
+            for p in payments_qs.filter(status='completed').only('amount', 'status')
         )
         return str(completed_payments_sum)
 
@@ -317,9 +319,10 @@ class BookingSerializer(serializers.ModelSerializer):
             # Fallback: derive from stored total_paid + bonus_applied
             actual_paid = Decimal(str(obj.total_paid))
         else:
+            # Use only() to select only needed fields, avoiding receipt field if migration not applied
             actual_paid = sum(
                 Decimal(str(p.amount))
-                for p in payments_qs.filter(status='completed')
+                for p in payments_qs.filter(status='completed').only('amount', 'status')
             )
 
         bonus = Decimal(str(obj.bonus_applied))
@@ -349,11 +352,28 @@ class PaymentSerializer(serializers.ModelSerializer):
     booking_number = serializers.CharField(source='booking.booking_number', read_only=True)
     user_details = PaymentUserSerializer(source='user', read_only=True)
     refund_details = serializers.SerializerMethodField()
+    receipt_url = serializers.SerializerMethodField()
     
     class Meta:
         model = Payment
-        fields = '__all__'
-        read_only_fields = ('user', 'payment_date', 'completed_at')
+        fields = ('id', 'booking', 'booking_number', 'user', 'user_details', 'amount', 
+                  'payment_method', 'transaction_id', 'status', 'payment_date', 'completed_at',
+                  'notes', 'refund_details', 'receipt', 'receipt_url')
+        read_only_fields = ('user', 'payment_date', 'completed_at', 'receipt_url')
+    
+    def get_receipt_url(self, obj):
+        """Get absolute URL for payment receipt if it exists"""
+        # Safely check if receipt field exists and has a value
+        try:
+            if hasattr(obj, 'receipt') and obj.receipt:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.receipt.url)
+                return obj.receipt.url
+        except Exception:
+            # Field might not exist in database yet
+            pass
+        return None
     
     def get_refund_details(self, obj):
         """Get refund information from related Razorpay Payment if available"""
