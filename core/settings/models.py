@@ -115,7 +115,7 @@ class PlatformSettings(models.Model):
         help_text="Company phone number for receipts and documents"
     )
     company_address = models.TextField(
-        default='Kuttiyadiyil, Arrattuvazhy, Alappuzha North, Ambalapuzha A, Alappuzha – 688007, Kerala, India',
+        default='Kuttiyadiyil, Arrattuvazhy, Alappuzha North, Ambalapuzha, Alappuzha – 688007, Kerala, India',
         help_text="Company address for receipts and documents"
     )
     
@@ -166,7 +166,7 @@ class PlatformSettings(models.Model):
                 'company_name': 'ZUJA ELECTRICAL INNOVATION (P) LTD',
                 'company_email': 'zujaelectric@gmail.com',
                 'company_phone': '+91 7356360777',
-                'company_address': 'Kuttiyadiyil, Arrattuvazhy, Alappuzha North, Ambalapuzha A, Alappuzha – 688007, Kerala, India',
+                'company_address': 'Kuttiyadiyil, Arrattuvazhy, Alappuzha North, Ambalapuzha, Alappuzha – 688007, Kerala, India',
             }
         )
         return settings

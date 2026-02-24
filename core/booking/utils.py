@@ -353,7 +353,7 @@ def generate_payment_receipt_pdf(payment, razorpay_payment=None):
     from core.booking.models import Payment as BookingPayment
     
     # Get company information
-    company_address = "KUTTIYIDAYIL,ARRATTUVAZHY, Alappuzha North, Ambalapuzh A, Alappuzha- 688007"
+    company_address = "KUTTIYIDAYIL,ARRATTUVAZHY, Alappuzha North, Ambalapuzha, Alappuzha- 688007"
     company_email = "zujaelectric@gmail.com"
     company_phone = "7356360777"
     
