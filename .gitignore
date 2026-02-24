@@ -49,4 +49,11 @@ Thumbs.db
 
 # Docker
 .dockerignore
+Dockerfile
+docker-compose.yml
+
+# Configuration files (sensitive)
+ev_backend/settings.py
+credentials.txt
+Credentials.txt
 
