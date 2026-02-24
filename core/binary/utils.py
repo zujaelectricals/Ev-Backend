@@ -921,6 +921,7 @@ def get_remaining_unmatched_counts(node, pairs_today):
     """
     Calculate remaining unmatched members on each side after pairs used today
     Uses actual BinaryPair records to count matched users
+    IMPORTANT: Only counts members eligible for pairing (post-activation, with activation payment)
     
     Args:
         node: BinaryNode to calculate for
@@ -929,30 +930,69 @@ def get_remaining_unmatched_counts(node, pairs_today):
     Returns:
         tuple: (left_remaining, right_remaining)
     """
-    # Get all pairs created today for this user
-    today = timezone.now().date()
-    pairs_today_list = BinaryPair.objects.filter(
-        user=node.user,
-        pair_number_after_activation__isnull=False,
-        pair_date=today
-    )
+    # Check if binary commission is activated
+    if not node.binary_commission_activated:
+        return (0, 0)
     
-    # Count actual users matched from each side today
-    left_users_matched = set()
-    right_users_matched = set()
-    for pair in pairs_today_list:
+    # Get activation timestamp
+    activation_time = node.activation_timestamp
+    if not activation_time:
+        return (0, 0)
+    
+    # Get activation count to determine even/odd logic (same as get_unmatched_users_for_pairing)
+    platform_settings = PlatformSettings.get_settings()
+    activation_count = platform_settings.binary_commission_activation_count
+    is_even = (activation_count % 2 == 0)
+    
+    # Get all pairs for this user (not just today, to get all matched users)
+    pairs = BinaryPair.objects.filter(user=node.user)
+    
+    # Extract all left_user and right_user IDs that have been matched
+    matched_user_ids = set()
+    for pair in pairs:
         if pair.left_user:
-            left_users_matched.add(pair.left_user.id)
+            matched_user_ids.add(pair.left_user.id)
         if pair.right_user:
-            right_users_matched.add(pair.right_user.id)
+            matched_user_ids.add(pair.right_user.id)
     
     # Get all descendant nodes on each side
     left_descendants = get_all_descendant_nodes(node, 'left')
     right_descendants = get_all_descendant_nodes(node, 'right')
     
-    # Count unmatched on each side (users not in matched sets)
-    left_unmatched_count = len([n for n in left_descendants if n.user.id not in left_users_matched])
-    right_unmatched_count = len([n for n in right_descendants if n.user.id not in right_users_matched])
+    # Filter based on even/odd logic AND payment eligibility (same as get_unmatched_users_for_pairing)
+    # Only users with activation payment and post-activation are eligible for pairing
+    if is_even:
+        # Even: Exclude activation-triggering member (strictly after activation)
+        left_post_activation = [
+            n for n in left_descendants 
+            if n.created_at > activation_time 
+            and n.user.id not in matched_user_ids
+            and has_activation_payment(n.user)
+        ]
+        right_post_activation = [
+            n for n in right_descendants 
+            if n.created_at > activation_time 
+            and n.user.id not in matched_user_ids
+            and has_activation_payment(n.user)
+        ]
+    else:
+        # Odd: Include activation-triggering member (at or after activation)
+        left_post_activation = [
+            n for n in left_descendants 
+            if n.created_at >= activation_time 
+            and n.user.id not in matched_user_ids
+            and has_activation_payment(n.user)
+        ]
+        right_post_activation = [
+            n for n in right_descendants 
+            if n.created_at >= activation_time 
+            and n.user.id not in matched_user_ids
+            and has_activation_payment(n.user)
+        ]
+    
+    # Count remaining unmatched eligible members on each side
+    left_unmatched_count = len(left_post_activation)
+    right_unmatched_count = len(right_post_activation)
     
     return left_unmatched_count, right_unmatched_count
 
@@ -1271,11 +1311,15 @@ def check_and_create_pair(user):
     commission_blocked = False
     blocked_reason = ''
     
+    # Check for non-Active Buyer distributors
+    # Active Buyers: Only daily limit applies (binary_daily_pair_limit), no pair count limit
+    # Non-Active Buyers: Can only earn for first max_earnings_before_active_buyer pairs (total)
     if not user.is_active_buyer:
         # Count binary pairs that were actually paid (not blocked)
         paid_pairs_count = get_binary_pairs_after_activation_count(user)
         
         # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, block commission
+        # Commission will resume when user becomes Active Buyer
         if paid_pairs_count >= max_earnings_before_active_buyer:
             commission_blocked = True
             blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (already earned {paid_pairs_count} pairs). Commission will resume when user becomes Active Buyer."
@@ -1290,15 +1334,14 @@ def check_and_create_pair(user):
         tds_amount = commission_amount * (tds_percentage / Decimal('100'))
         net_amount = commission_amount - tds_amount
         
-        # Calculate extra deduction for 6th+ pairs
-        # Only apply if user has active booking with remaining balance
+        # Calculate extra deduction for pairs after binary_tds_threshold_pairs
+        # Extra deduction is deducted from booking balance (remaining_balance), not from wallet
+        # Pairs 1 to binary_tds_threshold_pairs: No extra deduction
+        # Pairs (binary_tds_threshold_pairs + 1) onwards: Extra deduction applied
         if pair_number_after_activation > tds_threshold:
-            if has_active_booking_balance(user):
-                extra_deduction = commission_amount * (extra_deduction_percentage / Decimal('100'))
-                net_amount = net_amount - extra_deduction
-            else:
-                # No booking balance available - skip extra deduction
-                extra_deduction = Decimal('0')
+            extra_deduction = commission_amount * (extra_deduction_percentage / Decimal('100'))
+        else:
+            extra_deduction = Decimal('0')
     
     # Get unmatched users for pairing
     # STRICT RULE: Must have one from left AND one from right (no same-leg pairing)
@@ -1334,7 +1377,7 @@ def check_and_create_pair(user):
             left_user=left_node.user,
             right_user=right_node.user,
             pair_amount=commission_amount,
-            earning_amount=net_amount if not commission_blocked else Decimal('0'),  # Net amount after TDS and extra deduction (0 if blocked)
+            earning_amount=net_amount if not commission_blocked else Decimal('0'),  # Net amount after TDS only (extra deduction is deducted from booking balance, not from wallet)
             status='matched',
             matched_at=now,
             pair_month=now.month,
@@ -1367,12 +1410,13 @@ def check_and_create_pair(user):
             binary_pair=pair,
             amount=commission_amount,  # Gross amount
             pair_number=pair_number,
-            net_amount=net_amount if not commission_blocked else Decimal('0')  # Net amount after TDS and extra deduction (0 if blocked)
+            net_amount=net_amount if not commission_blocked else Decimal('0')  # Net amount after TDS only (extra deduction is deducted from booking balance, not from wallet)
         )
         
         # Deduct extra deduction from booking balance if commission is not blocked
         # TDS is calculated and reduces net amount, but NOT deducted from booking balance
-        # Only extra deduction (binary_extra_deduction_percentage) for pairs 6+ is deducted from booking balance
+        # Extra deduction (binary_extra_deduction_percentage) is deducted from booking balance
+        # for pairs after binary_tds_threshold_pairs (e.g., pairs 6+ if threshold is 5)
         if not commission_blocked:
             # Deduct extra amount from booking balance (for 6th+ pairs only)
             if extra_deduction > 0:

@@ -247,9 +247,10 @@ def _process_booking_payment(razorpay_payment):
                 logger.info(
                     f"Booking payment already exists for Razorpay payment {razorpay_payment.order_id} "
                     f"(BookingPayment ID: {booking_payment.id}, transaction_id: {booking_payment.transaction_id}). "
-                    f"Skipping duplicate processing."
+                    f"Skipping duplicate payment processing, but will check for receipt and email."
                 )
-                return booking_payment, booking
+                # Don't return early - continue to check for receipt generation and email sending
+                # This ensures receipt and email are sent even if payment was already created
                 
             # Payment was just created (created=True), proceed to update booking
             logger.info(
@@ -356,6 +357,68 @@ def _process_booking_payment(razorpay_payment):
                     f"⚠️ WARNING: Booking {booking.id} total_paid mismatch! "
                     f"Expected: {expected_total_paid_after}, Actual: {total_paid_after}, "
                     f"Difference: {total_paid_after - expected_total_paid_after}"
+                )
+            
+            # Generate payment receipt PDF if it doesn't exist
+            receipt_was_generated = False
+            if not booking_payment.receipt:
+                try:
+                    from core.booking.utils import generate_payment_receipt_pdf
+                    receipt_file = generate_payment_receipt_pdf(booking_payment, razorpay_payment)
+                    booking_payment.receipt = receipt_file
+                    booking_payment.save(update_fields=['receipt'])
+                    receipt_was_generated = True
+                    logger.info(
+                        f"Generated payment receipt for payment {booking_payment.id} "
+                        f"(transaction_id: {booking_payment.transaction_id})"
+                    )
+                except Exception as receipt_error:
+                    logger.error(
+                        f"Failed to generate payment receipt for payment {booking_payment.id}: {receipt_error}",
+                        exc_info=True
+                    )
+                    # Don't fail payment processing if receipt generation fails
+            
+            # Send payment receipt email via MSG91 only for the first payment of the booking
+            # Check if this is the first completed payment for this booking
+            if booking_payment.receipt:
+                # Count completed payments for this booking (excluding this one if it's being updated)
+                completed_payments_count = BookingPayment.objects.filter(
+                    booking=booking,
+                    status='completed'
+                ).exclude(id=booking_payment.id).count()
+                
+                # Only send email if this is the first completed payment
+                is_first_payment = completed_payments_count == 0
+                
+                if is_first_payment:
+                    try:
+                        from core.booking.utils import send_payment_receipt_email_msg91
+                        success, error_msg = send_payment_receipt_email_msg91(booking_payment)
+                        if success:
+                            logger.info(
+                                f"Payment receipt email sent successfully for first payment {booking_payment.id} "
+                                f"of booking {booking.id}"
+                            )
+                        else:
+                            logger.warning(
+                                f"Failed to send payment receipt email for payment {booking_payment.id}: {error_msg}"
+                            )
+                    except Exception as email_error:
+                        logger.error(
+                            f"Error sending payment receipt email for payment {booking_payment.id}: {email_error}",
+                            exc_info=True
+                        )
+                        # Don't fail payment processing if email sending fails
+                else:
+                    logger.info(
+                        f"Skipping payment receipt email for payment {booking_payment.id} - "
+                        f"not the first payment for booking {booking.id} "
+                        f"(completed payments count: {completed_payments_count})"
+                    )
+            else:
+                logger.warning(
+                    f"Cannot send payment receipt email for payment {booking_payment.id}: receipt not generated"
                 )
             
             # Wire payment terms acceptance PDF as booking receipt
@@ -465,18 +528,10 @@ def _process_booking_payment(razorpay_payment):
             except Exception as e2:
                 logger.warning(f"Failed to update active buyer status: {e2}")
             
-            # Complete the stock reservation if it exists (in fallback path too)
-            from core.inventory.utils import complete_reservation
-            try:
-                reservation = booking.stock_reservation
-                if reservation and reservation.status == 'reserved':
-                    complete_reservation(reservation)
-                    logger.info(
-                        f"Completed stock reservation for booking {booking.id} "
-                        f"(fallback path) from Razorpay payment {razorpay_payment.order_id}"
-                    )
-            except Exception as e3:
-                logger.debug(f"No reservation to complete for booking {booking.id} (fallback): {e3}")
+            # Update reservation status if needed (in fallback path too)
+            # Note: make_payment() should have already handled this, but update here as well
+            # to ensure it's updated even if make_payment() was called earlier
+            booking._update_reservation_status_if_needed()
         
         # Update booking's payment_gateway_ref
         if not booking.payment_gateway_ref:

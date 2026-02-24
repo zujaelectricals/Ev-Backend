@@ -2,11 +2,12 @@ services:
   django:
     build: .
     container_name: ev_backend_django
-    command: gunicorn --bind 0.0.0.0:8000 --workers 3 ev_backend.wsgi:application
+    command: gunicorn -c gunicorn_config.py ev_backend.wsgi:application
     volumes:
       - .:/app
       - static_volume:/app/staticfiles
       - media_volume:/app/media
+      - db_volume:/app/data
     ports:
       - "8000:8000"
     env_file:
@@ -119,8 +120,8 @@ volumes:
   rabbitmq_data:
   static_volume:
   media_volume:
+  db_volume:
 
 networks:
   ev_network:
     driver: bridge
-

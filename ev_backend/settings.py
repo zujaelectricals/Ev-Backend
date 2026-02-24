@@ -68,6 +68,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
+    "ev_backend.cors_middleware.CorsPreflightMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -122,10 +123,13 @@ if DB_ENGINE == "mysql":
         }
     }
 else:
+    # Use data directory for SQLite to ensure write permissions in Docker
+    db_path = BASE_DIR / "data" / "db.sqlite3"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
+            "NAME": db_path,
         }
     }
 
@@ -216,7 +220,7 @@ REFRESH_TOKEN_LIFETIME = env.int("REFRESH_TOKEN_LIFETIME", default=300)
 # REDIS / CELERY
 # --------------------------------------------------
 
-REDIS_URL = env("REDIS_URL")
+REDIS_URL = env("REDIS_URL", default="redis://redis:6379/0")
 
 CACHES = {
     "default": {
@@ -235,16 +239,21 @@ CELERY_TIMEZONE = TIME_ZONE
 
 CSRF_TRUSTED_ORIGINS = [
     "https://ev-backend-api-dca5g4adcrgwhbfg.southindia-01.azurewebsites.net",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
 ]
-CSRF_COOKIE_SECURE = True
-SESSION_COOKIE_SECURE = True
+
+# Only use secure cookies in production (HTTPS)
+CSRF_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_SECURE = not DEBUG
 
 CSRF_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_SAMESITE = "Lax"
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
-SECURE_SSL_REDIRECT = True
+# Only redirect to HTTPS in production (not in development)
+SECURE_SSL_REDIRECT = not DEBUG
 
 
 # --------------------------------------------------
@@ -257,8 +266,30 @@ MSG91_COMPANY_NAME = env("MSG91_COMPANY_NAME", default="ZUJA ELECTRICAL INNOVATI
 # CORS
 # --------------------------------------------------
 
-CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
+CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=["http://localhost:8080", "http://127.0.0.1:8080"])
 CORS_ALLOW_CREDENTIALS = True
+
+# Allow all methods and headers
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
+
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "dnt",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]
 
 # --------------------------------------------------
 # OTP
@@ -276,14 +307,7 @@ RAZORPAY_KEY_ID = env("RAZORPAY_KEY_ID", default="")
 RAZORPAY_KEY_SECRET = env("RAZORPAY_KEY_SECRET", default="")
 RAZORPAY_WEBHOOK_SECRET = env("RAZORPAY_WEBHOOK_SECRET", default="")
 RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET", default="")
-# RazorpayX (Payouts) - separate credentials for payout operations
-RAZORPAYX_KEY_ID = env("RAZORPAYX_KEY_ID", default="")
-RAZORPAYX_KEY_SECRET = env("RAZORPAYX_KEY_SECRET", default="")
-RAZORPAYX_ACCOUNT_NUMBER = env("RAZORPAYX_ACCOUNT_NUMBER", default="")
-RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET", default="")
-# Razorpay API timeout configuration (in seconds)
-# Connect timeout: time to establish connection (DNS resolution, SSL handshake)
-# Read timeout: time to wait for response after connection is established
+
 # Razorpay API timeout & retry tuning
 # Connect timeout: 10s is enough for a healthy connection to Razorpay
 # Read timeout: 20s — Razorpay order creation rarely takes >5s normally
@@ -293,6 +317,11 @@ RAZORPAY_CONNECT_TIMEOUT = env.int("RAZORPAY_CONNECT_TIMEOUT", default=10)
 RAZORPAY_READ_TIMEOUT = env.int("RAZORPAY_READ_TIMEOUT", default=20)
 RAZORPAY_MAX_RETRIES = env.int("RAZORPAY_MAX_RETRIES", default=1)
 RAZORPAY_RETRY_BACKOFF_BASE = env.int("RAZORPAY_RETRY_BACKOFF_BASE", default=1)
+# RazorpayX (Payouts) - separate credentials for payout operations
+RAZORPAYX_KEY_ID = env("RAZORPAYX_KEY_ID", default="")
+RAZORPAYX_KEY_SECRET = env("RAZORPAYX_KEY_SECRET", default="")
+RAZORPAYX_ACCOUNT_NUMBER = env("RAZORPAYX_ACCOUNT_NUMBER", default="")
+RAZORPAY_PAYOUT_WEBHOOK_SECRET = env("RAZORPAY_PAYOUT_WEBHOOK_SECRET", default="")
 # --------------------------------------------------
 # BUSINESS RULES
 # --------------------------------------------------

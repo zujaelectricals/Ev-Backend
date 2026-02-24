@@ -6,6 +6,7 @@ from .models import BinaryPair, BinaryEarning
 from core.wallet.models import WalletTransaction
 from core.wallet.utils import add_wallet_balance, get_or_create_wallet
 from core.settings.models import PlatformSettings
+from .utils import get_daily_pairs_count
 import logging
 from decimal import Decimal
 
@@ -59,6 +60,66 @@ def pair_matched(self, pair_id):
             pair.save(update_fields=['status', 'processed_at'])
             return
         
+        # Get platform settings
+        platform_settings = PlatformSettings.get_settings()
+        daily_limit = platform_settings.binary_daily_pair_limit
+        
+        # CRITICAL: Check daily limit before crediting commission
+        # This is a defensive check to prevent crediting commissions beyond daily limit
+        # even if pairs were created due to race conditions or other issues
+        # The pair is already in the database when this task runs, so it will be included in the count
+        
+        # Determine the date to check - use pair_date if available, otherwise use created_at date
+        check_date = pair.pair_date
+        if not check_date and pair.created_at:
+            check_date = pair.created_at.date()
+        
+        if check_date:
+            pairs_today = get_daily_pairs_count(user, check_date)
+            
+            # IMPORTANT: pairs_today includes the current pair being processed
+            # FIX: Exclude the current pair from count to match check_and_create_pair logic
+            # In check_and_create_pair, it checks BEFORE creating, so count doesn't include current pair
+            # Here, we check AFTER creation, so we need to subtract 1 to get the count before this pair
+            pairs_today_before_this = pairs_today - 1
+            
+            # Now match the logic: if pairs_today_before_this >= daily_limit, block commission
+            # This means: if we already had daily_limit pairs before this one, block this one
+            if pairs_today_before_this >= daily_limit:
+                logger.warning(
+                    f"Pair {pair_id} exceeds daily limit for user {user.email}. "
+                    f"Pairs today (before this): {pairs_today_before_this}, Daily limit: {daily_limit}. "
+                    f"Commission will NOT be credited."
+                )
+                # Mark as blocked
+                pair.commission_blocked = True
+                pair.blocked_reason = f"Daily limit exceeded. Pairs today (before this): {pairs_today_before_this}, Limit: {daily_limit}"
+                pair.status = 'processed'
+                pair.processed_at = timezone.now()
+                pair.save(update_fields=['commission_blocked', 'blocked_reason', 'status', 'processed_at'])
+                return
+        else:
+            # If we can't determine the date, log a warning but still check using today's date as fallback
+            logger.warning(
+                f"Pair {pair_id} has no pair_date or created_at. Using today's date for daily limit check."
+            )
+            today = timezone.now().date()
+            pairs_today = get_daily_pairs_count(user, today)
+            pairs_today_before_this = pairs_today - 1
+            
+            if pairs_today_before_this >= daily_limit:
+                logger.warning(
+                    f"Pair {pair_id} exceeds daily limit for user {user.email} (fallback check). "
+                    f"Pairs today (before this): {pairs_today_before_this}, Daily limit: {daily_limit}. "
+                    f"Commission will NOT be credited."
+                )
+                pair.commission_blocked = True
+                pair.blocked_reason = f"Daily limit exceeded (fallback check). Pairs today (before this): {pairs_today_before_this}, Limit: {daily_limit}"
+                pair.status = 'processed'
+                pair.processed_at = timezone.now()
+                pair.save(update_fields=['commission_blocked', 'blocked_reason', 'status', 'processed_at'])
+                return
+        
         # Get pair number for description
         pair_number = pair.pair_number_after_activation or BinaryPair.objects.filter(user=user).count()
         
@@ -69,31 +130,53 @@ def pair_matched(self, pair_id):
         
         # IMPORTANT: Check if commission should be blocked based on pair_number_after_activation
         # NOT based on current paid count (which has off-by-one bug)
+        
         # Business rule: Non-Active Buyer can only earn for first N pairs (configurable)
-        platform_settings = PlatformSettings.get_settings()
+        # Active Buyers: Only daily limit applies (binary_daily_pair_limit), no pair count limit
+        # Non-Active Buyers: Can only earn for first max_earnings_before_active_buyer pairs (total)
         max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
         
-        if not user.is_active_buyer and pair_number and pair_number > max_earnings_before_active_buyer:
-            logger.warning(
-                f"Pair {pair_id} (Pair #{pair_number}) blocked for non-Active Buyer user {user.email}. "
-                f"This is the {max_earnings_before_active_buyer+1}th+ pair. Commission will resume when user becomes Active Buyer."
-            )
-            # Mark as blocked if not already
-            if not pair.commission_blocked:
-                pair.commission_blocked = True
-                pair.blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (Pair #{pair_number}). Commission will resume when user becomes Active Buyer."
-                pair.save(update_fields=['commission_blocked', 'blocked_reason'])
-            # Update status to processed (for tracking)
-            pair.status = 'processed'
-            pair.processed_at = timezone.now()
-            pair.save(update_fields=['status', 'processed_at'])
-            return
+        if not user.is_active_buyer:
+            # Count binary pairs that were actually paid (not blocked)
+            from core.binary.utils import get_binary_pairs_after_activation_count
+            paid_pairs_count = get_binary_pairs_after_activation_count(user)
+            
+            # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, block commission
+            # Commission will resume when user becomes Active Buyer
+            if paid_pairs_count >= max_earnings_before_active_buyer:
+                logger.warning(
+                    f"Pair {pair_id} (Pair #{pair_number}) blocked for non-Active Buyer user {user.email}. "
+                    f"Already earned {paid_pairs_count} pairs (limit: {max_earnings_before_active_buyer}). "
+                    f"Commission will resume when user becomes Active Buyer."
+                )
+                # Mark as blocked if not already
+                if not pair.commission_blocked:
+                    pair.commission_blocked = True
+                    pair.blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (already earned {paid_pairs_count} pairs). Commission will resume when user becomes Active Buyer."
+                    pair.save(update_fields=['commission_blocked', 'blocked_reason'])
+                # Update status to processed (for tracking)
+                pair.status = 'processed'
+                pair.processed_at = timezone.now()
+                pair.save(update_fields=['status', 'processed_at'])
+                return
         
         # Add to wallet using new transaction type
         # earning_amount already has TDS and extra deduction deducted (net amount)
         # Use add_wallet_balance but it will do its own check - but we've already verified pair_number
         # So we bypass the check by creating transaction directly if needed
         from core.wallet.models import Wallet, WalletTransaction as WT
+        
+        # Final safeguard: Don't credit if commission is already blocked or earning_amount is 0
+        if pair.commission_blocked or not pair.earning_amount or pair.earning_amount <= 0:
+            logger.warning(
+                f"Pair {pair_id} commission already blocked or earning_amount is 0. "
+                f"commission_blocked={pair.commission_blocked}, earning_amount={pair.earning_amount}. "
+                f"Skipping wallet credit."
+            )
+            pair.status = 'processed'
+            pair.processed_at = timezone.now()
+            pair.save(update_fields=['status', 'processed_at'])
+            return
         
         wallet = get_or_create_wallet(user)
         balance_before = wallet.balance

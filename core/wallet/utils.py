@@ -92,8 +92,13 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
                     transaction_type='BINARY_PAIR'
                 ).count()
                 
-                # Rule: First 5 earnings allowed without Active Buyer
-                if previous_pairs < settings.MAX_EARNINGS_BEFORE_ACTIVE_BUYER:
+                # Get max_earnings_before_active_buyer from PlatformSettings (not hardcoded)
+                from core.settings.models import PlatformSettings
+                platform_settings = PlatformSettings.get_settings()
+                max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
+                
+                # Rule: First N earnings allowed without Active Buyer (configurable)
+                if previous_pairs < max_earnings_before_active_buyer:
                     # Full amount credited
                     final_amount = Decimal(str(amount))
                 else:
