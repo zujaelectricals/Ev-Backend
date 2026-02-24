@@ -77,7 +77,6 @@ def pair_matched(self, pair_id):
         if check_date:
             # CRITICAL: Re-check daily limit with database lock to prevent race conditions
             # This is a defensive check that runs AFTER pair creation
-            from core.binary.models import BinaryPair
             from django.db import transaction as db_transaction
             
             with db_transaction.atomic():
