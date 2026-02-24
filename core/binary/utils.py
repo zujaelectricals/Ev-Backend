@@ -1268,33 +1268,20 @@ def check_and_create_pair(user):
     now = timezone.now()
     today = now.date()
     
-    # Check daily limit (count pairs created TODAY after activation)
-    pairs_today = get_daily_pairs_count(user, today)
+    # Initial daily limit check (before transaction, for early exit)
+    # This is a quick check to avoid unnecessary processing
+    pairs_today_initial = get_daily_pairs_count(user, today)
     
-    # Check for active carry-forward first
-    active_carry_forward = None
-    use_carry_forward = False
-    
-    if pairs_today >= daily_limit:
-        # Daily limit reached - check for carry-forward logic
-        # Calculate remaining unmatched members
-        left_remaining, right_remaining = get_remaining_unmatched_counts(node, pairs_today)
-        
-        # Identify long/short legs
+    if pairs_today_initial >= daily_limit:
+        # Daily limit already reached - check for carry-forward logic
+        left_remaining, right_remaining = get_remaining_unmatched_counts(node, pairs_today_initial)
         long_side, short_side, long_count, short_count = get_long_short_legs(left_remaining, right_remaining)
         
         if long_side and long_count > 0:
             # Create carry-forward for long leg
             carry_forward_long_leg(user, today, long_side, long_count)
-            # No more pairs can be created today
-            return None
-    else:
-        # Check if there's active carry-forward to match with
-        # If we're checking pairs, we might have carry-forward from previous day
-        # that needs to be matched first
-        active_carry_forward = get_active_carry_forward(user, None, today)
-        if active_carry_forward and active_carry_forward.remaining_count > 0:
-            use_carry_forward = True
+        # No more pairs can be created today
+        return None
     
     # Count pairs after activation (total, not just today)
     pairs_after_activation = BinaryPair.objects.filter(
@@ -1371,7 +1358,39 @@ def check_and_create_pair(user):
         return None
     
     # Create binary pair
+    # CRITICAL: Check daily limit INSIDE transaction with row locking to prevent race conditions
+    # This ensures that even if multiple pairs are created simultaneously, only the allowed number will be created
     with transaction.atomic():
+        # Re-check daily limit inside transaction with row lock to prevent race conditions
+        # CRITICAL: Lock all existing pairs for this user/date to prevent concurrent creation
+        from core.binary.models import BinaryPair
+        # Get all pairs for locking (this ensures serialization)
+        existing_pairs = list(BinaryPair.objects.filter(
+            user=user,
+            pair_number_after_activation__isnull=False,
+            pair_date=today
+        ).select_for_update())
+        pairs_today = len(existing_pairs)
+        
+        # Final check: If daily limit reached inside transaction, abort pair creation
+        if pairs_today >= daily_limit:
+            # Daily limit reached - check for carry-forward logic
+            left_remaining, right_remaining = get_remaining_unmatched_counts(node, pairs_today)
+            long_side, short_side, long_count, short_count = get_long_short_legs(left_remaining, right_remaining)
+            
+            if long_side and long_count > 0:
+                # Create carry-forward for long leg
+                carry_forward_long_leg(user, today, long_side, long_count)
+            # No more pairs can be created today
+            return None
+        
+        # Check if there's active carry-forward to match with
+        active_carry_forward = None
+        use_carry_forward = False
+        active_carry_forward = get_active_carry_forward(user, None, today)
+        if active_carry_forward and active_carry_forward.remaining_count > 0:
+            use_carry_forward = True
+        
         pair = BinaryPair.objects.create(
             user=user,
             left_user=left_node.user,
@@ -1390,6 +1409,32 @@ def check_and_create_pair(user):
             commission_blocked=commission_blocked,
             blocked_reason=blocked_reason
         )
+        
+        # CRITICAL: Final safety check AFTER creating pair but BEFORE committing transaction
+        # Re-count pairs to ensure we didn't exceed limit due to race condition
+        pairs_after_create = BinaryPair.objects.filter(
+            user=user,
+            pair_number_after_activation__isnull=False,
+            pair_date=today
+        ).count()
+        
+        if pairs_after_create > daily_limit:
+            # This should never happen due to locking, but if it does, block commission
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(
+                f"🚨 CRITICAL: Pair {pair.id} creation exceeded daily limit! "
+                f"Pairs after create: {pairs_after_create}, Limit: {daily_limit}. "
+                f"This indicates a race condition that bypassed locking. Blocking commission."
+            )
+            # Update pair to block commission
+            commission_blocked = True
+            blocked_reason = f"Daily limit exceeded after creation. Pairs: {pairs_after_create}, Limit: {daily_limit}"
+            pair.commission_blocked = True
+            pair.blocked_reason = blocked_reason
+            pair.earning_amount = Decimal('0')
+            pair.save(update_fields=['commission_blocked', 'blocked_reason', 'earning_amount'])
+            # Continue to create earning record but don't trigger pair_matched task
         
         # Update carry-forward matched count if used
         if use_carry_forward and active_carry_forward:

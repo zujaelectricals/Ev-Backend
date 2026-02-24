@@ -75,7 +75,20 @@ def pair_matched(self, pair_id):
             check_date = pair.created_at.date()
         
         if check_date:
-            pairs_today = get_daily_pairs_count(user, check_date)
+            # CRITICAL: Re-check daily limit with database lock to prevent race conditions
+            # This is a defensive check that runs AFTER pair creation
+            from core.binary.models import BinaryPair
+            from django.db import transaction as db_transaction
+            
+            with db_transaction.atomic():
+                # CRITICAL: Lock all existing pairs for this user/date to prevent concurrent processing
+                # Use same pattern as check_and_create_pair for consistency
+                existing_pairs = list(BinaryPair.objects.filter(
+                    user=user,
+                    pair_number_after_activation__isnull=False,
+                    pair_date=check_date
+                ).select_for_update())
+                pairs_today = len(existing_pairs)
             
             # IMPORTANT: pairs_today includes the current pair being processed
             # FIX: Exclude the current pair from count to match check_and_create_pair logic
@@ -84,12 +97,14 @@ def pair_matched(self, pair_id):
             pairs_today_before_this = pairs_today - 1
             
             # CRITICAL: Block commission if daily limit is exceeded
-            # Use > instead of >= to be more strict: if pairs_today > daily_limit, block
-            # This handles edge cases where pairs_today_before_this calculation might be off
+            # Check both conditions to be absolutely sure:
+            # 1. If we already had daily_limit pairs before this one
+            # 2. If total pairs today exceeds daily_limit
             if pairs_today_before_this >= daily_limit or pairs_today > daily_limit:
-                logger.warning(
-                    f"Pair {pair_id} exceeds daily limit for user {user.email}. "
+                logger.error(
+                    f"🚨 BLOCKING COMMISSION: Pair {pair_id} exceeds daily limit for user {user.email}. "
                     f"Pairs today (total): {pairs_today}, Pairs today (before this): {pairs_today_before_this}, Daily limit: {daily_limit}. "
+                    f"Pair number: {pair.pair_number_after_activation}, Pair date: {check_date}. "
                     f"Commission will NOT be credited."
                 )
                 # Mark as blocked
@@ -99,6 +114,12 @@ def pair_matched(self, pair_id):
                 pair.processed_at = timezone.now()
                 pair.save(update_fields=['commission_blocked', 'blocked_reason', 'status', 'processed_at'])
                 return
+            else:
+                logger.info(
+                    f"✅ Daily limit check passed for pair {pair_id} (user {user.email}). "
+                    f"Pairs today (total): {pairs_today}, Pairs today (before this): {pairs_today_before_this}, Daily limit: {daily_limit}. "
+                    f"Pair number: {pair.pair_number_after_activation}, Pair date: {check_date}."
+                )
         else:
             # If we can't determine the date, log a warning but still check using today's date as fallback
             logger.warning(
