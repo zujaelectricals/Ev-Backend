@@ -64,6 +64,13 @@ class Payment(models.Model):
             models.Index(fields=['payment_id']),
             models.Index(fields=['status']),
             models.Index(fields=['user', 'status']),
+            # CRITICAL: Composite index for order reuse query optimization
+            # This query filters by: user, content_type, object_id, status, created_at
+            # The index order matches the query filter order for optimal performance
+            models.Index(
+                fields=['user', 'content_type', 'object_id', 'status', 'created_at'],
+                name='payment_order_reuse_idx'
+            ),
         ]
     
     def __str__(self):

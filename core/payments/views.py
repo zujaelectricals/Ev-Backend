@@ -568,7 +568,11 @@ def _calculate_amount_from_entity(entity_type, entity_id, requested_amount=None)
     if entity_type == 'booking':
         from core.booking.models import Booking
         try:
-            booking = Booking.objects.get(id=entity_id)
+            # Optimize: Only fetch fields needed for amount calculation
+            # This reduces data transfer and memory usage
+            booking = Booking.objects.only(
+                'booking_amount', 'total_paid', 'remaining_amount'
+            ).get(id=entity_id)
             
             # If user provided a specific amount, validate and use it
             if requested_amount is not None:
@@ -593,6 +597,7 @@ def _calculate_amount_from_entity(entity_type, entity_id, requested_amount=None)
                 else:
                     amount = float(booking.remaining_amount)
             
+            # ContentType is cached by Django internally, so this is already optimized
             content_type = ContentType.objects.get_for_model(Booking)
             return amount, booking, content_type
         except Booking.DoesNotExist:
@@ -601,7 +606,8 @@ def _calculate_amount_from_entity(entity_type, entity_id, requested_amount=None)
     elif entity_type == 'payout':
         from core.payout.models import Payout
         try:
-            payout = Payout.objects.get(id=entity_id)
+            # Optimize: Only fetch field needed for amount calculation
+            payout = Payout.objects.only('net_amount').get(id=entity_id)
             # For payouts, use requested amount if provided, otherwise use full net_amount
             if requested_amount is not None:
                 requested_amount_float = float(requested_amount)
@@ -615,6 +621,7 @@ def _calculate_amount_from_entity(entity_type, entity_id, requested_amount=None)
                 amount = requested_amount_float
             else:
                 amount = float(payout.net_amount)
+            # ContentType is cached by Django internally, so this is already optimized
             content_type = ContentType.objects.get_for_model(Payout)
             return amount, payout, content_type
         except Payout.DoesNotExist:
@@ -632,6 +639,10 @@ def create_order(request):
     
     POST /api/payments/create-order/
     """
+    # Performance timing - identify bottlenecks
+    start_time = time.time()
+    timing = {}
+    
     serializer = CreateOrderRequestSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
     
@@ -643,9 +654,11 @@ def create_order(request):
         # Calculate net amount from database (not trusting frontend)
         # This is the amount that should be credited to the booking/payout
         # If requested_amount is provided, validate it against the entity's limits
+        entity_start = time.time()
         net_amount_rupees, entity_obj, content_type = _calculate_amount_from_entity(
             entity_type, entity_id, requested_amount=requested_amount
         )
+        timing['entity_lookup'] = (time.time() - entity_start) * 1000  # ms
         
         if net_amount_rupees <= 0:
             raise ValidationError({'error': 'Amount must be greater than 0'})
@@ -659,11 +672,11 @@ def create_order(request):
         gross_amount_paise = int(round(gross_amount_rupees * 100))
         gateway_charges_paise = int(round(gateway_charges_rupees * 100))
         
-        logger.info(
-            f"Order calculation for {entity_type} {entity_id}: "
-            f"net_amount=₹{net_amount_rupees:.2f} ({net_amount_paise} paise), "
-            f"gross_amount=₹{gross_amount_rupees:.2f} ({gross_amount_paise} paise), "
-            f"gateway_charges=₹{gateway_charges_rupees:.2f} ({gateway_charges_paise} paise)"
+        # Log at debug level to reduce I/O overhead on critical payment path
+        # Only log essential info - detailed logging can be enabled for debugging
+        logger.debug(
+            f"Order calculation: {entity_type}={entity_id}, "
+            f"gross={gross_amount_paise}paise, net={net_amount_paise}paise"
         )
         
         # ── ORDER REUSE: return existing uncompleted order if one exists ────────────
@@ -671,9 +684,14 @@ def create_order(request):
         # within the last 30 minutes, reuse it — no Razorpay API call needed.
         # This eliminates the external HTTP round-trip on repeated attempts (e.g. user
         # dismissed the popup and clicked Pay again).
+        # CRITICAL OPTIMIZATION: Only fetch fields needed (order_id, gateway_charges)
+        # This reduces data transfer and memory usage, speeding up the query
         ORDER_REUSE_WINDOW_SECONDS = 30 * 60  # 30 minutes
         reuse_cutoff = timezone.now() - timedelta(seconds=ORDER_REUSE_WINDOW_SECONDS)
-        existing_payment = Payment.objects.filter(
+        reuse_start = time.time()
+        existing_payment = Payment.objects.only(
+            'order_id', 'gateway_charges'
+        ).filter(
             user=request.user,
             content_type=content_type,
             object_id=entity_id,
@@ -682,18 +700,21 @@ def create_order(request):
             status='CREATED',
             created_at__gte=reuse_cutoff,
         ).order_by('-created_at').first()
+        timing['order_reuse_check'] = (time.time() - reuse_start) * 1000  # ms
 
         if existing_payment:
-            logger.info(
+            # Fast path: Reuse existing order - no API call needed
+            # Log at debug level to reduce I/O overhead on fast path
+            logger.debug(
                 f"Reusing existing Razorpay order {existing_payment.order_id} for user {request.user.id}, "
-                f"entity_type={entity_type}, entity_id={entity_id} "
-                f"(created at {existing_payment.created_at}). Skipping Razorpay API call."
+                f"{entity_type}={entity_id}"
             )
             order_id = existing_payment.order_id
             gateway_charges_paise = existing_payment.gateway_charges or gateway_charges_paise
 
         else:
             # No reusable order — call Razorpay API to create a fresh one
+            razorpay_start = time.time()
             client = get_razorpay_client()
             order_data = {
                 'amount': gross_amount_paise,
@@ -714,6 +735,7 @@ def create_order(request):
 
             try:
                 razorpay_order = create_razorpay_order_with_retry(client, order_data)
+                timing['razorpay_api'] = (time.time() - razorpay_start) * 1000  # ms
             except requests.exceptions.Timeout as timeout_error:
                 logger.error(
                     f"Razorpay API timeout while creating order for user {request.user.id}, "
@@ -770,7 +792,9 @@ def create_order(request):
             )
         
         # Return response with gross amount and breakdown (what user needs to pay)
-        response_serializer = CreateOrderResponseSerializer({
+        # Build response data directly to avoid serializer overhead
+        response_start = time.time()
+        response_data = {
             'order_id': order_id,
             'key_id': settings.RAZORPAY_KEY_ID,
             'amount': gross_amount_paise,  # Gross amount in paise (for Razorpay integration)
@@ -779,9 +803,32 @@ def create_order(request):
             'amount_rupees': round(gross_amount_rupees, 2),  # Gross amount in rupees (for display)
             'net_amount_rupees': round(net_amount_rupees, 2),  # Net amount in rupees (for display)
             'gateway_charges_rupees': round(gateway_charges_rupees, 2),  # Gateway charges in rupees (for display)
-        })
+        }
         
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        # Use serializer for validation but return optimized response
+        response_serializer = CreateOrderResponseSerializer(response_data)
+        response = Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        timing['response_build'] = (time.time() - response_start) * 1000  # ms
+        
+        # Add cache headers for order reuse scenarios to help frontend
+        if existing_payment:
+            # Existing orders can be cached briefly (5 minutes) since they're reusable
+            response['Cache-Control'] = 'private, max-age=300'
+        
+        # Log performance metrics to identify bottlenecks
+        total_time = (time.time() - start_time) * 1000  # ms
+        timing['total'] = total_time
+        logger.info(
+            f"⏱️ create_order performance: {entity_type}={entity_id}, "
+            f"total={total_time:.1f}ms, "
+            f"entity_lookup={timing.get('entity_lookup', 0):.1f}ms, "
+            f"order_reuse={timing.get('order_reuse_check', 0):.1f}ms, "
+            f"razorpay_api={timing.get('razorpay_api', 0):.1f}ms, "
+            f"response={timing.get('response_build', 0):.1f}ms, "
+            f"reused={existing_payment is not None}"
+        )
+        
+        return response
     
     except ValidationError:
         raise
