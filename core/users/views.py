@@ -323,20 +323,18 @@ class KYCViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         """Create or update KYC (since it's OneToOneField, update if exists)"""
         user = request.user
-        try:
-            # Check if KYC already exists for this user
-            kyc = KYC.objects.get(user=user)
+        kyc = KYC.objects.filter(user=user).first()
+        if kyc:
             # If exists, update it
             serializer = self.get_serializer(kyc, data=request.data, partial=False)
             serializer.is_valid(raise_exception=True)
             serializer.save()
             return Response(serializer.data, status=status.HTTP_200_OK)
-        except KYC.DoesNotExist:
-            # If doesn't exist, create new one
-            serializer = self.get_serializer(data=request.data)
-            serializer.is_valid(raise_exception=True)
-            serializer.save(user=user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        # If doesn't exist, create new one
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(user=user)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
     
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
