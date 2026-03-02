@@ -29,6 +29,7 @@ class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = DistributorApplicationPagination
     
     def get_queryset(self):
         user = self.request.user
