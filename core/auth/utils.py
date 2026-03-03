@@ -12,6 +12,10 @@ from .models import OTP
 
 logger = logging.getLogger(__name__)
 
+
+# Re-export for backward compatibility; prefer core.utils.strip_unicode_4byte
+from core.utils import strip_unicode_4byte
+
 # Dummy user configuration
 DUMMY_USER_EMAIL = 'testuser@gmail.com'
 DUMMY_USER_OTP = '123456'

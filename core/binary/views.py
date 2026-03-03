@@ -13,7 +13,8 @@ from .serializers import (
     BinaryNodeSerializer, BinaryPairSerializer, BinaryEarningSerializer,
     BinaryTreeNodeSerializer
 )
-from .utils import check_and_create_pair
+from .utils import check_and_create_pair, get_binary_pairs_after_activation_count
+from core.settings.models import PlatformSettings
 
 
 class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
@@ -335,6 +336,40 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         
         return search_results
     
+    def _get_direct_referrals_in_tree(self, user_node, direct_referral_user_ids):
+        """
+        Get all direct referrals that appear anywhere in the user's tree.
+        Used when direct_referrals_only=true so the client can see and navigate to
+        direct referrals that are not immediate left/right children.
+        """
+        if not direct_referral_user_ids:
+            return []
+        descendant_ids = self._get_all_descendant_node_ids(user_node)
+        if not descendant_ids:
+            return []
+        nodes = BinaryNode.objects.filter(
+            id__in=descendant_ids,
+            user_id__in=direct_referral_user_ids
+        ).select_related('user')
+        result = []
+        for node in nodes:
+            if not node.user:
+                continue
+            tree_side = self._get_tree_side(user_node, node)
+            result.append({
+                'node_id': node.id,
+                'user_id': node.user.id,
+                'user_email': node.user.email,
+                'user_username': node.user.username,
+                'user_full_name': node.user.get_full_name() or node.user.username,
+                'user_mobile': node.user.mobile or '',
+                'tree_side': tree_side,
+                'level': node.level,
+                'side': node.side,
+                'parent_id': node.parent_id,
+            })
+        return result
+    
     def _get_tree_side(self, root_node, target_node):
         """
         Determine which side (left/right) of the root tree the target node is on.
@@ -458,6 +493,19 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
         # Check for search parameter
         search_query = request.query_params.get('search', '').strip()
         
+        # Direct referrals only filter: when enabled, tree shows only direct referrals as children
+        direct_referrals_only_param = request.query_params.get('direct_referrals_only', '').strip().lower()
+        direct_referrals_only = direct_referrals_only_param in ('true', '1', 'yes')
+        direct_referral_user_ids = set()
+        if direct_referrals_only:
+            direct_referral_user_ids = set(all_referred_users.values_list('id', flat=True))
+        
+        # Build serializer context (request + optional direct-referrals filter)
+        serializer_context = {'request': request}
+        if direct_referrals_only:
+            serializer_context['direct_referral_user_ids'] = direct_referral_user_ids
+            serializer_context['direct_referrals_only'] = True
+        
         # Try to get binary node and tree structure
         try:
             from django.db.models import Prefetch
@@ -503,7 +551,8 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 side_filter=side_filter,
                 page=None,  # No pagination for direct children
                 page_size=None,
-                request=request
+                request=request,
+                context=serializer_context
             )
             
             # Include pending_users in the response
@@ -583,6 +632,20 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                         "You can only view nodes in your own binary tree"
                     )
             
+            # Optional direct_referrals_only filter (same as tree_structure)
+            direct_referrals_only_param = request.query_params.get('direct_referrals_only', '').strip().lower()
+            direct_referrals_only = direct_referrals_only_param in ('true', '1', 'yes')
+            node_children_context = {'request': request}
+            if direct_referrals_only:
+                from core.users.models import User
+                from core.booking.models import Booking
+                referrer = request.user
+                referred_users = User.objects.filter(referred_by=referrer)
+                booking_users = User.objects.filter(bookings__referred_by=referrer)
+                all_referred_users = (referred_users | booking_users).distinct()
+                node_children_context['direct_referral_user_ids'] = set(all_referred_users.values_list('id', flat=True))
+                node_children_context['direct_referrals_only'] = True
+            
             # Optimize query with prefetch_related for direct children
             left_children_prefetch = Prefetch(
                 'children',
@@ -620,7 +683,8 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 side_filter=side_filter,
                 page=None,
                 page_size=None,
-                request=request
+                request=request,
+                context=node_children_context
             )
             
             # Return only left_child and right_child in response
@@ -711,8 +775,8 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 allow_replacement=allow_replacement
             )
             
-            # Process commission after placement (commission only paid if payment was completed)
-            commission_paid = process_direct_user_commission(request.user, target_user)
+            # Process commission after placement (paid to user whose referral code was used, if eligible)
+            commission_paid = process_direct_user_commission(target_user)
             
             serializer = BinaryNodeSerializer(node)
             response_data = serializer.data
@@ -1079,7 +1143,7 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                 if node:
                     # Process commission after placement (commission only paid if payment was completed)
                     from .utils import process_direct_user_commission
-                    commission_paid = process_direct_user_commission(referrer, user)
+                    commission_paid = process_direct_user_commission(user)
                     
                     placed_users.append({
                         'user_id': user.id,
@@ -1404,10 +1468,31 @@ class BinaryPairViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['post'])
     def check_pairs(self, request):
         """Manually trigger pair checking"""
-        pair = check_and_create_pair(request.user)
+        user = request.user
+        result = check_and_create_pair(user)
+        pair = result[0] if isinstance(result, tuple) else result
+        reason = result[1] if isinstance(result, tuple) else None
         if pair:
             serializer = self.get_serializer(pair)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            data = dict(serializer.data)
+            if getattr(pair, 'commission_blocked', False):
+                data['message'] = (
+                    'Pair matched. You have reached maximum Commission limit for non-Active booking'
+                )
+            return Response(data, status=status.HTTP_201_CREATED)
+        # No pair created: prefer non-Active Buyer limit message over daily limit when both apply
+        if not user.is_active_buyer and user.is_distributor:
+            platform_settings = PlatformSettings.get_settings()
+            max_earnings = platform_settings.max_earnings_before_active_buyer
+            paid_count = get_binary_pairs_after_activation_count(user)
+            if paid_count >= max_earnings:
+                return Response({
+                    'message': 'You have reached maximum limit for non-Active booking, Become Active to earn more'
+                }, status=status.HTTP_200_OK)
+        if reason == 'daily_limit':
+            return Response({
+                'message': "You have reached today's pair limit. Try again tomorrow."
+            }, status=status.HTTP_200_OK)
         return Response({'message': 'No pairs available'}, status=status.HTTP_200_OK)
 
 

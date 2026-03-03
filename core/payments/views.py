@@ -626,6 +626,8 @@ def _process_booking_payment(razorpay_payment):
             # Update user's Active Buyer status (pass booking for bonus processing)
             try:
                 booking.user.update_active_buyer_status(booking=booking)
+                # Refresh user object from database to ensure updated is_active_buyer is reflected
+                booking.user.refresh_from_db()
             except Exception as e2:
                 logger.warning(f"Failed to update active buyer status: {e2}")
             

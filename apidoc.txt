@@ -635,7 +635,7 @@ Super User: EVAdmin && EVAdmin@123
          ...
        }
      ]
-   }
+    }
 
 
 12. GET USER BY ID
@@ -665,6 +665,44 @@ Super User: EVAdmin && EVAdmin@123
       "country": "India",
       ...
     }
+
+
+12A. UPDATE USER TOTAL EARNINGS (Admin/Superuser only)
+    Method: PATCH
+    URL: /api/users/{id}/update_total_earnings/
+    Authentication: Required (Admin or Superuser only)
+    Description: Update a user's wallet total_earned. Used by admin to correct or set total earnings. The updated value is reflected in the binary node tree_structure response (total_earnings per node).
+    
+    Request Body:
+    {
+      "total_earned": "1234.56"   // Non-negative decimal, max 12 digits, 2 decimal places
+    }
+    
+    Response (200 OK):
+    {
+      "user_id": 5,
+      "total_earned": "1234.56",
+      "wallet_balance": "5000.00"
+    }
+    
+    Error Response (403 Forbidden):
+    {
+      "detail": "Only admin or superuser can update total earnings."
+    }
+    
+    Error Response (400 Bad Request):
+    {
+      "total_earned": ["A valid number is required."]
+    }
+    OR (negative value)
+    {
+      "total_earned": ["Ensure this value is greater than or equal to 0."]
+    }
+    
+    Notes:
+    - Only admin or superuser can call this endpoint
+    - total_earned is stored on the user's Wallet model and is shown as total_earnings in node tree_structure responses
+    - Wallet is created if the user does not have one
 
 
 13. LIST ADMIN USERS
@@ -3934,6 +3972,7 @@ Super User: EVAdmin && EVAdmin@123
       * Returns up to 50 matching results
       * Uses optimized recursive CTE query for fast performance
       * Results include tree_side field showing which side (left/right) of the root tree the user is on
+    - direct_referrals_only: Optional. When enabled, only direct referrals of the current user are shown as left/right children; other nodes in those slots are hidden (slots appear empty). Accepts "true", "1", or "yes" (case-insensitive). Omitted or any other value: default behavior (show all tree children).
     
     Example Requests:
     GET /api/binary/nodes/tree_structure/
@@ -3942,6 +3981,7 @@ Super User: EVAdmin && EVAdmin@123
     GET /api/binary/nodes/tree_structure/?search=John
     GET /api/binary/nodes/tree_structure/?search=john doe
     GET /api/binary/nodes/tree_structure/?side=left&search=Smith
+    GET /api/binary/nodes/tree_structure/?direct_referrals_only=true
     
     Performance Notes:
     - Uses prefetch_related with Prefetch objects to optimize database queries
@@ -4224,6 +4264,7 @@ Super User: EVAdmin && EVAdmin@123
     - Direct children (left_child, right_child) are conditionally included based on side filter
     - Side filtering: When side="left", right_child is excluded (set to null)
     - Side filtering: When side="right", left_child is excluded (set to null)
+    - direct_referrals_only: When true, left_child/right_child are shown only if that node's user is a direct referral (referred_by=current user or bookings with referred_by=current user); otherwise the slot is omitted (null)
     - Only tree owner can view their own tree structure
     - Each node includes comprehensive member details:
       * Basic Info: node_id, user_id, user_email, user_username, user_full_name, user_mobile, user_profile_picture_url
@@ -4273,11 +4314,13 @@ Super User: EVAdmin && EVAdmin@123
       * "left": Returns only left_child (excludes right_child)
       * "right": Returns only right_child (excludes left_child)
       * "both": Returns both left_child and right_child (default behavior)
+    - direct_referrals_only: Optional. When enabled (e.g. "true", "1", "yes"), only children whose user is a direct referral of the current user are returned; other slots appear null. Use with tree_structure?direct_referrals_only=true to consistently see only direct referrals at every level when expanding nodes.
     
     Example Requests:
     GET /api/binary/nodes/node_children/?node_id=2
     GET /api/binary/nodes/node_children/?node_id=2&side=left
     GET /api/binary/nodes/node_children/?node_id=2&side=right
+    GET /api/binary/nodes/node_children/?node_id=2&direct_referrals_only=true
     
     Response (200 OK):
     {
@@ -4428,6 +4471,7 @@ Super User: EVAdmin && EVAdmin@123
     - Performance: Uses prefetch_related to minimize database queries
     - Side filtering: When side="left", right_child is excluded (set to null)
     - Side filtering: When side="right", left_child is excluded (set to null)
+    - direct_referrals_only: Pass the same query param when loading node_children to see only direct referrals at each level (e.g. node_children?node_id=2&direct_referrals_only=true).
 
 
 54. MANUALLY PLACE USER IN TREE

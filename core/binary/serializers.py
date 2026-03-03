@@ -230,8 +230,9 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
         return 0
     
     def get_total_earnings(self, obj):
-        """Get total earnings (binary-related: direct user commissions and binary pairs)"""
-        # Use net_amount_total as total_earnings to match our calculation
+        """Get total earnings: use wallet.total_earned when available (reflects admin edits), else sum from transactions."""
+        if obj.user and getattr(obj.user, 'wallet', None) is not None:
+            return str(obj.user.wallet.total_earned)
         return self.get_net_amount_total(obj)
     
     def get_total_referrals(self, obj):
@@ -343,6 +344,11 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             if not left_child:
                 return None
             
+            # When direct_referrals_only filter is on, hide child if not a direct referral
+            direct_referral_user_ids = self.context.get('direct_referral_user_ids') or set()
+            if self.context.get('direct_referrals_only') and left_child.user_id not in direct_referral_user_ids:
+                return None
+            
             # Always stop recursion at direct children (no nested structures)
             # Set max_depth to current_depth + 1 to prevent further recursion
             effective_max_depth = self.current_depth + 1
@@ -355,7 +361,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 side_filter=self.side_filter,
                 page=None,  # No pagination for direct children
                 page_size=None,
-                request=self.request
+                request=self.request,
+                context=self.context
             )
             return serializer.data
         except Exception as e:
@@ -388,6 +395,11 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             if not right_child:
                 return None
             
+            # When direct_referrals_only filter is on, hide child if not a direct referral
+            direct_referral_user_ids = self.context.get('direct_referral_user_ids') or set()
+            if self.context.get('direct_referrals_only') and right_child.user_id not in direct_referral_user_ids:
+                return None
+            
             # Always stop recursion at direct children (no nested structures)
             # Set max_depth to current_depth + 1 to prevent further recursion
             effective_max_depth = self.current_depth + 1
@@ -400,7 +412,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 side_filter=self.side_filter,
                 page=None,  # No pagination for direct children
                 page_size=None,
-                request=self.request
+                request=self.request,
+                context=self.context
             )
             return serializer.data
         except Exception as e:

@@ -8,7 +8,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .utils import (
     send_email_otp, send_mobile_otp, verify_otp, generate_referral_code,
     generate_otp, store_signup_session, get_signup_session, delete_signup_session,
-    ensure_dummy_user, DUMMY_USER_EMAIL, ensure_company_referral_user
+    ensure_dummy_user, DUMMY_USER_EMAIL, ensure_company_referral_user,
+    strip_unicode_4byte,
 )
 from core.settings.models import PlatformSettings
 
@@ -656,22 +657,32 @@ class VerifySignupOTPSerializer(serializers.Serializer):
             except User.DoesNotExist:
                 raise serializers.ValidationError({'referral_code': 'Invalid referral code'})
 
+        # Sanitize string fields for MySQL utf8 (strip 4-byte chars e.g. emojis)
+        first_name = strip_unicode_4byte(signup_data.get('first_name', ''))
+        last_name = strip_unicode_4byte(signup_data.get('last_name', ''))
+        address_line1 = strip_unicode_4byte(signup_data.get('address_line1', ''))
+        address_line2 = strip_unicode_4byte(signup_data.get('address_line2', '') or '')
+        city = strip_unicode_4byte(signup_data.get('city', ''))
+        state = strip_unicode_4byte(signup_data.get('state', ''))
+        pincode = strip_unicode_4byte(signup_data.get('pincode', ''))
+        country = strip_unicode_4byte(signup_data.get('country', 'India') or 'India')
+
         # Create new user (email, mobile, and PAN are all unique at this point)
         username = email or mobile
         user = User.objects.create(
             username=username,
             email=email,
             mobile=mobile,
-            first_name=signup_data['first_name'],
-            last_name=signup_data['last_name'],
+            first_name=first_name,
+            last_name=last_name,
             gender=signup_data['gender'],
             date_of_birth=date_of_birth,
-            address_line1=signup_data['address_line1'],
-            address_line2=signup_data.get('address_line2', ''),
-            city=signup_data['city'],
-            state=signup_data['state'],
-            pincode=signup_data['pincode'],
-            country=signup_data.get('country', 'India'),
+            address_line1=address_line1,
+            address_line2=address_line2,
+            city=city,
+            state=state,
+            pincode=pincode,
+            country=country,
             pan_card=pan_card,
             role='user',
             referred_by=referrer

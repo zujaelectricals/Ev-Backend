@@ -123,10 +123,37 @@ def process_payout(payout):
         # Automatically trigger RazorpayX payout API
         # Use RazorpayX client utilities (separate from Razorpay payments client)
         try:
-            # Extract bank details from payout model
-            account_number = payout.account_number
-            ifsc_code = payout.ifsc_code
-            account_holder_name = payout.account_holder_name
+            # Use same bank details source as user payout flow: prefer user's KYC (approved), else payout record
+            user = payout.user
+            account_number = None
+            ifsc_code = None
+            account_holder_name = None
+            try:
+                kyc = getattr(user, 'kyc', None)
+                if kyc and getattr(kyc, 'status', None) == 'approved' and kyc.bank_name and kyc.account_number:
+                    account_number = (kyc.account_number or '').strip()
+                    ifsc_code = (kyc.ifsc_code or '').strip()
+                    account_holder_name = (kyc.account_holder_name or '').strip() or kyc.user.get_full_name() or user.username
+            except Exception:
+                pass
+            if not account_number or not ifsc_code:
+                account_number = (payout.account_number or '').strip()
+                ifsc_code = (payout.ifsc_code or '').strip()
+                account_holder_name = (payout.account_holder_name or '').strip()
+            if not account_holder_name:
+                account_holder_name = getattr(user, 'get_full_name', lambda: '')() or getattr(user, 'username', '') or 'Account Holder'
+
+            # RazorpayX requires IFSC to be exactly 11 characters
+            if len(ifsc_code) != 11:
+                error_msg = (
+                    f"Invalid IFSC for payout: must be 11 characters (got {len(ifsc_code)}: {ifsc_code!r}). "
+                    "Update bank details in KYC or the payout record."
+                )
+                logger.error(error_msg)
+                payout.status = 'failed'
+                payout.rejection_reason = error_msg
+                payout.save()
+                raise ValueError(error_msg)
             
             # Convert net_amount to paise (RazorpayX uses paise)
             amount_paise = int(float(payout.net_amount) * 100)
@@ -265,6 +292,21 @@ def process_payout(payout):
                     f"amount={amount_paise} paise (auto-processed)"
                 )
             except Exception as payout_error:
+                # Detect Razorpay insufficient_funds for a clear message and 400 response
+                reason = None
+                if getattr(payout_error, 'response', None) is not None:
+                    try:
+                        body = payout_error.response.json()
+                        reason = (body.get('error') or {}).get('reason')
+                    except Exception:
+                        pass
+                if reason == 'insufficient_funds':
+                    error_msg = "Company RazorpayX Account doesn't have enough balance to Process"
+                    logger.error(f"RazorpayX insufficient funds for Payout {payout.id}: {error_msg}")
+                    payout.status = 'failed'
+                    payout.rejection_reason = error_msg
+                    payout.save()
+                    raise ValueError(error_msg)
                 error_msg = f"Failed to create RazorpayX payout: {payout_error}"
                 logger.error(error_msg, exc_info=True)
                 # Mark payout as failed
@@ -274,6 +316,9 @@ def process_payout(payout):
                 raise Exception(error_msg)
                 
         except Exception as e:
+            # Re-raise ValueError (e.g. insufficient_funds) so view can return 400
+            if isinstance(e, ValueError):
+                raise
             # If any RazorpayX API call fails, mark payout as failed and raise exception
             # This prevents HTTP 201 response on failure
             error_msg = f"RazorpayX API error for Payout {payout.id}: {e}"

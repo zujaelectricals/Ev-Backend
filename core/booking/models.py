@@ -212,6 +212,8 @@ class Booking(models.Model):
             # Guard 1: payment was already in DB before total_paid was synced.
             # Still trigger active-buyer bonus – the user may have just qualified.
             self.user.update_active_buyer_status(booking=self)
+            # Refresh user object from database to ensure updated is_active_buyer is reflected
+            self.user.refresh_from_db()
             return self
 
         # ── Guard 2 ──────────────────────────────────────────────────────────
@@ -230,6 +232,8 @@ class Booking(models.Model):
                     # Guard 2: duplicate call – totals are already correct in DB.
                     # Still trigger active-buyer bonus in case it wasn't applied yet.
                     self.user.update_active_buyer_status(booking=self)
+                    # Refresh user object from database to ensure updated is_active_buyer is reflected
+                    self.user.refresh_from_db()
                     return self
             except self.payments.model.DoesNotExist:
                 pass
@@ -266,6 +270,8 @@ class Booking(models.Model):
         
         # Update user's Active Buyer status (pass this booking for bonus processing)
         self.user.update_active_buyer_status(booking=self)
+        # Refresh user object from database to ensure updated is_active_buyer is reflected
+        self.user.refresh_from_db()
         
         # Trigger Celery task for payment processing
         from core.booking.tasks import payment_completed

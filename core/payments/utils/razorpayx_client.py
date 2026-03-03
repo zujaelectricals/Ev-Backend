@@ -138,10 +138,27 @@ def create_razorpayx_fund_account(fund_account_data):
             headers=headers,
             timeout=RAZORPAYX_TIMEOUT
         )
+        if response.status_code >= 400:
+            try:
+                error_body = response.json()
+                logger.error(
+                    f"RazorpayX API error creating fund account (status {response.status_code}): {error_body}"
+                )
+            except Exception:
+                logger.error(
+                    f"RazorpayX API error creating fund account (status {response.status_code}): {response.text}"
+                )
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        logger.error(f"RazorpayX API error creating fund account: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_body = e.response.json()
+                logger.error(f"RazorpayX API error creating fund account - response body: {error_body}")
+            except Exception:
+                logger.error(f"RazorpayX API error creating fund account - response text: {e.response.text}")
+        else:
+            logger.error(f"RazorpayX API error creating fund account: {e}")
         raise
 
 

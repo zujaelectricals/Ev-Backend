@@ -92,6 +92,31 @@ class UserSerializer(serializers.ModelSerializer):
         return None
 
 
+class UserNormalListSerializer(UserSerializer):
+    """Serializer for users/normal/ list; includes total_earnings from wallet when present."""
+    total_earnings = serializers.SerializerMethodField()
+    
+    class Meta(UserSerializer.Meta):
+        fields = UserSerializer.Meta.fields + ('total_earnings',)
+    
+    def get_total_earnings(self, obj):
+        """Return wallet total_earned as string (e.g. "20000.00") when wallet exists, else None."""
+        if hasattr(obj, 'wallet') and obj.wallet is not None:
+            return str(obj.wallet.total_earned)
+        return None
+
+
+class UpdateTotalEarnedSerializer(serializers.Serializer):
+    """Request body for admin-only update of a user's wallet total_earned."""
+    total_earned = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=0,
+        required=True,
+        help_text="Total earned amount to set for the user's wallet (non-negative).",
+    )
+
+
 class UserProfileSerializer(serializers.ModelSerializer):
     kyc_status = serializers.SerializerMethodField()
     nominee_exists = serializers.SerializerMethodField()

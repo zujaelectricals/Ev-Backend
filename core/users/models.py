@@ -71,6 +71,16 @@ class User(AbstractBaseUser, PermissionsMixin):
     
     def get_full_name(self):
         return f"{self.first_name} {self.last_name}".strip()
+
+    def save(self, *args, **kwargs):
+        """Sanitize text fields for MySQL utf8 (strip 4-byte chars e.g. emojis)."""
+        from core.utils import strip_unicode_4byte
+        for field in ('first_name', 'last_name', 'address_line1', 'address_line2',
+                      'city', 'state', 'pincode', 'country'):
+            value = getattr(self, field, None)
+            if value and isinstance(value, str):
+                setattr(self, field, strip_unicode_4byte(value))
+        super().save(*args, **kwargs)
     
     def update_active_buyer_status(self, booking=None):
         """
@@ -199,6 +209,16 @@ class KYC(models.Model):
         db_table = 'kyc'
         verbose_name = 'KYC'
         verbose_name_plural = 'KYCs'
+
+    def save(self, *args, **kwargs):
+        """Sanitize text fields for MySQL utf8 (strip 4-byte chars e.g. emojis)."""
+        from core.utils import strip_unicode_4byte
+        for field in ('address_line1', 'address_line2', 'city', 'state', 'pincode',
+                      'country', 'rejection_reason', 'bank_name', 'account_holder_name'):
+            value = getattr(self, field, None)
+            if value and isinstance(value, str):
+                setattr(self, field, strip_unicode_4byte(value))
+        super().save(*args, **kwargs)
     
     def __str__(self):
         return f"KYC - {self.user.username}"
@@ -241,6 +261,15 @@ class Nominee(models.Model):
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        """Sanitize text fields for MySQL utf8 (strip 4-byte chars e.g. emojis)."""
+        from core.utils import strip_unicode_4byte
+        for field in ('full_name', 'address_line1', 'address_line2', 'city', 'state', 'pincode'):
+            value = getattr(self, field, None)
+            if value and isinstance(value, str):
+                setattr(self, field, strip_unicode_4byte(value))
+        super().save(*args, **kwargs)
 
     # Nominee KYC verification fields
     KYC_PENDING = 'pending'

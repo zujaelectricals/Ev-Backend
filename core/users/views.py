@@ -10,8 +10,10 @@ from django.utils import timezone
 from datetime import datetime
 from rest_framework.exceptions import ValidationError
 from .models import User, KYC, Nominee, DistributorApplication
-from .serializers import UserSerializer, UserProfileSerializer, KYCSerializer, NomineeSerializer, DistributorApplicationSerializer, UnifiedKYCSerializer
+from .serializers import UserSerializer, UserNormalListSerializer, UserProfileSerializer, KYCSerializer, NomineeSerializer, DistributorApplicationSerializer, UnifiedKYCSerializer, UpdateTotalEarnedSerializer
 from core.settings.models import PlatformSettings
+from core.wallet.utils import get_or_create_wallet
+from decimal import Decimal
 
 
 class DistributorApplicationPagination(PageNumberPagination):
@@ -38,6 +40,11 @@ class UserViewSet(viewsets.ModelViewSet):
         elif user.role == 'staff':
             return User.objects.all()  # Staff can see all users to edit normal users
         return User.objects.filter(id=user.id)
+
+    def get_serializer_class(self):
+        if self.action == 'normal':
+            return UserNormalListSerializer
+        return super().get_serializer_class()
     
     def perform_update(self, serializer):
         """Hierarchical permission system for profile updates:
@@ -105,6 +112,29 @@ class UserViewSet(viewsets.ModelViewSet):
             instance.delete()
         else:
             raise PermissionDenied("You can only delete your own profile.")
+    
+    @action(detail=True, methods=['patch'], url_path='update_total_earnings', url_name='update-total-earnings')
+    def update_total_earnings(self, request, pk=None):
+        """
+        Update a user's wallet total_earned (Admin/Superuser only).
+        PATCH /api/users/{id}/update_total_earnings/
+        Body: { "total_earned": "1234.56" }
+        When admin updates this, the value is reflected in node tree_structure response.
+        """
+        if not (request.user.is_superuser or request.user.role == 'admin'):
+            raise PermissionDenied("Only admin or superuser can update total earnings.")
+        user = get_object_or_404(User, pk=pk)
+        serializer = UpdateTotalEarnedSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        total_earned = serializer.validated_data['total_earned']
+        wallet = get_or_create_wallet(user)
+        wallet.total_earned = Decimal(str(total_earned))
+        wallet.save(update_fields=['total_earned'])
+        return Response({
+            'user_id': user.id,
+            'total_earned': str(wallet.total_earned),
+            'wallet_balance': str(wallet.balance),
+        }, status=status.HTTP_200_OK)
     
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def profile(self, request):
@@ -185,8 +215,8 @@ class UserViewSet(viewsets.ModelViewSet):
         if not (user.is_superuser or user.role == 'admin' or user.role == 'staff'):
             raise PermissionDenied("Only superuser, admin, and staff can list normal users.")
         
-        # Use select_related to optimize KYC queries and avoid N+1 problem
-        queryset = User.objects.select_related('kyc').filter(role='user')
+        # Use select_related to optimize KYC and wallet queries and avoid N+1 problem
+        queryset = User.objects.select_related('kyc', 'wallet').filter(role='user')
         
         # Filter by is_distributor
         is_distributor_param = request.query_params.get('is_distributor')

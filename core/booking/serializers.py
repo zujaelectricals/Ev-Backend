@@ -74,6 +74,7 @@ class VehicleDetailSerializer(serializers.Serializer):
 class BookingSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(source='user.email', read_only=True)
     user_mobile = serializers.SerializerMethodField()
+    user_is_active_buyer = serializers.BooleanField(source='user.is_active_buyer', read_only=True)
     vehicle_details = VehicleDetailSerializer(source='vehicle_model', read_only=True)
     vehicle_model_code = serializers.CharField(write_only=True, required=False)
     model_code = serializers.CharField(source='vehicle_model.model_code', read_only=True)

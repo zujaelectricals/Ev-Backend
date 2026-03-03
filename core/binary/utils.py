@@ -187,28 +187,64 @@ def get_total_descendants_count(node):
     return left_count + right_count
 
 
-def get_active_descendants_count(node):
+def is_direct_referral_of(user, referrer):
     """
-    Get count of descendants that have activation payment (recursively calculated)
-    Only counts descendants where has_activation_payment(user) == True
-    This is used for binary activation counting - only active buyers count toward activation
-    
+    Return True if user used referrer's referral code (direct referral of referrer).
+    Uses User.referred_by and Booking.referred_by (same as get_total_referrals logic).
+    """
+    if not referrer or not user:
+        return False
+    if user.referred_by_id == referrer.id:
+        return True
+    from core.booking.models import Booking
+    return Booking.objects.filter(user=user, referred_by=referrer).exists()
+
+
+def get_referrer_for_user(user):
+    """
+    Return the User whose referral code was used by the given user (code owner).
+    Used to determine who receives direct user commission.
+    Returns None if user has no referred_by and no booking with referred_by.
+    """
+    if not user:
+        return None
+    if user.referred_by_id:
+        return user.referred_by
+    from core.booking.models import Booking
+    booking = Booking.objects.filter(user=user).order_by('created_at').first()
+    if booking and booking.referred_by_id:
+        return booking.referred_by
+    return None
+
+
+def get_active_descendants_count(node, only_direct_referrals=True):
+    """
+    Get count of descendants that have activation payment (recursively calculated).
+    Only counts descendants where has_activation_payment(user) == True.
+    When only_direct_referrals=True (default), only counts descendants whose user
+    used the node owner's referral code (direct referrals). Used for binary activation
+    and pair calculation so only direct referrals count.
+
     Args:
         node: BinaryNode to get count for
-    
+        only_direct_referrals: If True, only count descendants who are direct
+            referrals of node.user (used node.user's referral code). Default True.
+
     Returns:
-        int: Total number of active descendants (with activation payment) in the tree
+        int: Total number of active descendants (with activation payment),
+             optionally restricted to direct referrals of node.user.
     """
-    # Get all descendant nodes
     left_descendants = get_all_descendant_nodes(node, 'left')
     right_descendants = get_all_descendant_nodes(node, 'right')
-    
-    # Count only those with activation payment
+    referrer = node.user if only_direct_referrals else None
+
     active_count = 0
     for descendant_node in left_descendants + right_descendants:
-        if has_activation_payment(descendant_node.user):
-            active_count += 1
-    
+        if not has_activation_payment(descendant_node.user):
+            continue
+        if referrer and not is_direct_referral_of(descendant_node.user, referrer):
+            continue
+        active_count += 1
     return active_count
 
 
@@ -274,181 +310,138 @@ def has_activation_payment(user, booking=None):
         return actual_payments_total >= activation_amount
 
 
-def process_direct_user_commission(referrer, new_user):
+def process_direct_user_commission(new_user):
     """
-    Process referral bonus (DIRECT_USER_COMMISSION) when a new user is added to the binary tree
-    Pays ₹1000 commission to ALL ancestors (not just direct parent) if they have < 3 total descendants
-    Binary commission activates when any ancestor has 3+ total descendants
-    
+    Process referral bonus (DIRECT_USER_COMMISSION) when a user has activation payment.
+    Commission is paid to the user whose referral code was used (code owner), not the tree parent.
+    Only pays if the paying user is placed in the code owner's tree.
+
     IMPORTANT RULES:
-    - Commission is only paid if user has at least one successful payment
-    - Commission (referral bonus) MUST STOP completely after binary_commission_activated = True
-    - After activation, earnings come ONLY from binary pair matching
-    
+    - Commission is only paid if new_user has activation payment
+    - Payee = user whose referral code new_user used (User.referred_by or Booking.referred_by)
+    - new_user must be in code owner's tree (is_node_in_tree)
+    - Commission (referral bonus) MUST STOP after code owner's binary_commission_activated = True
+    - Activation (3+ active direct referrals) is applied to the code owner's node
+
     Args:
-        referrer: User who referred the new user (may not be direct parent)
-        new_user: User who was just added to the tree
-    
+        new_user: User who has (or just reached) activation payment
+
     Returns:
-        bool: True if at least one commission was paid, False otherwise
+        bool: True if commission was paid to the code owner, False otherwise
     """
-    # Check if user has successful payment - commission only paid if payment is completed
-    # AND payment meets activation_amount threshold
+    import logging
+    logger = logging.getLogger(__name__)
+
     if not has_activation_payment(new_user):
         return False
-    
+
     try:
         new_user_node = BinaryNode.objects.get(user=new_user)
     except BinaryNode.DoesNotExist:
         return False
-    
-    # Get settings
+
+    # Resolve code owner: user whose referral code new_user used
+    code_owner = get_referrer_for_user(new_user)
+    if not code_owner:
+        return False
+
+    try:
+        owner_node = BinaryNode.objects.get(user=code_owner)
+    except BinaryNode.DoesNotExist:
+        return False
+
+    # Pay only if new_user is in code owner's tree
+    if not is_node_in_tree(new_user_node, code_owner):
+        return False
+
     platform_settings = PlatformSettings.get_settings()
     activation_count = platform_settings.binary_commission_activation_count
     commission_amount = platform_settings.direct_user_commission_amount
     tds_percentage = platform_settings.binary_commission_tds_percentage
-    
-    # Get all ancestors by traversing up the tree
-    ancestors = get_all_ancestors(new_user_node)
-    
-    if not ancestors:
-        # No ancestors (root node), no commission to pay
-        return False
-    
+
     from core.wallet.models import WalletTransaction
-    
+
     commissions_paid = False
-    
-    # Process commission for each ancestor
-    # Use transaction to ensure atomicity and prevent race conditions
+
     with transaction.atomic():
-        for ancestor_node in ancestors:
-            # Lock the row to prevent concurrent modifications
-            # This ensures we get the latest binary_commission_activated flag
-            locked_node = BinaryNode.objects.select_for_update().get(id=ancestor_node.id)
-            ancestor_user = locked_node.user
-            
-            # Skip commission for company referral code user
-            company_referral_code = platform_settings.company_referral_code
-            if company_referral_code and ancestor_user.referral_code:
-                company_referral_code_normalized = company_referral_code.strip().upper()
-                ancestor_referral_code_normalized = ancestor_user.referral_code.strip().upper()
-                if ancestor_referral_code_normalized == company_referral_code_normalized:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.info(
-                        f"Commission blocked for {ancestor_user.username}: "
-                        f"Company referral code user (no commission)"
-                    )
-                    continue  # Skip commission payment for company user
-            
-            # EXPLICIT CHECK: If binary commission is already activated, skip ALL commission processing
-            # Referral bonus (DIRECT_USER_COMMISSION) MUST STOP completely after activation
-            if locked_node.binary_commission_activated:
-                import logging
-                logger = logging.getLogger(__name__)
+        locked_node = BinaryNode.objects.select_for_update().get(id=owner_node.id)
+        recipient_user = locked_node.user
+
+        # Skip commission for company referral code user
+        company_referral_code = platform_settings.company_referral_code
+        if company_referral_code and recipient_user.referral_code:
+            company_referral_code_normalized = company_referral_code.strip().upper()
+            recipient_code_normalized = recipient_user.referral_code.strip().upper()
+            if recipient_code_normalized == company_referral_code_normalized:
                 logger.info(
-                    f"Commission blocked for {ancestor_user.username}: "
-                    f"Binary commission already activated. Referral bonus stopped."
+                    f"Commission blocked for {recipient_user.username}: "
+                    f"Company referral code user (no commission)"
                 )
-                continue  # Skip this ancestor completely - no commission payment
-            
-            # Calculate active descendants count using recursive counting FIRST (before updating stored counts)
-            # This gives us the accurate count including the new user that was just added (if they have activation payment)
-            # Only active buyers (with activation payment) count toward binary activation
-            active_descendants = get_active_descendants_count(locked_node)
-            
-            # Count before this user was added
-            # If new_user has activation payment, they're included in active_descendants, so subtract 1
-            # If new_user doesn't have activation payment, they're not included, so count_before_addition = active_descendants
-            if has_activation_payment(new_user):
-                count_before_addition = active_descendants - 1
-            else:
-                count_before_addition = active_descendants
-            
-            # Update stored counts AFTER calculation to keep them in sync for future operations
-            # This is important when users are added deep in the tree
-            locked_node.update_counts()
-            locked_node.refresh_from_db()
-            
-            # Check if commission should be paid (before activation)
-            # IMPORTANT: Once binary commission is activated, no more direct user commissions are paid
-            # Only pairs will generate commission after activation
-            # Commission is paid if count_before_addition < activation_count (i.e., before reaching 3)
-            if count_before_addition < activation_count:
-                # Check if commission already paid for this user by this ancestor (prevent duplicates)
-                commission_already_paid = WalletTransaction.objects.filter(
-                    user=ancestor_user,
-                    transaction_type='DIRECT_USER_COMMISSION',
-                    reference_id=new_user.id,
-                    reference_type='user'
-                ).exists()
-                
-                if not commission_already_paid:
-                    # Final safety check: Re-check flag with locked node (already locked above)
-                    # This prevents race conditions when multiple users are processed simultaneously
-                    # IMPORTANT: We allow payment if count_before_addition < activation_count
-                    # This means the 3rd user (count_before_addition=2, total_descendants=3) will get commission
-                    # Activation happens AFTER payment in the code below
-                    if locked_node.binary_commission_activated:
-                        # Binary commission already activated, skip payment
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.info(
-                            f"Commission blocked for {ancestor_user.username} (final check): "
-                            f"Binary commission already activated"
-                        )
-                        continue
-                    
-                    # Calculate TDS (always applied on all direct user commissions)
+                return commissions_paid
+
+        if locked_node.binary_commission_activated:
+            logger.info(
+                f"Commission blocked for {recipient_user.username}: "
+                f"Binary commission already activated. Referral bonus stopped."
+            )
+            return commissions_paid
+
+        active_descendants = get_active_descendants_count(locked_node)
+        if has_activation_payment(new_user):
+            count_before_addition = active_descendants - 1
+        else:
+            count_before_addition = active_descendants
+
+        locked_node.update_counts()
+        locked_node.refresh_from_db()
+
+        if count_before_addition < activation_count:
+            commission_already_paid = WalletTransaction.objects.filter(
+                user=recipient_user,
+                transaction_type='DIRECT_USER_COMMISSION',
+                reference_id=new_user.id,
+                reference_type='user'
+            ).exists()
+
+            if not commission_already_paid:
+                if locked_node.binary_commission_activated:
+                    logger.info(
+                        f"Commission blocked for {recipient_user.username} (final check): "
+                        f"Binary commission already activated"
+                    )
+                else:
                     tds_amount = commission_amount * (tds_percentage / Decimal('100'))
                     net_amount = commission_amount - tds_amount
-                    
-                    # Pay commission (net amount after TDS)
                     try:
                         add_wallet_balance(
-                            user=ancestor_user,
+                            user=recipient_user,
                             amount=float(net_amount),
                             transaction_type='DIRECT_USER_COMMISSION',
                             description=f"User commission for {new_user.username} (₹{commission_amount} - ₹{tds_amount} TDS = ₹{net_amount})",
                             reference_id=new_user.id,
                             reference_type='user'
                         )
-                        
-                        # TDS is calculated and reduces net amount, but NOT deducted from booking balance
-                        # Only extra deduction for pairs 6+ is deducted from booking balance
-                        
                         commissions_paid = True
                     except Exception as e:
-                        import logging
-                        logger = logging.getLogger(__name__)
                         logger.error(
-                            f"Error processing user commission for ancestor {ancestor_user.username} "
+                            f"Error processing user commission for code owner {recipient_user.username} "
                             f"for new user {new_user.username}: {e}"
                         )
-            
-            # Check if this addition activates binary commission for this ancestor
-            # Activation based on active descendants (only users with activation payment count)
-            if active_descendants >= activation_count and not locked_node.binary_commission_activated:
-                locked_node.binary_commission_activated = True
-                # Use new_user_node's created_at to ensure the 3rd member (D) is included in pairing
-                # This ensures D.created_at == activation_timestamp, so D is included with >= comparison
-                locked_node.activation_timestamp = new_user_node.created_at
-                locked_node.save(update_fields=['binary_commission_activated', 'activation_timestamp'])
-                
-                # Process initial bonus payment (if configured)
-                # Handle errors gracefully - don't fail activation if bonus payment fails
-                try:
-                    process_binary_initial_bonus(locked_node.user)
-                except Exception as e:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.error(
-                        f"Error processing initial bonus for user {locked_node.user.username} "
-                        f"after activation: {e}",
-                        exc_info=True
-                    )
-    
+
+        # Activate binary commission for code owner when they have enough active direct referrals
+        if active_descendants >= activation_count and not locked_node.binary_commission_activated:
+            locked_node.binary_commission_activated = True
+            locked_node.activation_timestamp = new_user_node.created_at
+            locked_node.save(update_fields=['binary_commission_activated', 'activation_timestamp'])
+            try:
+                process_binary_initial_bonus(locked_node.user)
+            except Exception as e:
+                logger.error(
+                    f"Error processing initial bonus for user {locked_node.user.username} "
+                    f"after activation: {e}",
+                    exc_info=True
+                )
+
     return commissions_paid
 
 
@@ -522,23 +515,22 @@ def process_binary_initial_bonus(user):
 
 def process_retroactive_commissions(user):
     """
-    Process retroactive commissions when a user becomes an active buyer (has activation payment)
-    This is called from payment_completed task when a user's payment status changes
-    
+    Process retroactive commissions when a user becomes an active buyer (has activation payment).
+    This is called from payment_completed task when a user's payment status changes.
+
     Handles:
-    1. Direct commission payment for ancestors (if binary commission not yet activated)
-    2. Binary activation check (if user now qualifies ancestor for activation)
-    3. User becomes eligible for future pairing (if ancestor already activated)
-    
-    IMPORTANT: This function is called when a user's total_paid reaches activation_amount threshold.
-    It processes commissions for ALL ancestors who are eligible, even if the user was placed
-    in the tree before reaching activation_amount.
-    
+    1. Direct commission payment to the code owner (user whose referral code was used), if eligible
+    2. Binary activation check for the code owner when they have enough active direct referrals
+    3. User becomes eligible for future pairing (if code owner already activated)
+
+    Commission is paid only to the user whose referral code was used, and only if the paying
+    user is in that code owner's tree.
+
     Args:
         user: User who just became an active buyer (has activation payment)
-    
+
     Returns:
-        bool: True if any commission was processed, False otherwise
+        bool: True if commission was processed for the direct parent, False otherwise
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -553,7 +545,7 @@ def process_retroactive_commissions(user):
     
     # Get user's binary node if exists
     try:
-        user_node = BinaryNode.objects.get(user=user)
+        BinaryNode.objects.get(user=user)
     except BinaryNode.DoesNotExist:
         # User not in binary tree yet, nothing to process
         logger.debug(
@@ -561,50 +553,15 @@ def process_retroactive_commissions(user):
             f"Skipping retroactive commission processing."
         )
         return False
-    
-    # Get referrer (the user who referred this user)
-    # Note: This is only used for logging - process_direct_user_commission uses tree structure
-    from core.booking.models import Booking
-    referrer = user.referred_by
-    if not referrer:
-        # Try to get referrer from booking
-        booking = Booking.objects.filter(user=user).order_by('-created_at').first()
-        if booking:
-            referrer = booking.referred_by
-    
-    # CRITICAL FIX: Don't require referrer - process_direct_user_commission uses tree structure
-    # Get parent from tree structure if referrer not found
-    if not referrer:
-        # Get parent from binary tree structure
-        if user_node.parent:
-            referrer = user_node.parent.user
-            logger.info(
-                f"User {user.username} has no referrer in user/booking, "
-                f"using parent from tree structure: {referrer.username}"
-            )
-        else:
-            # No parent in tree either - this shouldn't happen if user is in tree
-            logger.warning(
-                f"User {user.username} is in binary tree but has no parent node. "
-                f"Commission will still be processed using tree structure."
-            )
-            # Use a dummy referrer - process_direct_user_commission will use tree structure anyway
-            referrer = user  # This will be ignored, but prevents None error
-    
-    # Process direct user commission for all eligible ancestors
-    # This function handles:
-    # 1. Paying commission to all ancestors who have < activation_count descendants
-    # 2. Activating binary commission for ancestors who reach activation_count
-    # 3. Skipping ancestors who already have binary_commission_activated
-    # NOTE: process_direct_user_commission uses get_all_ancestors() which gets ancestors from tree structure,
-    # so the referrer parameter is mainly for logging/backward compatibility
-    commission_paid = process_direct_user_commission(referrer, user)
-    
+
+    # Commission is paid to the user whose referral code was used (code owner), if user is in their tree
+    commission_paid = process_direct_user_commission(user)
+
     if commission_paid:
         logger.info(
-            f"Retroactive commissions processed for user {user.username} "
+            f"Retroactive commission processed for user {user.username} "
             f"after reaching activation_amount threshold. "
-            f"Commissions credited to eligible ancestors."
+            f"Commission credited to code owner."
         )
     
     return commission_paid
@@ -972,38 +929,43 @@ def get_remaining_unmatched_counts(node, pairs_today):
     # Get all descendant nodes on each side
     left_descendants = get_all_descendant_nodes(node, 'left')
     right_descendants = get_all_descendant_nodes(node, 'right')
-    
+
+    # Only direct referrals of node owner count for pairing (same as get_unmatched_users_for_pairing)
+    referrer = node.user
+    left_descendants = [n for n in left_descendants if is_direct_referral_of(n.user, referrer)]
+    right_descendants = [n for n in right_descendants if is_direct_referral_of(n.user, referrer)]
+
     # Filter based on even/odd logic AND payment eligibility (same as get_unmatched_users_for_pairing)
     # Only users with activation payment and post-activation are eligible for pairing
     if is_even:
         # Even: Exclude activation-triggering member (strictly after activation)
         left_post_activation = [
-            n for n in left_descendants 
-            if n.created_at > activation_time 
+            n for n in left_descendants
+            if n.created_at > activation_time
             and n.user.id not in matched_user_ids
             and has_activation_payment(n.user)
         ]
         right_post_activation = [
-            n for n in right_descendants 
-            if n.created_at > activation_time 
+            n for n in right_descendants
+            if n.created_at > activation_time
             and n.user.id not in matched_user_ids
             and has_activation_payment(n.user)
         ]
     else:
         # Odd: Include activation-triggering member (at or after activation)
         left_post_activation = [
-            n for n in left_descendants 
-            if n.created_at >= activation_time 
+            n for n in left_descendants
+            if n.created_at >= activation_time
             and n.user.id not in matched_user_ids
             and has_activation_payment(n.user)
         ]
         right_post_activation = [
-            n for n in right_descendants 
-            if n.created_at >= activation_time 
+            n for n in right_descendants
+            if n.created_at >= activation_time
             and n.user.id not in matched_user_ids
             and has_activation_payment(n.user)
         ]
-    
+
     # Count remaining unmatched eligible members on each side
     left_unmatched_count = len(left_post_activation)
     right_unmatched_count = len(right_post_activation)
@@ -1130,39 +1092,42 @@ def get_unmatched_users_for_pairing(node):
         if pair.right_user:
             matched_user_ids.add(pair.right_user.id)
     
-    # 3. Get all descendant nodes on LEFT side (where side='left' relative to this node)
+    # 3. Get all descendant nodes on LEFT and RIGHT
     left_descendants = get_all_descendant_nodes(node, 'left')
-    
-    # 4. Get all descendant nodes on RIGHT side (where side='right' relative to this node)
     right_descendants = get_all_descendant_nodes(node, 'right')
-    
-    # 5. Filter based on even/odd logic AND payment eligibility
+
+    # Only direct referrals of node owner (used node.user's referral code) count for pairing
+    referrer = node.user
+    left_descendants = [n for n in left_descendants if is_direct_referral_of(n.user, referrer)]
+    right_descendants = [n for n in right_descendants if is_direct_referral_of(n.user, referrer)]
+
+    # 4. Filter based on even/odd logic AND payment eligibility
     # Only users with activation payment are eligible for pairing
     if is_even:
         # Even: Exclude activation-triggering member (strictly after activation)
         left_post_activation = [
-            n for n in left_descendants 
-            if n.created_at > activation_time 
+            n for n in left_descendants
+            if n.created_at > activation_time
             and n.user.id not in matched_user_ids
             and has_activation_payment(n.user)
         ]
         right_post_activation = [
-            n for n in right_descendants 
-            if n.created_at > activation_time 
+            n for n in right_descendants
+            if n.created_at > activation_time
             and n.user.id not in matched_user_ids
             and has_activation_payment(n.user)
         ]
     else:
         # Odd: Include activation-triggering member (at or after activation)
         left_post_activation = [
-            n for n in left_descendants 
-            if n.created_at >= activation_time 
+            n for n in left_descendants
+            if n.created_at >= activation_time
             and n.user.id not in matched_user_ids
             and has_activation_payment(n.user)
         ]
         right_post_activation = [
-            n for n in right_descendants 
-            if n.created_at >= activation_time 
+            n for n in right_descendants
+            if n.created_at >= activation_time
             and n.user.id not in matched_user_ids
             and has_activation_payment(n.user)
         ]
@@ -1225,20 +1190,18 @@ def check_and_create_pair(user):
     # Calculate active descendants using recursive counting (only users with activation payment count)
     active_descendants = get_active_descendants_count(node)
     
-    # Retroactive activation: If user has 3+ active descendants but isn't activated, activate now
-    # This handles cases where activation didn't trigger when users were added
-    # Only active buyers (with activation payment) count toward activation
+    # Retroactive activation: If user has 3+ active direct referrals but isn't activated, activate now
+    # Only direct referrals of node.user (used their referral code) count toward activation
     if active_descendants >= activation_count and not node.binary_commission_activated:
         # Find the Nth active member (the one that should have triggered activation)
-        # Get all descendants sorted by creation date, filter by activation payment
         all_descendants = []
         all_descendants.extend(get_all_descendant_nodes(node, 'left'))
         all_descendants.extend(get_all_descendant_nodes(node, 'right'))
-        
-        # Filter to only active descendants (with activation payment)
+
+        # Filter to only active descendants who are direct referrals of node owner
         active_descendant_nodes = [
-            n for n in all_descendants 
-            if has_activation_payment(n.user)
+            n for n in all_descendants
+            if is_direct_referral_of(n.user, node.user) and has_activation_payment(n.user)
         ]
         active_descendant_nodes.sort(key=lambda n: n.created_at)
         
@@ -1266,26 +1229,23 @@ def check_and_create_pair(user):
     # STRICT RULE: Pair matching is BLOCKED before activation
     if not node.binary_commission_activated:
         return None
-    
-    # Check if we have both left and right using recursive counting (not stored counts)
-    # STRICT RULE: Pair = 1 left-leg member + 1 right-leg member (must have both)
-    left_count = node.get_all_descendants_count('left')
-    right_count = node.get_all_descendants_count('right')
-    if left_count == 0 or right_count == 0:
+
+    now = timezone.now()
+    today = now.date()
+    pairs_today_initial = get_daily_pairs_count(user, today)
+
+    # Only direct referrals count: check if we have eligible left and right (direct-referral-only)
+    left_remaining, right_remaining = get_remaining_unmatched_counts(node, pairs_today_initial)
+    if left_remaining == 0 or right_remaining == 0:
         return None
+
     commission_amount = platform_settings.binary_pair_commission_amount
     tds_threshold = platform_settings.binary_tds_threshold_pairs
     tds_percentage = platform_settings.binary_commission_tds_percentage
     extra_deduction_percentage = platform_settings.binary_extra_deduction_percentage
     daily_limit = platform_settings.binary_daily_pair_limit
-    
-    now = timezone.now()
-    today = now.date()
-    
-    # Initial daily limit check (before transaction, for early exit)
-    # This is a quick check to avoid unnecessary processing
-    pairs_today_initial = get_daily_pairs_count(user, today)
-    
+
+    # Initial daily limit check (pairs_today_initial already computed above)
     if pairs_today_initial >= daily_limit:
         # Daily limit already reached - check for carry-forward logic
         left_remaining, right_remaining = get_remaining_unmatched_counts(node, pairs_today_initial)
@@ -1295,7 +1255,7 @@ def check_and_create_pair(user):
             # Create carry-forward for long leg
             carry_forward_long_leg(user, today, long_side, long_count)
         # No more pairs can be created today
-        return None
+        return (None, 'daily_limit')
     
     # Count pairs after activation (total, not just today)
     pairs_after_activation = BinaryPair.objects.filter(
@@ -1319,11 +1279,10 @@ def check_and_create_pair(user):
         # Count binary pairs that were actually paid (not blocked)
         paid_pairs_count = get_binary_pairs_after_activation_count(user)
         
-        # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, block commission
-        # Commission will resume when user becomes Active Buyer
+        # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, do not create any more pairs
+        # Pairs and commission will resume when user becomes Active Buyer
         if paid_pairs_count >= max_earnings_before_active_buyer:
-            commission_blocked = True
-            blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (already earned {paid_pairs_count} pairs). Commission will resume when user becomes Active Buyer."
+            return (None, None)
     
     # Calculate TDS (always applied on all pairs, but only if commission is not blocked)
     tds_amount = Decimal('0')
@@ -1395,7 +1354,7 @@ def check_and_create_pair(user):
                 # Create carry-forward for long leg
                 carry_forward_long_leg(user, today, long_side, long_count)
             # No more pairs can be created today
-            return None
+            return (None, 'daily_limit')
         
         # Check if there's active carry-forward to match with
         active_carry_forward = None
@@ -1518,9 +1477,9 @@ def check_and_create_pair(user):
                 # Create carry-forward for long leg
                 carry_forward_long_leg(user, today, long_side, long_count)
         
-        return pair
+        return (pair, None)
     
-    return None
+    return (None, None)
 
 
 def _format_user_display_info(user):

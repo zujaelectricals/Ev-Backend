@@ -149,37 +149,32 @@ def pair_matched(self, pair_id):
         if pair.is_carry_forward_pair:
             description += " - Matched with carried-forward members"
         
-        # IMPORTANT: Check if commission should be blocked based on pair_number_after_activation
-        # NOT based on current paid count (which has off-by-one bug)
-        
+        # IMPORTANT: Use pair_number_after_activation for the limit check, NOT get_binary_pairs_after_activation_count.
+        # The count includes the current pair (status=matched), so it would block the 5th pair when limit=5.
+        # Block when pair_number_after_activation > max_earnings_before_active_buyer (allow 1..N, block N+1 and above).
+        #
         # Business rule: Non-Active Buyer can only earn for first N pairs (configurable)
         # Active Buyers: Only daily limit applies (binary_daily_pair_limit), no pair count limit
         # Non-Active Buyers: Can only earn for first max_earnings_before_active_buyer pairs (total)
         max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
-        
-        if not user.is_active_buyer:
-            # Count binary pairs that were actually paid (not blocked)
-            from core.binary.utils import get_binary_pairs_after_activation_count
-            paid_pairs_count = get_binary_pairs_after_activation_count(user)
-            
-            # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, block commission
-            # Commission will resume when user becomes Active Buyer
-            if paid_pairs_count >= max_earnings_before_active_buyer:
-                logger.warning(
-                    f"Pair {pair_id} (Pair #{pair_number}) blocked for non-Active Buyer user {user.email}. "
-                    f"Already earned {paid_pairs_count} pairs (limit: {max_earnings_before_active_buyer}). "
-                    f"Commission will resume when user becomes Active Buyer."
-                )
-                # Mark as blocked if not already
-                if not pair.commission_blocked:
-                    pair.commission_blocked = True
-                    pair.blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (already earned {paid_pairs_count} pairs). Commission will resume when user becomes Active Buyer."
-                    pair.save(update_fields=['commission_blocked', 'blocked_reason'])
-                # Update status to processed (for tracking)
-                pair.status = 'processed'
-                pair.processed_at = timezone.now()
-                pair.save(update_fields=['status', 'processed_at'])
-                return
+        pair_num = pair.pair_number_after_activation
+
+        if not user.is_active_buyer and pair_num is not None and pair_num > max_earnings_before_active_buyer:
+            logger.warning(
+                f"Pair {pair_id} (Pair #{pair_number}) blocked for non-Active Buyer user {user.email}. "
+                f"Pair number {pair_num} exceeds limit of {max_earnings_before_active_buyer}. "
+                f"Commission will resume when user becomes Active Buyer."
+            )
+            # Mark as blocked if not already
+            if not pair.commission_blocked:
+                pair.commission_blocked = True
+                pair.blocked_reason = f"Not Active Buyer, {max_earnings_before_active_buyer+1}th+ pair (Pair #{pair_num}). Commission will resume when user becomes Active Buyer."
+                pair.save(update_fields=['commission_blocked', 'blocked_reason'])
+            # Update status to processed (for tracking)
+            pair.status = 'processed'
+            pair.processed_at = timezone.now()
+            pair.save(update_fields=['status', 'processed_at'])
+            return
         
         # Add to wallet using new transaction type
         # earning_amount already has TDS and extra deduction deducted (net amount)
