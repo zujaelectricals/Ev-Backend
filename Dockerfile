@@ -46,7 +46,6 @@ EXPOSE 8000
 # Entrypoint
 # -----------------------------
 CMD ["bash", "-c", "\
-set -e; \
 if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
     echo 'Starting Django Web (Gunicorn)'; \
     python manage.py migrate --noinput || true; \
