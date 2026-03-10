@@ -4,34 +4,53 @@ on:
   push:
     branches:
       - master
+      - staging
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - uses: azure/login@v1
+      - name: Login to Azure
+        uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Login to ACR
+      - name: Login to Azure Container Registry
         run: az acr login --name ${{ secrets.ACR_NAME }}
 
       - name: Build Docker Image
         run: |
           set -e
-          export IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest"
+          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest"
           echo "Building image: $IMAGE"
           docker build -t "$IMAGE" .
 
       - name: Push Docker Image
         run: |
           set -e
-          export IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest"
+          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/ev-backend:latest"
           echo "Pushing image: $IMAGE"
           docker push "$IMAGE"
 
-      - name: Restart App Service
-        run: az webapp restart --name ev-backend-api --resource-group rg-ev-prod
+      # Deploy to STAGING slot
+      - name: Restart Staging Slot
+        if: github.ref == 'refs/heads/staging'
+        run: |
+          echo "Deploying to STAGING slot"
+          az webapp restart \
+            --name ev-backend-api \
+            --resource-group rg-ev-prod \
+            --slot staging
+
+      # Deploy to PRODUCTION
+      - name: Restart Production App Service
+        if: github.ref == 'refs/heads/master'
+        run: |
+          echo "Deploying to PRODUCTION"
+          az webapp restart \
+            --name ev-backend-api \
+            --resource-group rg-ev-prod
