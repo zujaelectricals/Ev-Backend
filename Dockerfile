@@ -46,18 +46,11 @@ EXPOSE 8000
 # Entrypoint
 # -----------------------------
 CMD ["bash", "-c", "\
-if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
-    echo 'Starting Django Web (Gunicorn)'; \
-    python manage.py migrate --noinput || true; \
-    python manage.py collectstatic --noinput || true; \
-    gunicorn ev_backend.wsgi:application \
-        --bind 0.0.0.0:8000 \
-        --workers 3 \
-        --timeout 120; \
-elif [ \"$SERVICE_ROLE\" = \"celery\" ]; then \
-    echo 'Starting Celery Worker' && \
-    python -m celery -A ev_backend worker --loglevel=info --pool=solo ; \
-else \
-    echo 'ERROR: SERVICE_ROLE not set (web | celery)'; \
-    exit 1; \
-fi"]
+echo 'Container starting...'; \
+echo SERVICE_ROLE=$SERVICE_ROLE; \
+python --version; \
+ls -la; \
+python manage.py migrate --noinput || true; \
+python manage.py collectstatic --noinput || true; \
+echo 'Starting Django development server for debugging'; \
+python manage.py runserver 0.0.0.0:8000"]
