@@ -12,7 +12,7 @@ Super User: EVAdmin && EVAdmin@123
 1. SEND OTP (Regular Users Only)
    Method: POST
    URL: /api/auth/send-otp/
-   Authentication: Not Required
+   Authentication: Not Required.
    Description: Send OTP to existing user's email or mobile number. Only works for registered users with role='user'. New users must use /api/auth/signup/ endpoint first. Admin/Staff users must use /api/auth/send-admin-otp/ endpoint.
    
    Request Body:
