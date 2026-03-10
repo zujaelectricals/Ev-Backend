@@ -52,5 +52,8 @@ python --version; \
 ls -la; \
 python manage.py migrate --noinput || true; \
 python manage.py collectstatic --noinput || true; \
-echo 'Starting Django development server for debugging'; \
-python manage.py runserver 0.0.0.0:8000"]
+echo 'Starting Gunicorn'; \
+gunicorn ev_backend.wsgi:application \
+    --bind 0.0.0.0:8000 \
+    --workers 1 \
+    --timeout 120"]
