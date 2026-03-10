@@ -49,8 +49,8 @@ CMD ["bash", "-c", "\
 set -e; \
 if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
     echo 'Starting Django Web (Gunicorn)'; \
-    python manage.py migrate --noinput; \
-    python manage.py collectstatic --noinput; \
+    python manage.py migrate --noinput || true; \
+    python manage.py collectstatic --noinput || true; \
     gunicorn ev_backend.wsgi:application \
         --bind 0.0.0.0:8000 \
         --workers 3 \
