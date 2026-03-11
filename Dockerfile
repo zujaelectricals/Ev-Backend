@@ -49,17 +49,19 @@ CMD ["bash", "-c", "\
 echo 'Container starting...'; \
 python manage.py migrate --noinput || true; \
 python manage.py collectstatic --noinput || true; \
-python manage.py shell <<EOF
-from django.contrib.auth import get_user_model
-import os
-User = get_user_model()
-username=os.getenv('DJANGO_SUPERUSER_USERNAME')
-email=os.getenv('DJANGO_SUPERUSER_EMAIL')
-password=os.getenv('DJANGO_SUPERUSER_PASSWORD')
-if username and password and not User.objects.filter(username=username).exists():
-    User.objects.create_superuser(username,email,password)
-    print('Superuser created')
-else:
-    print('Superuser already exists or env vars missing')
-EOF
+python -c \"\
+import os, django; \
+os.environ.setdefault('DJANGO_SETTINGS_MODULE','ev_backend.settings'); \
+django.setup(); \
+from django.contrib.auth import get_user_model; \
+User=get_user_model(); \
+username=os.getenv('DJANGO_SUPERUSER_USERNAME'); \
+email=os.getenv('DJANGO_SUPERUSER_EMAIL'); \
+password=os.getenv('DJANGO_SUPERUSER_PASSWORD'); \
+if username and password and not User.objects.filter(username=username).exists(): \
+    User.objects.create_superuser(username,email,password); \
+    print('Superuser created'); \
+else: \
+    print('Superuser exists or env missing'); \
+\"; \
 gunicorn ev_backend.wsgi:application --bind 0.0.0.0:8000 --workers 1 --timeout 120"]
