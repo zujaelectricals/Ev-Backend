@@ -1701,9 +1701,9 @@ Super User: EVAdmin && EVAdmin@123
     - When user's payment reaches activation_amount: Commissions are automatically credited to all eligible ancestors
     - Commission timing: Paid retroactively when user reaches activation_amount, not at placement time
     - If payment < activation_amount: No commission is paid, but user is still placed in tree and counted in descendants
-    - When User A is added as a direct child of User B, User B receives direct user commission (configurable, default: ₹1000)
-    - Direct user commission is paid to ALL eligible ancestors (not just direct parent) if they have < 3 total descendants
-    - After 3 total descendants are added, binary commission activates automatically
+    - When a user is added using a referrer's code, the code owner receives direct user commission (configurable, default: ₹1000) per direct referral with activation payment
+    - Direct user commission is paid to the code owner for each direct referral and continues after binary activation (does not stop)
+    - When code owner has activation_count active direct referrals, binary commission activates; thereafter both direct referral bonus and binary pair commission are credited when applicable
     - 20% TDS is deducted from direct user commission (configurable percentage)
     - Net amount (₹800 = ₹1000 - ₹200 TDS) is credited to referrer's wallet immediately upon placement
     - TDS is deducted from referrer's oldest active booking remaining amount
@@ -3827,7 +3827,19 @@ Super User: EVAdmin && EVAdmin@123
     Method: POST
     URL: /api/binary/pairs/check_pairs/
     Authentication: Required
-    Description: Manually trigger pair checking. Only works if binary commission is activated (user has 3+ direct children).
+    Description: Manually trigger pair checking and commission. Requires explicit confirmation in body to prevent accidental or automatic matching (e.g. on tree load or after placement).
+    
+    Request body (required):
+    {
+      "confirm": true
+    }
+    If "confirm" is not true, returns 400 with error message.
+    
+    Response (400 Bad Request) - confirm missing or not true:
+    {
+      "error": "Explicit confirmation required to match pairs.",
+      "message": "Send {\"confirm\": true} in the request body to match binary pairs and credit commission."
+    }
     
     Response (201 Created):
     {
@@ -4023,6 +4035,8 @@ Super User: EVAdmin && EVAdmin@123
       "left_count": 5,
       "right_count": 3,
       "total_descendants": 8,  // left_count + right_count
+      "remaining_left_members_to_be_paired": 2,
+      "remaining_right_members_to_be_paired": 0,
       "binary_commission_activated": true,
       "activation_timestamp": "2026-01-06T12:00:00Z",
       "counts_for_activation": true,
@@ -4054,6 +4068,8 @@ Super User: EVAdmin && EVAdmin@123
         "left_count": 2,
         "right_count": 1,
         "total_descendants": 3,  // left_count + right_count
+        "remaining_left_members_to_be_paired": 1,
+        "remaining_right_members_to_be_paired": 0,
         "counts_for_activation": true,
         "eligible_for_pairing": true,
         // Note: left_child and right_child only show direct children (no nested recursion)
@@ -4272,8 +4288,11 @@ Super User: EVAdmin && EVAdmin@123
       * Status: is_distributor, is_active_buyer, referral_code, date_joined
       * Financial: wallet_balance, total_earnings, total_amount, tds_current, net_amount_total
       * Activity: total_bookings, total_binary_pairs, total_referrals
-      * Tree Position: parent, parent_name, side, level, left_count, right_count, total_descendants
+      * Tree Position: parent, parent_name, side, level, left_count, right_count, total_descendants, remaining_left_members_to_be_paired, remaining_right_members_to_be_paired
         - total_descendants: Sum of left_count + right_count (total number of descendants)
+        - remaining_left_members_to_be_paired: Count of eligible left-side members not yet matched in a binary pair (derived from current BinaryPair state).
+        - remaining_right_members_to_be_paired: Count of eligible right-side members not yet matched in a binary pair (derived from current BinaryPair state).
+        - When the most recent day (before today) that had pairs hit the daily limit: weak leg resets each day (only new members placed today are shown); long leg carries forward (all pending unmatched shown). Otherwise remaining counts show naturally (raw left/right).
       * Binary Commission: binary_commission_activated, activation_timestamp (timestamp when activation occurred)
       * Eligibility Fields:
         - counts_for_activation (boolean): Indicates if this user counts toward binary activation calculation
@@ -4459,7 +4478,7 @@ Super User: EVAdmin && EVAdmin@123
       * Status: is_distributor, is_active_buyer, referral_code, date_joined
       * Financial: wallet_balance, total_earnings, total_amount, tds_current, net_amount_total
       * Activity: total_bookings, total_binary_pairs, total_referrals
-      * Tree Position: parent, parent_name, side, level, left_count, right_count, total_descendants
+      * Tree Position: parent, parent_name, side, level, left_count, right_count, total_descendants, remaining_left_members_to_be_paired, remaining_right_members_to_be_paired
         - total_descendants: Sum of left_count + right_count (total number of descendants)
       * Binary Commission: binary_commission_activated, activation_timestamp
       * Eligibility: counts_for_activation, eligible_for_pairing
@@ -5262,20 +5281,67 @@ Super User: EVAdmin && EVAdmin@123
     pending → failed (via this endpoint, if RazorpayX API fails)
 
 
-61. COMPLETE PAYOUT (Admin Only)
+61. APPROVE MANUAL PAYOUT (Admin Only) – Offline transfer, no Razorpay
+    Method: POST
+    URL: /api/payout/{id}/approve_manual/
+    Authentication: Required (Admin)
+    Description: Approve payout for manual/offline transfer. Deducts from wallet and sets status to 'processing' without calling RazorpayX or any payment gateway. Use when admin will transfer the amount to the user's account offline (e.g. NEFT/IMPS from bank) and then mark the payout completed via POST /api/payout/{id}/complete/ with optional transaction_id (e.g. UTR/reference) and notes.
+
+    This endpoint:
+    1. Validates payout is in 'pending' status
+    2. Calculates TDS and net amount (if not already)
+    3. Handles EMI auto-fill if enabled
+    4. Deducts requested_amount from user's wallet
+    5. Sets status to 'processing' and records processed_at timestamp
+    (No RazorpayX or gateway API is called.)
+
+    Manual payout flow:
+    - Admin calls POST /api/payout/{id}/approve_manual/ → amount deducted, status = processing
+    - Admin transfers net_amount to user's bank account offline (NEFT/IMPS etc.)
+    - Admin calls POST /api/payout/{id}/complete/ with optional transaction_id (e.g. UTR) and notes
+
+    Request Body (optional):
+    {
+      "notes": "Approved for manual NEFT transfer"
+    }
+
+    Response (200 OK):
+    {
+      "message": "Payout approved for manual transfer. Amount deducted from wallet. Complete the payout via POST /api/payout/{id}/complete/ after transferring offline (optional: transaction_id, notes).",
+      "payout": {
+        "id": 1,
+        "status": "processing",
+        "requested_amount": "10000.00",
+        "tds_amount": "500.00",
+        "net_amount": "9500.00",
+        "processed_at": "2026-01-06T13:00:00Z",
+        ...
+      }
+    }
+
+    Error Responses:
+    - 400 Bad Request: Wrong status or insufficient balance
+    { "error": "Payout cannot be approved for manual transfer. Current status: processing. Expected: pending" }
+    - 403 Forbidden: User is not admin
+    { "error": "Permission denied" }
+
+    Status Flow:
+    pending → processing (then admin completes via POST /api/payout/{id}/complete/ with optional transaction_id, notes)
+
+
+62. COMPLETE PAYOUT (Admin Only)
     Method: POST
     URL: /api/payout/{id}/complete/
     Authentication: Required (Admin)
-    Description: Mark payout as completed after payment gateway confirms successful transfer
-    
+    Description: Mark payout as completed after transfer is done (RazorpayX or manual/offline). For manual payouts: call after approve_manual and offline transfer, with optional transaction_id (e.g. UTR/NEFT reference) and notes.
+
     This endpoint should be called:
-    - Manually by admin after verifying bank transfer was successful
-    - Automatically by payment gateway webhook when transfer succeeds (future implementation)
-    - After synchronous payment gateway API returns success (future implementation)
-    
+    - After RazorpayX webhook confirms transfer (or admin verifies Razorpay transfer)
+    - For manual payouts: after admin has transferred offline and can supply optional transaction_id (e.g. UTR) and notes
+
     Request Body:
     {
-      "transaction_id": "TXN123456789",  // Optional: Transaction ID from payment gateway
+      "transaction_id": "TXN123456789",  // Optional: Gateway payout ID or UTR/reference for offline
       "notes": "Payment confirmed via bank statement"  // Optional: Additional notes
     }
     
@@ -5314,7 +5380,7 @@ Super User: EVAdmin && EVAdmin@123
     that calls this endpoint automatically when the gateway confirms payment success.
 
 
-62. PAYMENT GATEWAY WEBHOOK (Future Implementation)
+63. PAYMENT GATEWAY WEBHOOK (Future Implementation)
     Method: POST
     URL: /api/payout/webhook/
     Authentication: Webhook signature verification (no user auth required)
@@ -8078,8 +8144,8 @@ Standard Error Format:
 1. Pre-booking Minimum: ₹500
 2. Active Buyer Threshold: ₹5000 total paid
 3. Direct User Commission: ₹1000 per direct user added (configurable via settings)
-   - Paid only for first 3 direct children (configurable threshold, default: 3)
-   - Stops after binary commission activation
+   - Paid to code owner for every direct referral with activation payment (no cap)
+   - Continues after binary commission activation; both direct referral and binary pair commission are credited when applicable
    - 20% TDS is deducted from direct user commission (configurable percentage)
    - Net amount (₹800 = ₹1000 - ₹200 TDS) is credited to wallet
    - TDS is deducted from referrer's oldest active booking remaining amount

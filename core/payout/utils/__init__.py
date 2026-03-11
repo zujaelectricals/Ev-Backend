@@ -36,6 +36,7 @@ finally:
 
 # Re-export functions for backward compatibility
 process_payout = _payout_utils.process_payout
+process_payout_manual = _payout_utils.process_payout_manual
 complete_payout = _payout_utils.complete_payout
 auto_fill_emi_from_payout = _payout_utils.auto_fill_emi_from_payout
 

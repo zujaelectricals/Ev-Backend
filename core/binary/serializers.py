@@ -51,6 +51,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     counts_for_activation = serializers.SerializerMethodField()
     eligible_for_pairing = serializers.SerializerMethodField()
     total_descendants = serializers.SerializerMethodField()
+    remaining_left_members_to_be_paired = serializers.SerializerMethodField()
+    remaining_right_members_to_be_paired = serializers.SerializerMethodField()
     
     class Meta:
         model = BinaryNode
@@ -61,7 +63,8 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
             'wallet_balance', 'total_bookings', 'total_binary_pairs', 'total_earnings',
             'total_referrals', 'total_amount', 'tds_current', 'net_amount_total',
             'parent', 'parent_name', 'side', 'level', 'left_count', 'right_count',
-            'total_descendants', 'binary_commission_activated', 'activation_timestamp', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
+            'total_descendants', 'remaining_left_members_to_be_paired', 'remaining_right_members_to_be_paired',
+            'binary_commission_activated', 'activation_timestamp', 'left_child', 'right_child', 'left_side_members', 'right_side_members',
             'user_profile_picture_url', 'counts_for_activation', 'eligible_for_pairing', 'created_at', 'updated_at'
         ]
         read_only_fields = ('user', 'created_at', 'updated_at')
@@ -187,6 +190,22 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     def get_total_descendants(self, obj):
         """Get total descendants count (left_count + right_count)"""
         return obj.left_count + obj.right_count
+    
+    def get_remaining_left_members_to_be_paired(self, obj):
+        """Count of eligible left-side members not yet matched; weak leg shows 0 from next day."""
+        from core.binary.utils import get_remaining_unmatched_counts_for_display
+        result = get_remaining_unmatched_counts_for_display(obj)
+        obj._remaining_display = result
+        return result[0]
+    
+    def get_remaining_right_members_to_be_paired(self, obj):
+        """Count of eligible right-side members not yet matched; weak leg shows 0 from next day."""
+        from core.binary.utils import get_remaining_unmatched_counts_for_display
+        if getattr(obj, '_remaining_display', None) is not None:
+            return obj._remaining_display[1]
+        result = get_remaining_unmatched_counts_for_display(obj)
+        obj._remaining_display = result
+        return result[1]
     
     def get_parent_name(self, obj):
         """Get the direct referrer's (referred_by) full name"""

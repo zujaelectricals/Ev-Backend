@@ -60,6 +60,19 @@ def pair_matched(self, pair_id):
             pair.save(update_fields=['status', 'processed_at'])
             return
         
+        # Defensive check: First pair after activation must not be credited (business rule)
+        if pair.pair_number_after_activation == 1:
+            logger.warning(
+                f"Pair {pair_id} is first pair after activation. Commission not credited per business rule."
+            )
+            pair.commission_blocked = True
+            pair.blocked_reason = "First pair - commission not credited"
+            pair.earning_amount = Decimal('0')
+            pair.status = 'processed'
+            pair.processed_at = timezone.now()
+            pair.save(update_fields=['commission_blocked', 'blocked_reason', 'earning_amount', 'status', 'processed_at'])
+            return
+        
         # Get platform settings
         platform_settings = PlatformSettings.get_settings()
         daily_limit = platform_settings.binary_daily_pair_limit

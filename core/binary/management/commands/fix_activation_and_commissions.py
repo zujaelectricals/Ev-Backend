@@ -92,64 +92,76 @@ class Command(BaseCommand):
                             f"  [DRY RUN] Would activate binary commission for user {node.user.id}"
                         )
                     
-                    # Check if 3rd user's commission was paid
+                    # Direct-parent-only: commission for 3rd user goes to their direct parent, not this node
                     third_user = third_member_node.user
-                    commission_already_paid = WalletTransaction.objects.filter(
-                        user=node.user,
-                        transaction_type='DIRECT_USER_COMMISSION',
-                        reference_id=third_user.id,
-                        reference_type='user'
-                    ).exists()
-                    
-                    if not commission_already_paid:
+                    direct_parent_node = third_member_node.parent
+                    if direct_parent_node is None:
                         self.stdout.write(
-                            f"  Missing commission payment for 3rd user {third_user.id} ({third_user.username})"
-                        )
-                        
-                        if not dry_run:
-                            # Pay commission for 3rd user
-                            tds_amount = commission_amount * (tds_percentage / Decimal('100'))
-                            net_amount = commission_amount - tds_amount
-                            
-                            try:
-                                add_wallet_balance(
-                                    user=node.user,
-                                    amount=float(net_amount),
-                                    transaction_type='DIRECT_USER_COMMISSION',
-                                    description=f"User commission for {third_user.username} (₹{commission_amount} - ₹{tds_amount} TDS = ₹{net_amount}) [Retroactive Fix]",
-                                    reference_id=third_user.id,
-                                    reference_type='user'
-                                )
-                                
-                                deduct_from_booking_balance(
-                                    user=node.user,
-                                    deduction_amount=tds_amount,
-                                    deduction_type='TDS_DEDUCTION',
-                                    description=f"TDS ({tds_percentage}%) on user commission for {third_user.username} [Retroactive Fix]"
-                                )
-                                
-                                commission_paid_count += 1
-                                self.stdout.write(
-                                    self.style.SUCCESS(
-                                        f"  ✓ Paid commission ₹{net_amount} (₹{commission_amount} - ₹{tds_amount} TDS) "
-                                        f"for user {node.user.id}"
+                            self.style.WARNING(
+                                f"  3rd user {third_user.id} has no parent (root); skipping commission"
+                            )
+                    elif direct_parent_node.id != node.id:
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"  3rd user {third_user.id} direct parent is user {direct_parent_node.user_id} "
+                                f"(not this node); skipping commission under direct-parent-only policy"
+                            )
+                    else:
+                        commission_already_paid = WalletTransaction.objects.filter(
+                            user=node.user,
+                            transaction_type='DIRECT_USER_COMMISSION',
+                            reference_id=third_user.id,
+                            reference_type='user'
+                        ).exists()
+
+                        if not commission_already_paid:
+                            self.stdout.write(
+                                f"  Missing commission payment for 3rd user {third_user.id} ({third_user.username})"
+                            )
+
+                            if not dry_run:
+                                tds_amount = commission_amount * (tds_percentage / Decimal('100'))
+                                net_amount = commission_amount - tds_amount
+
+                                try:
+                                    add_wallet_balance(
+                                        user=node.user,
+                                        amount=float(net_amount),
+                                        transaction_type='DIRECT_USER_COMMISSION',
+                                        description=f"User commission for {third_user.username} (₹{commission_amount} - ₹{tds_amount} TDS = ₹{net_amount}) [Retroactive Fix]",
+                                        reference_id=third_user.id,
+                                        reference_type='user'
                                     )
-                                )
-                            except Exception as e:
-                                self.stdout.write(
-                                    self.style.ERROR(
-                                        f"  ✗ Error paying commission for user {node.user.id}: {e}"
+
+                                    deduct_from_booking_balance(
+                                        user=node.user,
+                                        deduction_amount=tds_amount,
+                                        deduction_type='TDS_DEDUCTION',
+                                        description=f"TDS ({tds_percentage}%) on user commission for {third_user.username} [Retroactive Fix]"
                                     )
+
+                                    commission_paid_count += 1
+                                    self.stdout.write(
+                                        self.style.SUCCESS(
+                                            f"  ✓ Paid commission ₹{net_amount} (₹{commission_amount} - ₹{tds_amount} TDS) "
+                                            f"to direct parent user {node.user.id}"
+                                        )
+                                    )
+                                except Exception as e:
+                                    self.stdout.write(
+                                        self.style.ERROR(
+                                            f"  ✗ Error paying commission for user {node.user.id}: {e}"
+                                        )
+                                    )
+                            else:
+                                self.stdout.write(
+                                    f"  [DRY RUN] Would pay commission ₹{commission_amount - commission_amount * (tds_percentage / Decimal('100'))} "
+                                    f"to direct parent user {node.user.id}"
                                 )
                         else:
                             self.stdout.write(
-                                f"  [DRY RUN] Would pay commission ₹{commission_amount - commission_amount * (tds_percentage / Decimal('100'))} "
-                                f"for user {node.user.id}"
+                                f"  ✓ Commission already paid for 3rd user {third_user.id} (to direct parent)"
                             )
-                    else:
-                        self.stdout.write(
-                            f"  ✓ Commission already paid for 3rd user {third_user.id}"
-                        )
                     
                     fixed_count += 1
         

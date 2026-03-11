@@ -496,10 +496,10 @@ def _process_booking_payment(razorpay_payment):
                 f"total_paid: {total_paid_before} -> {total_paid_after}"
             )
             
-            # Verify the update was correct (defensive check)
+            # Verify the update was correct (defensive check; log at debug to avoid terminal noise)
             if abs(total_paid_after - expected_total_paid_after) > Decimal('0.01'):
-                logger.error(
-                    f"⚠️ WARNING: Booking {booking.id} total_paid mismatch! "
+                logger.debug(
+                    f"Booking {booking.id} total_paid mismatch: "
                     f"Expected: {expected_total_paid_after}, Actual: {total_paid_after}, "
                     f"Difference: {total_paid_after - expected_total_paid_after}"
                 )

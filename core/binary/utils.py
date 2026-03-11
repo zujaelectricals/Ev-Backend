@@ -320,8 +320,12 @@ def process_direct_user_commission(new_user):
     - Commission is only paid if new_user has activation payment
     - Payee = user whose referral code new_user used (User.referred_by or Booking.referred_by)
     - new_user must be in code owner's tree (is_node_in_tree)
-    - Commission (referral bonus) MUST STOP after code owner's binary_commission_activated = True
-    - Activation (3+ active direct referrals) is applied to the code owner's node
+    - Direct referral commission continues for every direct referral; it does NOT stop when
+      binary commission activates. After activation, both direct referral bonus and binary
+      pair commission are credited when applicable.
+    - Binary activation (binary_commission_activation_count active direct referrals) is set
+      on the code owner's node when threshold is reached; pairing and pair commission then
+      run in addition to ongoing direct referral commission.
 
     Args:
         new_user: User who has (or just reached) activation payment
@@ -379,13 +383,6 @@ def process_direct_user_commission(new_user):
                 )
                 return commissions_paid
 
-        if locked_node.binary_commission_activated:
-            logger.info(
-                f"Commission blocked for {recipient_user.username}: "
-                f"Binary commission already activated. Referral bonus stopped."
-            )
-            return commissions_paid
-
         active_descendants = get_active_descendants_count(locked_node)
         if has_activation_payment(new_user):
             count_before_addition = active_descendants - 1
@@ -395,38 +392,33 @@ def process_direct_user_commission(new_user):
         locked_node.update_counts()
         locked_node.refresh_from_db()
 
-        if count_before_addition < activation_count:
-            commission_already_paid = WalletTransaction.objects.filter(
-                user=recipient_user,
-                transaction_type='DIRECT_USER_COMMISSION',
-                reference_id=new_user.id,
-                reference_type='user'
-            ).exists()
+        # Pay direct referral commission for every direct referral with activation payment
+        # (continues after binary activation; does not stop when binary_commission_activated)
+        commission_already_paid = WalletTransaction.objects.filter(
+            user=recipient_user,
+            transaction_type='DIRECT_USER_COMMISSION',
+            reference_id=new_user.id,
+            reference_type='user'
+        ).exists()
 
-            if not commission_already_paid:
-                if locked_node.binary_commission_activated:
-                    logger.info(
-                        f"Commission blocked for {recipient_user.username} (final check): "
-                        f"Binary commission already activated"
-                    )
-                else:
-                    tds_amount = commission_amount * (tds_percentage / Decimal('100'))
-                    net_amount = commission_amount - tds_amount
-                    try:
-                        add_wallet_balance(
-                            user=recipient_user,
-                            amount=float(net_amount),
-                            transaction_type='DIRECT_USER_COMMISSION',
-                            description=f"User commission for {new_user.username} (₹{commission_amount} - ₹{tds_amount} TDS = ₹{net_amount})",
-                            reference_id=new_user.id,
-                            reference_type='user'
-                        )
-                        commissions_paid = True
-                    except Exception as e:
-                        logger.error(
-                            f"Error processing user commission for code owner {recipient_user.username} "
-                            f"for new user {new_user.username}: {e}"
-                        )
+        if not commission_already_paid:
+            tds_amount = commission_amount * (tds_percentage / Decimal('100'))
+            net_amount = commission_amount - tds_amount
+            try:
+                add_wallet_balance(
+                    user=recipient_user,
+                    amount=float(net_amount),
+                    transaction_type='DIRECT_USER_COMMISSION',
+                    description=f"User commission for {new_user.username} (₹{commission_amount} - ₹{tds_amount} TDS = ₹{net_amount})",
+                    reference_id=new_user.id,
+                    reference_type='user'
+                )
+                commissions_paid = True
+            except Exception as e:
+                logger.error(
+                    f"Error processing user commission for code owner {recipient_user.username} "
+                    f"for new user {new_user.username}: {e}"
+                )
 
         # Activate binary commission for code owner when they have enough active direct referrals
         if active_descendants >= activation_count and not locked_node.binary_commission_activated:
@@ -888,11 +880,32 @@ def get_daily_pairs_count(user, date=None):
     ).count()
 
 
+def get_activation_member_user_ids(node):
+    """
+    Return user IDs of the first activation_count members used for binary activation.
+    These are active direct referrals (by created_at) and must NOT be used for binary pairing.
+    """
+    if not node.binary_commission_activated or not node.activation_timestamp:
+        return set()
+    platform_settings = PlatformSettings.get_settings()
+    activation_count = platform_settings.binary_commission_activation_count
+    all_descendants = []
+    all_descendants.extend(get_all_descendant_nodes(node, 'left'))
+    all_descendants.extend(get_all_descendant_nodes(node, 'right'))
+    active_direct = [
+        n for n in all_descendants
+        if is_direct_referral_of(n.user, node.user) and has_activation_payment(n.user)
+    ]
+    active_direct.sort(key=lambda n: n.created_at)
+    return set(n.user.id for n in active_direct[:activation_count])
+
+
 def get_remaining_unmatched_counts(node, pairs_today):
     """
     Calculate remaining unmatched members on each side after pairs used today
     Uses actual BinaryPair records to count matched users
-    IMPORTANT: Only counts members eligible for pairing (post-activation, with activation payment)
+    Pairing eligibility: all tree children (direct + indirect) with activation payment,
+    not matched. Includes the first activation_count members used for binary activation.
     
     Args:
         node: BinaryNode to calculate for
@@ -905,15 +918,8 @@ def get_remaining_unmatched_counts(node, pairs_today):
     if not node.binary_commission_activated:
         return (0, 0)
     
-    # Get activation timestamp
-    activation_time = node.activation_timestamp
-    if not activation_time:
+    if not node.activation_timestamp:
         return (0, 0)
-    
-    # Get activation count to determine even/odd logic (same as get_unmatched_users_for_pairing)
-    platform_settings = PlatformSettings.get_settings()
-    activation_count = platform_settings.binary_commission_activation_count
-    is_even = (activation_count % 2 == 0)
     
     # Get all pairs for this user (not just today, to get all matched users)
     pairs = BinaryPair.objects.filter(user=node.user)
@@ -926,45 +932,22 @@ def get_remaining_unmatched_counts(node, pairs_today):
         if pair.right_user:
             matched_user_ids.add(pair.right_user.id)
     
-    # Get all descendant nodes on each side
+    # Get all descendant nodes on each side (all tree children)
     left_descendants = get_all_descendant_nodes(node, 'left')
     right_descendants = get_all_descendant_nodes(node, 'right')
 
-    # Only direct referrals of node owner count for pairing (same as get_unmatched_users_for_pairing)
-    referrer = node.user
-    left_descendants = [n for n in left_descendants if is_direct_referral_of(n.user, referrer)]
-    right_descendants = [n for n in right_descendants if is_direct_referral_of(n.user, referrer)]
-
-    # Filter based on even/odd logic AND payment eligibility (same as get_unmatched_users_for_pairing)
-    # Only users with activation payment and post-activation are eligible for pairing
-    if is_even:
-        # Even: Exclude activation-triggering member (strictly after activation)
-        left_post_activation = [
-            n for n in left_descendants
-            if n.created_at > activation_time
-            and n.user.id not in matched_user_ids
-            and has_activation_payment(n.user)
-        ]
-        right_post_activation = [
-            n for n in right_descendants
-            if n.created_at > activation_time
-            and n.user.id not in matched_user_ids
-            and has_activation_payment(n.user)
-        ]
-    else:
-        # Odd: Include activation-triggering member (at or after activation)
-        left_post_activation = [
-            n for n in left_descendants
-            if n.created_at >= activation_time
-            and n.user.id not in matched_user_ids
-            and has_activation_payment(n.user)
-        ]
-        right_post_activation = [
-            n for n in right_descendants
-            if n.created_at >= activation_time
-            and n.user.id not in matched_user_ids
-            and has_activation_payment(n.user)
-        ]
+    # Eligible for binary pairing: tree children with activation payment, not matched.
+    # Activation members (first N direct referrals) are included in the pair pool.
+    left_post_activation = [
+        n for n in left_descendants
+        if n.user.id not in matched_user_ids
+        and has_activation_payment(n.user)
+    ]
+    right_post_activation = [
+        n for n in right_descendants
+        if n.user.id not in matched_user_ids
+        and has_activation_payment(n.user)
+    ]
 
     # Count remaining unmatched eligible members on each side
     left_unmatched_count = len(left_post_activation)
@@ -973,9 +956,72 @@ def get_remaining_unmatched_counts(node, pairs_today):
     return left_unmatched_count, right_unmatched_count
 
 
+def get_remaining_unmatched_counts_for_display(node):
+    """
+    Remaining unmatched counts for API display (tree_structure / node_children).
+    When the most recent day (before today) that had pairs hit the daily limit:
+    - Weak leg: reset each day — show only new members (placed today).
+    - Long leg: carry forward — show all pending unmatched (full count).
+    Until then, natural counts (both sides full).
+    """
+    left_remaining, right_remaining = get_remaining_unmatched_counts(node, 0)
+    if not node.binary_commission_activated or not node.activation_timestamp:
+        return (left_remaining, right_remaining)
+    # After a pair is matched both sides go down; never apply weak/long when both are 0
+    if left_remaining == 0 and right_remaining == 0:
+        return (0, 0)
+    now = timezone.now()
+    today = now.date()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    from django.db.models import Max
+    daily_limit = PlatformSettings.get_settings().binary_daily_pair_limit
+    last_pair_date = BinaryPair.objects.filter(
+        user=node.user,
+        pair_number_after_activation__isnull=False,
+        pair_date__lt=today
+    ).aggregate(Max('pair_date'))['pair_date__max']
+    if last_pair_date is None:
+        return (left_remaining, right_remaining)
+    count_on_last_day = BinaryPair.objects.filter(
+        user=node.user,
+        pair_number_after_activation__isnull=False,
+        pair_date=last_pair_date
+    ).count()
+    if count_on_last_day < daily_limit:
+        return (left_remaining, right_remaining)
+    # Weak leg = new only; long leg = full carry-forward
+    pairs = BinaryPair.objects.filter(user=node.user)
+    matched_user_ids = set()
+    for pair in pairs:
+        if pair.left_user:
+            matched_user_ids.add(pair.left_user.id)
+        if pair.right_user:
+            matched_user_ids.add(pair.right_user.id)
+    left_descendants = get_all_descendant_nodes(node, 'left')
+    right_descendants = get_all_descendant_nodes(node, 'right')
+    left_unmatched = [
+        n for n in left_descendants
+        if n.user.id not in matched_user_ids and has_activation_payment(n.user)
+    ]
+    right_unmatched = [
+        n for n in right_descendants
+        if n.user.id not in matched_user_ids and has_activation_payment(n.user)
+    ]
+    left_new = sum(1 for n in left_unmatched if n.created_at >= today_start)
+    right_new = sum(1 for n in right_unmatched if n.created_at >= today_start)
+    long_side, short_side, _, _ = get_long_short_legs(left_remaining, right_remaining)
+    if short_side is None:
+        return (left_remaining, right_remaining)
+    # Weak leg: new only (reset each day). Long leg: full count (carry forward).
+    if short_side == 'left':
+        return (left_new, right_remaining)
+    return (left_remaining, right_new)
+
+
 def get_long_short_legs(left_remaining, right_remaining):
     """
-    Identify which side is long leg (more remaining) and short leg (fewer remaining)
+    Identify which side is long leg (more remaining) and short leg (fewer remaining).
+    When equal, right is treated as weak (short) leg and left as long leg.
     
     Args:
         left_remaining: Remaining unmatched members on left side
@@ -983,14 +1029,16 @@ def get_long_short_legs(left_remaining, right_remaining):
     
     Returns:
         tuple: (long_side, short_side, long_count, short_count)
-               If equal, returns (None, None, 0, 0)
+               If both zero, returns (None, None, 0, 0)
     """
     if left_remaining > right_remaining:
         return ('left', 'right', left_remaining, right_remaining)
     elif right_remaining > left_remaining:
         return ('right', 'left', right_remaining, left_remaining)
+    elif left_remaining > 0 and right_remaining > 0:
+        # Equal counts: treat right as weak leg, left as long leg (for subsequent-day rule)
+        return ('left', 'right', left_remaining, right_remaining)
     else:
-        # Equal counts - no carry forward needed
         return (None, None, 0, 0)
 
 
@@ -1046,23 +1094,26 @@ def get_all_descendant_nodes(node, side):
     return descendants
 
 
-def get_unmatched_users_for_pairing(node):
+def get_unmatched_users_for_pairing(node, weak_side=None, weak_side_cutoff=None, active_buyer_cutoff=None):
     """
-    Get one unmatched user from left side and one from right side
-    STRICT RULE: Pair = 1 left-leg member + 1 right-leg member
-    Two members on same leg (LL or RR) → NOT a pair
-    
-    Uses BinaryPair records to determine which users are already matched
-    
-    IMPORTANT: Pairing eligibility depends on activation_count:
-    - Even activation_count (2, 4, 6...): Only members created AFTER activation are eligible
-      (exclude the member that triggered activation)
-    - Odd activation_count (3, 5, 7...): Members created AT OR AFTER activation are eligible
-      (include the member that triggered activation)
-    
+    Get one unmatched user from left side and one from right side.
+    STRICT RULE: Pair = 1 left-leg member + 1 right-leg member (no same-leg pairing).
+
+    Pairing eligibility: tree children with activation payment, not matched.
+    Includes the first activation_count members used for binary activation.
+
+    For Active Buyers (pair 5+), both rules apply in order:
+    1. active_buyer_cutoff: only nodes on BOTH legs with created_at >= active_buyer_since.
+    2. weak_side_cutoff (subsequent-day): on the weak leg (short side) only nodes with
+       created_at >= weak_side_cutoff. Long leg is not restricted by this date.
+    So long/weak leg is considered for Active Buyers; weak leg = short side by count.
+
     Args:
         node: BinaryNode to get unmatched users for
-    
+        weak_side: 'left' or 'right' - the side with fewer unmatched (short leg)
+        weak_side_cutoff: datetime - only consider weak-leg nodes with created_at >= this
+        active_buyer_cutoff: datetime - only consider nodes on BOTH legs with created_at >= this (pair 5+)
+
     Returns:
         tuple: (left_node, right_node) or (None, None) if no pair possible
     """
@@ -1070,16 +1121,8 @@ def get_unmatched_users_for_pairing(node):
     if not node.binary_commission_activated:
         return (None, None)
     
-    # Get activation timestamp
-    activation_time = node.activation_timestamp
-    if not activation_time:
-        # If no activation timestamp, return None (shouldn't happen if activated)
+    if not node.activation_timestamp:
         return (None, None)
-    
-    # Get activation count to determine even/odd logic
-    platform_settings = PlatformSettings.get_settings()
-    activation_count = platform_settings.binary_commission_activation_count
-    is_even = (activation_count % 2 == 0)
     
     # 1. Get all BinaryPair records for this node's user
     pairs = BinaryPair.objects.filter(user=node.user)
@@ -1092,48 +1135,38 @@ def get_unmatched_users_for_pairing(node):
         if pair.right_user:
             matched_user_ids.add(pair.right_user.id)
     
-    # 3. Get all descendant nodes on LEFT and RIGHT
+    # 3. Get all descendant nodes on LEFT and RIGHT (all tree children)
     left_descendants = get_all_descendant_nodes(node, 'left')
     right_descendants = get_all_descendant_nodes(node, 'right')
 
-    # Only direct referrals of node owner (used node.user's referral code) count for pairing
-    referrer = node.user
-    left_descendants = [n for n in left_descendants if is_direct_referral_of(n.user, referrer)]
-    right_descendants = [n for n in right_descendants if is_direct_referral_of(n.user, referrer)]
-
-    # 4. Filter based on even/odd logic AND payment eligibility
-    # Only users with activation payment are eligible for pairing
-    if is_even:
-        # Even: Exclude activation-triggering member (strictly after activation)
-        left_post_activation = [
-            n for n in left_descendants
-            if n.created_at > activation_time
-            and n.user.id not in matched_user_ids
-            and has_activation_payment(n.user)
-        ]
-        right_post_activation = [
-            n for n in right_descendants
-            if n.created_at > activation_time
-            and n.user.id not in matched_user_ids
-            and has_activation_payment(n.user)
-        ]
-    else:
-        # Odd: Include activation-triggering member (at or after activation)
-        left_post_activation = [
-            n for n in left_descendants
-            if n.created_at >= activation_time
-            and n.user.id not in matched_user_ids
-            and has_activation_payment(n.user)
-        ]
-        right_post_activation = [
-            n for n in right_descendants
-            if n.created_at >= activation_time
-            and n.user.id not in matched_user_ids
-            and has_activation_payment(n.user)
-        ]
+    # 4. Eligible for binary pairing: tree children with activation payment, not matched.
+    #    Activation members (first N direct referrals) are included in the pair pool.
+    left_post_activation = [
+        n for n in left_descendants
+        if n.user.id not in matched_user_ids
+        and has_activation_payment(n.user)
+    ]
+    right_post_activation = [
+        n for n in right_descendants
+        if n.user.id not in matched_user_ids
+        and has_activation_payment(n.user)
+    ]
     
-    # 6. Return first unmatched node from LEFT and first unmatched node from RIGHT
-    # 7. If either side has no unmatched users, return (None, None)
+    # 5b. Active Buyer rule: for pair 5+, only nodes placed AFTER distributor became Active Buyer
+    if active_buyer_cutoff is not None:
+        left_post_activation = [n for n in left_post_activation if n.created_at >= active_buyer_cutoff]
+        right_post_activation = [n for n in right_post_activation if n.created_at >= active_buyer_cutoff]
+    
+    # 6. Subsequent-day rule: on weak leg only consider nodes created on or after cutoff
+    #    (only new members on weak leg can be paired; existing unmatched are not re-paired)
+    if weak_side_cutoff is not None and weak_side is not None:
+        if weak_side == 'left':
+            left_post_activation = [n for n in left_post_activation if n.created_at >= weak_side_cutoff]
+        else:  # weak_side == 'right'
+            right_post_activation = [n for n in right_post_activation if n.created_at >= weak_side_cutoff]
+    
+    # 7. Return first unmatched node from LEFT and first unmatched node from RIGHT
+    # 8. If either side has no unmatched users, return (None, None)
     left_node = left_post_activation[0] if left_post_activation else None
     right_node = right_post_activation[0] if right_post_activation else None
     
@@ -1233,8 +1266,22 @@ def check_and_create_pair(user):
     now = timezone.now()
     today = now.date()
     pairs_today_initial = get_daily_pairs_count(user, today)
+    platform_settings = PlatformSettings.get_settings()
 
-    # Only direct referrals count: check if we have eligible left and right (direct-referral-only)
+    # REQUIREMENT: Non-Active Buyer — only pairs 1..N (N = max_earnings_before_active_buyer).
+    # No pair N+1 matched, no commission. When he becomes Active Buyer, pair 5+ use only
+    # members placed after active_buyer_since; daily limit and long/weak leg rules then apply.
+    max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
+    if not user.is_active_buyer:
+        pairs_after_activation_count = BinaryPair.objects.filter(
+            user=user,
+            pair_number_after_activation__isnull=False
+        ).count()
+        next_pair_number = pairs_after_activation_count + 1
+        if next_pair_number > max_earnings_before_active_buyer:
+            return (None, 'max_earnings_before_active_buyer')
+
+    # After activation, pairing uses tree children (left/right). Remaining counts used for long/short leg.
     left_remaining, right_remaining = get_remaining_unmatched_counts(node, pairs_today_initial)
     if left_remaining == 0 or right_remaining == 0:
         return None
@@ -1266,23 +1313,16 @@ def check_and_create_pair(user):
     # This will be the next pair number after activation
     pair_number_after_activation = pairs_after_activation + 1
     
-    # Check if commission should be blocked for non-Active Buyer distributors
-    # Non-Active Buyer distributors can only earn commission for first N pairs (configurable)
-    max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
+    # Commission block flags (non-Active Buyer cap already checked above)
     commission_blocked = False
     blocked_reason = ''
     
-    # Check for non-Active Buyer distributors
-    # Active Buyers: Only daily limit applies (binary_daily_pair_limit), no pair count limit
-    # Non-Active Buyers: Can only earn for first max_earnings_before_active_buyer pairs (total)
-    if not user.is_active_buyer:
-        # Count binary pairs that were actually paid (not blocked)
-        paid_pairs_count = get_binary_pairs_after_activation_count(user)
-        
-        # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, do not create any more pairs
-        # Pairs and commission will resume when user becomes Active Buyer
-        if paid_pairs_count >= max_earnings_before_active_buyer:
-            return (None, None)
+    # Non-Active Buyer: already allowed to create this pair (cap checked above); only first-pair block below
+    
+    # First pair after activation: commission not credited (business rule). Pair is still created.
+    if pair_number_after_activation == 1:
+        commission_blocked = True
+        blocked_reason = "First pair after activation - commission not credited per business rule"
     
     # Calculate TDS (always applied on all pairs, but only if commission is not blocked)
     tds_amount = Decimal('0')
@@ -1303,15 +1343,52 @@ def check_and_create_pair(user):
         else:
             extra_deduction = Decimal('0')
     
-    # Get unmatched users for pairing
-    # STRICT RULE: Must have one from left AND one from right (no same-leg pairing)
-    # get_unmatched_users_for_pairing ensures left_node is from left subtree and right_node is from right subtree
-    left_node, right_node = get_unmatched_users_for_pairing(node)
+    # REQUIREMENT: Active Buyer — from pair 5+ only nodes placed AFTER active_buyer_since are used.
+    # After that, daily limit and long/weak leg (subsequent-day) rules apply as normal.
+    # Long/short leg: determined from remaining unmatched counts; weak leg = short side.
+    weak_side = None
+    weak_side_cutoff = None
+    has_pairs_before_today = BinaryPair.objects.filter(
+        user=user,
+        pair_number_after_activation__isnull=False,
+        pair_date__lt=today
+    ).exists()
+    if has_pairs_before_today:
+        long_side, short_side, _, _ = get_long_short_legs(left_remaining, right_remaining)
+        if short_side is not None:
+            weak_side = short_side
+            weak_side_cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Pair 5+: only use nodes placed AFTER distributor became Active Buyer (one-time rule at activation).
+    active_buyer_cutoff = None
+    if (
+        user.is_active_buyer
+        and getattr(user, 'active_buyer_since', None)
+        and pair_number_after_activation > max_earnings_before_active_buyer
+    ):
+        active_buyer_cutoff = user.active_buyer_since
+
+    # Get unmatched users: eligible, then active_buyer_cutoff on BOTH legs, then weak_side_cutoff on weak leg only.
+    left_node, right_node = get_unmatched_users_for_pairing(
+        node,
+        weak_side=weak_side,
+        weak_side_cutoff=weak_side_cutoff,
+        active_buyer_cutoff=active_buyer_cutoff,
+    )
     
-    # Strict validation: If either is None, no pair possible - must have BOTH left AND right
-    # This enforces the rule: Pair = 1 left-leg member + 1 right-leg member
-    # Two members on same leg (LL or RR) → NOT a pair
     if left_node is None or right_node is None:
+        # Return the reason that actually caused no pair (so user gets the right message).
+        if active_buyer_cutoff is not None and weak_side_cutoff is not None:
+            # Both rules apply: check if we would have a pair without weak_side_cutoff (only active_buyer filter).
+            left_alt, right_alt = get_unmatched_users_for_pairing(
+                node, weak_side=None, weak_side_cutoff=None, active_buyer_cutoff=active_buyer_cutoff
+            )
+            if left_alt is not None and right_alt is not None:
+                return (None, 'no_new_on_weak_leg')  # Bottleneck is weak leg (no new on short leg today).
+        if active_buyer_cutoff is not None:
+            return (None, 'no_placement_after_active_buyer')
+        if weak_side_cutoff is not None:
+            return (None, 'no_new_on_weak_leg')
         return None
     
     # Check activation_amount eligibility for both users
@@ -1363,12 +1440,27 @@ def check_and_create_pair(user):
         if active_carry_forward and active_carry_forward.remaining_count > 0:
             use_carry_forward = True
         
+        # Extra deduction is taken from booking balance. If user has no remaining balance (<=0),
+        # do not apply extra deduction: credit full (commission - TDS) = net_amount to wallet.
+        from core.booking.models import Booking
+        from django.db.models import Sum
+        total_remaining_balance = Booking.objects.filter(
+            user=user,
+            status__in=['pending', 'active']
+        ).aggregate(s=Sum('remaining_amount'))['s'] or Decimal('0')
+        if total_remaining_balance <= 0 and extra_deduction > 0 and not commission_blocked:
+            effective_extra_deduction = Decimal('0')
+            amount_after_all_deductions = net_amount  # Full net (e.g. 2000 - 10% TDS = 1800) to wallet
+        else:
+            effective_extra_deduction = extra_deduction
+            amount_after_all_deductions = (net_amount - extra_deduction) if not commission_blocked else Decimal('0')
+        
         pair = BinaryPair.objects.create(
             user=user,
             left_user=left_node.user,
             right_user=right_node.user,
             pair_amount=commission_amount,
-            earning_amount=net_amount if not commission_blocked else Decimal('0'),  # Net amount after TDS only (extra deduction is deducted from booking balance, not from wallet)
+            earning_amount=amount_after_all_deductions,
             status='matched',
             matched_at=now,
             pair_month=now.month,
@@ -1377,7 +1469,7 @@ def check_and_create_pair(user):
             pair_number_after_activation=pair_number_after_activation,
             is_carry_forward_pair=use_carry_forward,
             carry_forward=active_carry_forward if use_carry_forward else None,
-            extra_deduction_applied=extra_deduction if not commission_blocked else Decimal('0'),
+            extra_deduction_applied=effective_extra_deduction if not commission_blocked else Decimal('0'),
             commission_blocked=commission_blocked,
             blocked_reason=blocked_reason
         )
@@ -1427,41 +1519,56 @@ def check_and_create_pair(user):
             binary_pair=pair,
             amount=commission_amount,  # Gross amount
             pair_number=pair_number,
-            net_amount=net_amount if not commission_blocked else Decimal('0')  # Net amount after TDS only (extra deduction is deducted from booking balance, not from wallet)
+            net_amount=amount_after_all_deductions,  # Final amount after TDS and extra deduction (credited to wallet)
         )
         
-        # Deduct extra deduction from booking balance if commission is not blocked
-        # TDS is calculated and reduces net amount, but NOT deducted from booking balance
-        # Extra deduction (binary_extra_deduction_percentage) is deducted from booking balance
-        # for pairs after binary_tds_threshold_pairs (e.g., pairs 6+ if threshold is 5)
-        if not commission_blocked:
-            # Deduct extra amount from booking balance (for 6th+ pairs only)
-            if extra_deduction > 0:
-                deduct_from_booking_balance(
-                    user=user,
-                    deduction_amount=extra_deduction,
-                    deduction_type='EXTRA_DEDUCTION',
-                    description=f"Extra deduction ({extra_deduction_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})",
-                    reference_id=pair.id,
-                    reference_type='binary_pair'
-                )
-            
-            # Trigger wallet update via Celery (will credit net amount)
-            # Use on_commit to ensure task is queued only after transaction commits
-            # This prevents "pair not found" errors if transaction rolls back
-            from core.binary.tasks import pair_matched
-            from django.db import transaction as db_transaction
-            
-            # Queue task after transaction commits to ensure pair exists in database
-            db_transaction.on_commit(lambda: pair_matched.delay(pair.id))
-        else:
-            # Log that commission was blocked
+        # Deduct extra deduction from booking balance only when user has remaining_balance > 0.
+        if not commission_blocked and effective_extra_deduction > 0:
+            deduct_from_booking_balance(
+                user=user,
+                deduction_amount=effective_extra_deduction,
+                deduction_type='EXTRA_DEDUCTION',
+                description=f"Extra deduction ({extra_deduction_percentage}%) on binary pair commission (Pair #{pair_number_after_activation})",
+                reference_id=pair.id,
+                reference_type='binary_pair'
+            )
+        if commission_blocked:
             import logging
             logger = logging.getLogger(__name__)
             logger.warning(
                 f"Binary pair commission blocked for user {user.username}: {blocked_reason}. "
                 f"Pair #{pair_number_after_activation} created but no commission paid."
             )
+        else:
+            # Credit wallet immediately so user sees balance update without waiting for Celery.
+            # pair_matched task is still queued as backup; it will skip if transaction already exists (idempotent).
+            if pair.earning_amount and pair.earning_amount > 0:
+                from core.wallet.utils import get_or_create_wallet
+                from core.wallet.models import WalletTransaction
+                wallet = get_or_create_wallet(user)
+                balance_before = wallet.balance
+                wallet.balance += pair.earning_amount
+                wallet.total_earned += pair.earning_amount
+                wallet.save()
+                WalletTransaction.objects.create(
+                    user=user,
+                    wallet=wallet,
+                    transaction_type='BINARY_PAIR_COMMISSION',
+                    amount=pair.earning_amount,
+                    balance_before=balance_before,
+                    balance_after=wallet.balance,
+                    description=f"Binary pair commission (Pair #{pair_number_after_activation} after activation)"
+                    + (" - Matched with carried-forward members" if use_carry_forward else ""),
+                    reference_id=pair.id,
+                    reference_type='binary_pair',
+                )
+                pair.status = 'processed'
+                pair.processed_at = now
+                pair.save(update_fields=['status', 'processed_at'])
+        # Queue task for all pairs: credits wallet if not already done (idempotent), or marks blocked pairs as processed
+        from core.binary.tasks import pair_matched
+        from django.db import transaction as db_transaction
+        db_transaction.on_commit(lambda: pair_matched.delay(pair.id))
         
         # Update node counts (remove matched pair - counts will be recalculated recursively)
         node.update_counts()

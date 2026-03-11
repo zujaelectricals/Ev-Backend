@@ -1467,7 +1467,19 @@ class BinaryPairViewSet(viewsets.ReadOnlyModelViewSet):
     
     @action(detail=False, methods=['post'])
     def check_pairs(self, request):
-        """Manually trigger pair checking"""
+        """
+        Manually trigger pair checking and commission.
+        Requires {"confirm": true} in the request body to prevent accidental or automatic
+        pair matching (e.g. from frontend calling this on placement or tree load).
+        """
+        if request.data.get('confirm') is not True:
+            return Response(
+                {
+                    'error': 'Explicit confirmation required to match pairs.',
+                    'message': 'Send {"confirm": true} in the request body to match binary pairs and credit commission.',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         user = request.user
         result = check_and_create_pair(user)
         pair = result[0] if isinstance(result, tuple) else result
@@ -1476,9 +1488,14 @@ class BinaryPairViewSet(viewsets.ReadOnlyModelViewSet):
             serializer = self.get_serializer(pair)
             data = dict(serializer.data)
             if getattr(pair, 'commission_blocked', False):
-                data['message'] = (
-                    'Pair matched. You have reached maximum Commission limit for non-Active booking'
-                )
+                if getattr(pair, 'pair_number_after_activation', None) == 1:
+                    data['message'] = (
+                        'Pair matched. No commission for First Pair after activation per business rule.'
+                    )
+                else:
+                    data['message'] = (
+                        'Pair matched. You have reached maximum Commission limit for non-Active booking'
+                    )
             return Response(data, status=status.HTTP_201_CREATED)
         # No pair created: prefer non-Active Buyer limit message over daily limit when both apply
         if not user.is_active_buyer and user.is_distributor:
@@ -1489,9 +1506,21 @@ class BinaryPairViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({
                     'message': 'You have reached maximum limit for non-Active booking, Become Active to earn more'
                 }, status=status.HTTP_200_OK)
+        if reason == 'max_earnings_before_active_buyer':
+            return Response({
+                'message': "You have reached the maximum limit for non-Active Buyer. Become an Active Buyer to earn more."
+            }, status=status.HTTP_200_OK)
         if reason == 'daily_limit':
             return Response({
                 'message': "You have reached today's pair limit. Try again tomorrow."
+            }, status=status.HTTP_200_OK)
+        if reason == 'no_new_on_weak_leg':
+            return Response({
+                'message': "No more pairs available today. Add more members on the short leg to create more pairs."
+            }, status=status.HTTP_200_OK)
+        if reason == 'no_placement_after_active_buyer':
+            return Response({
+                'message': "Only members placed after you became an Active Buyer can be paired. Add new members on both sides to create more pairs."
             }, status=status.HTTP_200_OK)
         return Response({'message': 'No pairs available'}, status=status.HTTP_200_OK)
 
