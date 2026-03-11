@@ -57,6 +57,11 @@ class WalletTransaction(models.Model):
     reference_id = models.IntegerField(null=True, blank=True)  # Can reference booking, binary pair, etc.
     reference_type = models.CharField(max_length=50, blank=True)  # 'booking', 'binary_pair', etc.
     
+    credited_while_non_active_buyer = models.BooleanField(
+        default=False,
+        help_text="True if this commission was credited when user was not an Active Buyer (counts toward max_commission_before_active_buyer_amount cap)."
+    )
+    
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:

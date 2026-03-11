@@ -1540,31 +1540,47 @@ def check_and_create_pair(user):
                 f"Pair #{pair_number_after_activation} created but no commission paid."
             )
         else:
-            # Credit wallet immediately so user sees balance update without waiting for Celery.
-            # pair_matched task is still queued as backup; it will skip if transaction already exists (idempotent).
+            # Credit wallet (via add_wallet_balance so non-Active Buyer ₹10k cap and partial credit apply)
             if pair.earning_amount and pair.earning_amount > 0:
-                from core.wallet.utils import get_or_create_wallet
-                from core.wallet.models import WalletTransaction
-                wallet = get_or_create_wallet(user)
-                balance_before = wallet.balance
-                wallet.balance += pair.earning_amount
-                wallet.total_earned += pair.earning_amount
-                wallet.save()
-                WalletTransaction.objects.create(
-                    user=user,
-                    wallet=wallet,
-                    transaction_type='BINARY_PAIR_COMMISSION',
-                    amount=pair.earning_amount,
-                    balance_before=balance_before,
-                    balance_after=wallet.balance,
-                    description=f"Binary pair commission (Pair #{pair_number_after_activation} after activation)"
-                    + (" - Matched with carried-forward members" if use_carry_forward else ""),
-                    reference_id=pair.id,
-                    reference_type='binary_pair',
-                )
-                pair.status = 'processed'
-                pair.processed_at = now
-                pair.save(update_fields=['status', 'processed_at'])
+                if not user.is_active_buyer:
+                    from core.wallet.utils import get_non_active_commission_cap_remaining
+                    remaining = get_non_active_commission_cap_remaining(user)
+                    if remaining is not None and remaining <= 0:
+                        pair.commission_blocked = True
+                        pair.blocked_reason = (
+                            "Non-Active Buyer commission cap reached (₹10,000). "
+                            "Commission will resume when user becomes Active Buyer."
+                        )
+                        pair.earning_amount = Decimal('0')
+                        pair.status = 'processed'
+                        pair.processed_at = now
+                        pair.save(update_fields=['commission_blocked', 'blocked_reason', 'earning_amount', 'status', 'processed_at'])
+                    else:
+                        add_wallet_balance(
+                            user=user,
+                            amount=float(pair.earning_amount),
+                            transaction_type='BINARY_PAIR_COMMISSION',
+                            description=f"Binary pair commission (Pair #{pair_number_after_activation} after activation)"
+                            + (" - Matched with carried-forward members" if use_carry_forward else ""),
+                            reference_id=pair.id,
+                            reference_type='binary_pair',
+                        )
+                        pair.status = 'processed'
+                        pair.processed_at = now
+                        pair.save(update_fields=['status', 'processed_at'])
+                else:
+                    add_wallet_balance(
+                        user=user,
+                        amount=float(pair.earning_amount),
+                        transaction_type='BINARY_PAIR_COMMISSION',
+                        description=f"Binary pair commission (Pair #{pair_number_after_activation} after activation)"
+                        + (" - Matched with carried-forward members" if use_carry_forward else ""),
+                        reference_id=pair.id,
+                        reference_type='binary_pair',
+                    )
+                    pair.status = 'processed'
+                    pair.processed_at = now
+                    pair.save(update_fields=['status', 'processed_at'])
         # Queue task for all pairs: credits wallet if not already done (idempotent), or marks blocked pairs as processed
         from core.binary.tasks import pair_matched
         from django.db import transaction as db_transaction

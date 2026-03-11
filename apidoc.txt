@@ -1709,7 +1709,7 @@ Super User: EVAdmin && EVAdmin@123
     - TDS is deducted from referrer's oldest active booking remaining amount
     - Only distributors can receive commissions
     - Company Referral Code Exclusion: Users with referral_code matching the company_referral_code from Platform Settings will NOT receive any commission. This ensures the company account does not earn commissions when users use the company referral code.
-    - Note: Direct user commissions are NOT restricted for non-Active Buyer distributors (can earn unlimited before binary activation)
+    - Non-Active Buyer commission cap: For non-Active Buyer distributors, total commission (direct + binary + initial bonus) is capped at max_commission_before_active_buyer_amount (default: ₹10,000). Partial credit is allowed when near the cap (e.g. at ₹9,900, a ₹1,000 direct commission credits only ₹100). Binary pairs are also limited to the first max_earnings_before_active_buyer pairs (default: 5); 6th+ pairs are blocked until user becomes Active Buyer, then commission resumes only for placements after active_buyer_since.
     
     Error Response (400):
     {
@@ -3921,6 +3921,7 @@ Super User: EVAdmin && EVAdmin@123
     - extra_deduction_applied: Amount of extra deduction applied (for 6th+ pairs)
     - 20% TDS is applied on ALL pair commissions (1st pair onwards)
     - Extra 20% deduction applies from 6th pair onwards (configurable threshold)
+    - Non-Active Buyer: (1) Only first max_earnings_before_active_buyer pairs (default: 5) can earn; 6th+ pair commission blocked until user becomes Active Buyer. (2) Total commission (direct + binary + initial bonus) capped at max_commission_before_active_buyer_amount (default: ₹10,000); partial credit when near cap. After becoming Active Buyer, commission resumes only for future placements (pair 6+ use only nodes placed after active_buyer_since).
     - Pair Matching Eligibility: Only members created at or after activation are eligible for pairing
       * Pre-activation members (1st and 2nd) are excluded, 3rd member (activation trigger) and all subsequent members are included
 
@@ -3958,6 +3959,7 @@ Super User: EVAdmin && EVAdmin@123
     - 20% TDS is applied on ALL binary pair commissions (1st pair onwards, configurable percentage)
     - Extra 20% deduction applies from 6th pair onwards (configurable threshold, default: 5 pairs)
     - Daily pair limit: Maximum 10 pairs per day (configurable, default: 10 pairs = ₹20,000 before deductions)
+    - Non-Active Buyer: Total commission (direct + binary + initial bonus) capped at max_commission_before_active_buyer_amount (default: ₹10,000). Only first max_earnings_before_active_buyer pairs (default: 5) earn binary commission; 6th+ blocked until Active Buyer. Partial credit allowed when near cap. After becoming Active Buyer, commission resumes only for placements after active_buyer_since.
     - Pairs 1-5: ₹2000 - 20% TDS = ₹1600 credited
     - Pairs 6+: ₹2000 - 20% TDS - 20% extra = ₹1200 credited (extra deducted from booking balance)
     - TDS and extra deduction are deducted from user's oldest active booking remaining amount
@@ -7051,6 +7053,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_extra_deduction_percentage": "20.00",  // Extra deduction percentage on 6th+ pairs (default: 20%)
      "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10 pairs = ₹20,000)
      "max_earnings_before_active_buyer": 5,  // Maximum number of binary pairs non-Active Buyer distributors can earn commission for before becoming Active Buyer (default: 5 pairs). 6th+ pairs are blocked until user becomes Active Buyer (default: 5, min: 1)
+     "max_commission_before_active_buyer_amount": "10000.00",  // Maximum total commission (direct + binary + initial bonus) a non-Active Buyer can earn (default: ₹10,000). Partial credit allowed when near cap. No cap after user becomes Active Buyer.
      "binary_commission_initial_bonus": "0.00",  // Initial bonus amount (in rupees) credited to user's wallet and total_earnings when binary commission is activated (3 persons). TDS is deducted from this amount, but TDS is NOT deducted from booking balance (default: 0)
      "binary_tree_default_placement_side": "left",  // Default placement side for binary tree: "left" or "right" (default: "left")
      "activation_amount": "5000.00",  // Minimum payment amount per booking required for seniors to earn commission. If payment is less than this amount, no commission is credited, but user is still counted in descendants calculation. On cancellation, this amount is withheld for future point redemption (default: ₹5000)
@@ -7072,7 +7075,8 @@ Super User: EVAdmin && EVAdmin@123
    - binary_commission_tds_percentage: Applied to ALL commissions (direct user and pairs)
    - binary_extra_deduction_percentage: Additional deduction for 6th+ pairs (in addition to TDS)
    - binary_daily_pair_limit: Maximum pairs per day (resets at midnight)
-   - binary_commission_initial_bonus: Initial bonus amount credited to user's wallet and total_earnings when binary commission is activated (3 persons). TDS is calculated and deducted from the bonus amount itself, but TDS is NOT deducted from booking balance. Only the net amount (after TDS) is credited to wallet
+   - max_commission_before_active_buyer_amount: Maximum total commission (direct + binary + initial bonus) a non-Active Buyer distributor can earn (default: ₹10,000). Once reached, no further commission until user becomes Active Buyer. Partial credit allowed (e.g. at ₹9,900, next ₹1,000 credits only ₹100). Does not apply after user becomes Active Buyer.
+   - binary_commission_initial_bonus: Initial bonus amount credited to user's wallet and total_earnings when binary commission is activated (3 persons). TDS is calculated and deducted from the bonus amount itself, but TDS is NOT deducted from booking balance. Only the net amount (after TDS) is credited to wallet. Counts toward max_commission_before_active_buyer_amount for non-Active Buyers.
    - activation_amount: Minimum payment amount per booking required for seniors to earn commission. If payment is less than this amount, no commission is credited, but user is still counted in descendants calculation. On cancellation, this amount is withheld for future point redemption (default: ₹5000)
 
 
@@ -7093,6 +7097,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_extra_deduction_percentage": 20,  // Extra deduction percentage on 6th+ pairs (default: 20%, range: 0-100)
      "binary_daily_pair_limit": 10,  // Maximum binary pairs per day after activation (default: 10, min: 1)
      "max_earnings_before_active_buyer": 5,  // Maximum number of binary pairs non-Active Buyer distributors can earn commission for before becoming Active Buyer (default: 5 pairs). 6th+ pairs are blocked until user becomes Active Buyer (default: 5, min: 1)
+     "max_commission_before_active_buyer_amount": 10000,  // Maximum total commission (direct + binary + initial bonus) a non-Active Buyer can earn (default: ₹10,000, min: 0). Partial credit allowed when near cap.
      "binary_commission_initial_bonus": 0,  // Initial bonus amount (in rupees) credited to user's wallet and total_earnings when binary commission is activated (3 persons). TDS is deducted from this amount, but TDS is NOT deducted from booking balance (default: 0)
      "binary_tree_default_placement_side": "left",  // Default placement side: "left" or "right" (default: "left")
      "activation_amount": 5000,  // Minimum payment amount per booking required for seniors to earn commission. If payment is less than this amount, no commission is credited, but user is still counted in descendants calculation. On cancellation, this amount is withheld for future point redemption (default: ₹5000, min: 0)
@@ -7114,6 +7119,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_extra_deduction_percentage": "20.00",
      "binary_daily_pair_limit": 10,
      "max_earnings_before_active_buyer": 5,
+     "max_commission_before_active_buyer_amount": "10000.00",
      "binary_commission_initial_bonus": "0.00",
      "binary_tree_default_placement_side": "left",
      "distributor_application_auto_approve": true,
@@ -7137,6 +7143,7 @@ Super User: EVAdmin && EVAdmin@123
      "binary_extra_deduction_percentage": ["binary_extra_deduction_percentage must be between 0 and 100"],
      "binary_daily_pair_limit": ["binary_daily_pair_limit must be at least 1"],
      "max_earnings_before_active_buyer": ["max_earnings_before_active_buyer must be at least 1"],
+     "max_commission_before_active_buyer_amount": ["max_commission_before_active_buyer_amount must be non-negative"],
      "binary_commission_initial_bonus": ["binary_commission_initial_bonus must be non-negative"],
      "payout_tds_percentage": ["payout_tds_percentage must be between 0 and 100"],
      "company_referral_code": ["company_referral_code cannot be empty", "company_referral_code must be at least 3 characters long", "company_referral_code cannot exceed 20 characters"]
