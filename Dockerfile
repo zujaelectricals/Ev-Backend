@@ -53,7 +53,7 @@ if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
     python manage.py collectstatic --noinput; \
     gunicorn ev_backend.wsgi:application \
         --bind 0.0.0.0:8000 \
-        --workers 3 \
+        --workers 1 \
         --timeout 120; \
 elif [ \"$SERVICE_ROLE\" = \"celery\" ]; then \
     echo 'Starting Celery Worker' && \
