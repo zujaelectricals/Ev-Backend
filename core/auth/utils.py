@@ -126,8 +126,13 @@ def send_otp_via_msg91_unified(otp_code, email=None, mobile=None, user_name=None
 
         # Handle 401 Unauthorized specifically
         if response.status_code == 401:
+            key = getattr(settings, 'MSG91_AUTH_KEY', None) or ''
             error_msg = "MSG91 authentication failed. Please verify MSG91_AUTH_KEY is set correctly."
-            logger.error(f"MSG91 OTP Send 401 Unauthorized - Auth Key Present: {bool(settings.MSG91_AUTH_KEY)}")
+            logger.error(
+                f"MSG91 OTP Send 401 Unauthorized - Auth Key Present: {bool(key)}, "
+                f"Key length: {len(key)} (check for spaces/newlines). "
+                "If key is correct, check MSG91 IP whitelist and Campaign API access for this key."
+            )
             try:
                 error_data = response.json()
                 logger.error(f"MSG91 Error Response: {json.dumps(error_data, indent=2)}")
