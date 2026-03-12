@@ -9,7 +9,7 @@ Authentication: JWT Bearer Token (except where noted)
                             AUTHENTICATION APIs
 ================================================================================
 Super User: EVAdmin && EVAdmin@123
-1. SEND OTP (Regular Users Only).
+1. SEND OTP (Regular Users Only)
    Method: POST
    URL: /api/auth/send-otp/
    Authentication: Not Required
