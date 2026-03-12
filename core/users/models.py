@@ -43,6 +43,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='user')
     is_distributor = models.BooleanField(default=False)
     is_active_buyer = models.BooleanField(default=False)
+    active_buyer_since = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the user first became an Active Buyer (total paid >= activation_amount). Used so pair 5+ only use nodes placed after this time."
+    )
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
     
@@ -113,6 +118,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.is_active_buyer = actual_payments_total >= activation_amount
         
         if not was_active and self.is_active_buyer:
+            # Record when they became Active Buyer (for pair 5+ only users placed after this count)
+            self.active_buyer_since = timezone.now()
             # User just became Active Buyer - trigger any necessary actions
             import logging
             logger = logging.getLogger(__name__)
@@ -159,7 +166,10 @@ class User(AbstractBaseUser, PermissionsMixin):
                     exc_info=True
                 )
         
-        self.save(update_fields=['is_active_buyer'])
+        update_fields = ['is_active_buyer']
+        if self.active_buyer_since is not None:
+            update_fields.append('active_buyer_since')
+        self.save(update_fields=update_fields)
         return self.is_active_buyer
 
 

@@ -60,6 +60,19 @@ def pair_matched(self, pair_id):
             pair.save(update_fields=['status', 'processed_at'])
             return
         
+        # Defensive check: First pair after activation must not be credited (business rule)
+        if pair.pair_number_after_activation == 1:
+            logger.warning(
+                f"Pair {pair_id} is first pair after activation. Commission not credited per business rule."
+            )
+            pair.commission_blocked = True
+            pair.blocked_reason = "First pair - commission not credited"
+            pair.earning_amount = Decimal('0')
+            pair.status = 'processed'
+            pair.processed_at = timezone.now()
+            pair.save(update_fields=['commission_blocked', 'blocked_reason', 'earning_amount', 'status', 'processed_at'])
+            return
+        
         # Get platform settings
         platform_settings = PlatformSettings.get_settings()
         daily_limit = platform_settings.binary_daily_pair_limit
@@ -176,12 +189,6 @@ def pair_matched(self, pair_id):
             pair.save(update_fields=['status', 'processed_at'])
             return
         
-        # Add to wallet using new transaction type
-        # earning_amount already has TDS and extra deduction deducted (net amount)
-        # Use add_wallet_balance but it will do its own check - but we've already verified pair_number
-        # So we bypass the check by creating transaction directly if needed
-        from core.wallet.models import Wallet, WalletTransaction as WT
-        
         # Final safeguard: Don't credit if commission is already blocked or earning_amount is 0
         if pair.commission_blocked or not pair.earning_amount or pair.earning_amount <= 0:
             logger.warning(
@@ -194,27 +201,33 @@ def pair_matched(self, pair_id):
             pair.save(update_fields=['status', 'processed_at'])
             return
         
-        wallet = get_or_create_wallet(user)
-        balance_before = wallet.balance
+        # Non-Active Buyer amount cap: if at ₹10k cap, mark pair blocked and skip credit
+        if not user.is_active_buyer:
+            from core.wallet.utils import get_non_active_commission_cap_remaining
+            remaining = get_non_active_commission_cap_remaining(user)
+            if remaining is not None and remaining <= 0:
+                logger.warning(
+                    f"Pair {pair_id} not credited: non-Active Buyer {user.email} at commission cap (₹10,000)."
+                )
+                pair.commission_blocked = True
+                pair.blocked_reason = (
+                    "Non-Active Buyer commission cap reached (₹10,000). "
+                    "Commission will resume when user becomes Active Buyer."
+                )
+                pair.earning_amount = Decimal('0')
+                pair.status = 'processed'
+                pair.processed_at = timezone.now()
+                pair.save(update_fields=['commission_blocked', 'blocked_reason', 'earning_amount', 'status', 'processed_at'])
+                return
         
-        # Update wallet balance
-        wallet.balance += Decimal(str(pair.earning_amount))
-        wallet.total_earned += Decimal(str(pair.earning_amount))
-        wallet.save()
-        
-        balance_after = wallet.balance
-        
-        # Create transaction record
-        WT.objects.create(
+        # Credit via add_wallet_balance (applies non-Active Buyer cap and partial credit)
+        add_wallet_balance(
             user=user,
-            wallet=wallet,
+            amount=float(pair.earning_amount),
             transaction_type='BINARY_PAIR_COMMISSION',
-            amount=Decimal(str(pair.earning_amount)),
-            balance_before=balance_before,
-            balance_after=balance_after,
             description=description,
             reference_id=pair.id,
-            reference_type='binary_pair'
+            reference_type='binary_pair',
         )
         
         # Update pair status
@@ -291,28 +304,23 @@ def pair_matched(self, pair_id):
                         )
                         return
                 
-                # Create wallet transaction directly (bypassing add_wallet_balance to avoid buggy count check)
-                wallet = get_or_create_wallet(user)
-                balance_before = wallet.balance
-                
-                wallet.balance += Decimal(str(net_amount))
-                wallet.total_earned += Decimal(str(net_amount))
-                wallet.save()
-                
-                balance_after = wallet.balance
-                
-                WalletTransaction.objects.create(
+                # Credit via add_wallet_balance (applies non-Active Buyer cap)
+                from core.wallet.utils import get_non_active_commission_cap_remaining
+                if not user.is_active_buyer:
+                    remaining = get_non_active_commission_cap_remaining(user)
+                    if remaining is not None and remaining <= 0:
+                        logger.warning(
+                            f"Recovery: Pair {pair_id} not credited - non-Active Buyer at commission cap."
+                        )
+                        return
+                add_wallet_balance(
                     user=user,
-                    wallet=wallet,
+                    amount=float(net_amount),
                     transaction_type='BINARY_PAIR_COMMISSION',
-                    amount=Decimal(str(net_amount)),
-                    balance_before=balance_before,
-                    balance_after=balance_after,
                     description=f"Binary pair commission (recovered from BinaryEarning for pair #{pair_id})",
                     reference_id=pair_id,
-                    reference_type='binary_pair'
+                    reference_type='binary_pair',
                 )
-                
                 logger.info(f"Successfully recovered and processed pair {pair_id} from BinaryEarning")
                 return
             else:
@@ -418,6 +426,20 @@ def fix_missing_wallet_transactions():
                     logger.info(f"Updated BinaryEarning for pair {pair.id} to ₹0 (blocked)")
                 continue
             
+            # Non-Active Buyer amount cap: skip if at ₹10k cap
+            if not user.is_active_buyer:
+                from core.wallet.utils import get_non_active_commission_cap_remaining
+                remaining = get_non_active_commission_cap_remaining(user)
+                if remaining is not None and remaining <= 0:
+                    logger.info(
+                        f"Skipping pair {pair.id}: non-Active Buyer {user.email} at commission cap."
+                    )
+                    pair.commission_blocked = True
+                    pair.blocked_reason = "Non-Active Buyer commission cap reached (₹10,000). Commission will resume when user becomes Active Buyer."
+                    pair.earning_amount = Decimal('0')
+                    pair.save(update_fields=['commission_blocked', 'blocked_reason', 'earning_amount'])
+                    continue
+            
             # Get pair number for description
             pair_number_display = pair_number or BinaryPair.objects.filter(user=user).count()
             
@@ -425,33 +447,13 @@ def fix_missing_wallet_transactions():
             if pair.is_carry_forward_pair:
                 description += " - Matched with carried-forward members"
             
-            # IMPORTANT: For fix task, we need to bypass the Active Buyer check in add_wallet_balance
-            # because we've already verified the pair_number_after_activation (5th pair is allowed)
-            # Create wallet transaction directly to avoid double-checking
-            from core.wallet.models import Wallet, WalletTransaction
-            from core.wallet.utils import get_or_create_wallet
-            
-            wallet = get_or_create_wallet(user)
-            balance_before = wallet.balance
-            
-            # Update wallet balance
-            wallet.balance += Decimal(str(earning_amount))
-            wallet.total_earned += Decimal(str(earning_amount))
-            wallet.save()
-            
-            balance_after = wallet.balance
-            
-            # Create transaction record
-            WalletTransaction.objects.create(
+            add_wallet_balance(
                 user=user,
-                wallet=wallet,
+                amount=float(earning_amount),
                 transaction_type='BINARY_PAIR_COMMISSION',
-                amount=Decimal(str(earning_amount)),
-                balance_before=balance_before,
-                balance_after=balance_after,
                 description=description,
                 reference_id=pair.id,
-                reference_type='binary_pair'
+                reference_type='binary_pair',
             )
             
             # Update pair status

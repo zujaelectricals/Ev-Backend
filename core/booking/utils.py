@@ -1115,6 +1115,20 @@ def process_active_buyer_bonus(user, booking):
             )
             return False
         
+        # Do not apply bonus when remaining balance is already 0 (e.g. user paid full amount upfront)
+        remaining_before_bonus = (
+            Decimal(str(booking.total_amount))
+            - Decimal(str(booking.total_paid))
+            - Decimal(str(booking.bonus_applied))
+            - Decimal(str(booking.deductions_applied))
+        )
+        if remaining_before_bonus <= 0:
+            logger.info(
+                f"Active buyer bonus skipped for user {user.username}: "
+                f"remaining balance is {remaining_before_bonus} (e.g. full amount already paid)."
+            )
+            return False
+        
         # Apply bonus: debit ₹5000 from remaining_balance (NOT added to total_paid)
         bonus_amount = Decimal('5000.00')
 

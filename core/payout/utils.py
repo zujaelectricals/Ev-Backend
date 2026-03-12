@@ -336,6 +336,59 @@ def process_payout(payout):
         return payout
 
 
+def process_payout_manual(payout):
+    """
+    Process payout request for manual/offline transfer - deducts from wallet and sets
+    status to 'processing' without calling RazorpayX or any payment gateway.
+
+    Use when admin will transfer the amount to the user's account offline (e.g. NEFT/IMPS
+    from bank) and then mark the payout completed via POST /api/payout/{id}/complete/
+    with optional transaction_id (e.g. UTR/reference) and notes.
+
+    This function:
+    1. Calculates TDS and net amount
+    2. Handles EMI auto-fill if enabled
+    3. Deducts amount from user's wallet
+    4. Sets status to 'processing' and records processed_at timestamp
+
+    Args:
+        payout: Payout instance with status='pending'
+
+    Returns:
+        payout: Updated Payout instance with status='processing'
+
+    Raises:
+        ValueError: If payout status is not 'pending'
+        Exception: If wallet deduction fails
+    """
+    if payout.status != 'pending':
+        raise ValueError(f"Cannot process payout with status '{payout.status}'. Expected 'pending'.")
+
+    with transaction.atomic():
+        payout.calculate_tds()
+
+        if payout.emi_auto_filled:
+            emi_used, remaining = auto_fill_emi_from_payout(payout.user, payout.requested_amount)
+            payout.emi_amount = emi_used
+            payout.net_amount = remaining
+
+        deduct_wallet_balance(
+            user=payout.user,
+            amount=float(payout.requested_amount),
+            transaction_type='PAYOUT',
+            description=f"Payout request #{payout.id} (manual)",
+            reference_id=payout.id,
+            reference_type='payout'
+        )
+
+        payout.status = 'processing'
+        payout.processed_at = timezone.now()
+        payout.save()
+
+    logger.info(f"Manual payout approved for Payout {payout.id}, user={payout.user_id}. Admin to transfer offline then complete via /complete/.")
+    return payout
+
+
 def complete_payout(payout, transaction_id=None, notes=None):
     """
     Mark payout as completed - called after payment gateway confirms successful transfer

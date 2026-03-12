@@ -51,9 +51,19 @@ if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
     echo 'Starting Django Web (Gunicorn)'; \
     python manage.py migrate --noinput; \
     python manage.py collectstatic --noinput; \
+    if [ \"$RUN_RECOMPUTE_BINARY_ACTIVATION\" = \"dry-run\" ] || [ \"$RUN_RECOMPUTE_BINARY_ACTIVATION\" = \"run\" ]; then \
+        echo \"Running recompute_binary_activation_status...\"; \
+        python manage.py recompute_binary_activation_status $([ \"$RUN_RECOMPUTE_BINARY_ACTIVATION\" = \"dry-run\" ] && echo --dry-run) || true; \
+        echo \"Recompute binary activation finished. Remove RUN_RECOMPUTE_BINARY_ACTIVATION after this deploy.\"; \
+    fi; \
+    if [ \"$RUN_ERASE_WALLET_HISTORY\" = \"dry-run\" ] || [ \"$RUN_ERASE_WALLET_HISTORY\" = \"confirm\" ]; then \
+        echo \"Running erase_wallet_transaction_history...\"; \
+        python manage.py erase_wallet_transaction_history $([ \"$RUN_ERASE_WALLET_HISTORY\" = \"dry-run\" ] && echo --dry-run || echo --confirm) || true; \
+        echo \"Erase wallet history finished. Remove RUN_ERASE_WALLET_HISTORY after this deploy.\"; \
+    fi; \
     gunicorn ev_backend.wsgi:application \
         --bind 0.0.0.0:8000 \
-        --workers 3 \
+        --workers 1 \
         --timeout 120; \
 elif [ \"$SERVICE_ROLE\" = \"celery\" ]; then \
     echo 'Starting Celery Worker' && \

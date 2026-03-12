@@ -39,41 +39,82 @@ class WalletTransactionSerializer(serializers.ModelSerializer):
         # For TDS_DEDUCTION transactions, the amount itself is the TDS (negative value)
         if obj.transaction_type == 'TDS_DEDUCTION':
             return str(abs(obj.amount))
-        
-        # For commission transactions, try to extract TDS from description
-        # Format examples:
-        # "User commission for user@email.com (₹1000.00 - ₹200.0000 TDS = ₹800.0000)"
-        # "Binary commission initial bonus (₹2000.00 - TDS ₹400.0000 = ₹1600.0000)"
-        if obj.transaction_type in ['DIRECT_USER_COMMISSION', 'BINARY_PAIR_COMMISSION', 'BINARY_INITIAL_BONUS']:
-            if obj.description:
-                # Try to extract TDS from description using regex
-                # Pattern 1: "₹200.0000 TDS" or "TDS ₹400.0000"
-                tds_patterns = [
-                    r'TDS\s*₹([\d,]+\.?\d*)',  # "TDS ₹400.0000"
-                    r'₹([\d,]+\.?\d*)\s*TDS',  # "₹200.0000 TDS"
-                ]
-                
-                for pattern in tds_patterns:
-                    match = re.search(pattern, obj.description)
-                    if match:
-                        tds_str = match.group(1).replace(',', '')
-                        try:
-                            return str(Decimal(tds_str))
-                        except (ValueError, TypeError):
-                            pass
-                
-                # Pattern 2: Extract from "₹1000.00 - ₹200.0000 TDS = ₹800.0000"
-                # This pattern looks for the subtraction format
-                subtraction_pattern = r'₹([\d,]+\.?\d*)\s*-\s*₹([\d,]+\.?\d*)\s*TDS'
-                match = re.search(subtraction_pattern, obj.description)
+
+        def _parse_tds_from_description(description):
+            """Try to extract TDS from description text; returns Decimal or None."""
+            if not description:
+                return None
+            tds_patterns = [
+                r'TDS\s*₹([\d,]+\.?\d*)',
+                r'₹([\d,]+\.?\d*)\s*TDS',
+            ]
+            for pattern in tds_patterns:
+                match = re.search(pattern, description)
                 if match:
-                    tds_str = match.group(2).replace(',', '')
+                    tds_str = match.group(1).replace(',', '')
                     try:
-                        return str(Decimal(tds_str))
+                        return Decimal(tds_str)
                     except (ValueError, TypeError):
                         pass
-        
-        # For other transaction types, no TDS
+            subtraction_pattern = r'₹([\d,]+\.?\d*)\s*-\s*₹([\d,]+\.?\d*)\s*TDS'
+            match = re.search(subtraction_pattern, description)
+            if match:
+                tds_str = match.group(2).replace(',', '')
+                try:
+                    return Decimal(tds_str)
+                except (ValueError, TypeError):
+                    pass
+            return None
+
+        # For commission transactions: try description first, then related TDS_DEDUCTION or derived value
+        if obj.transaction_type in ['DIRECT_USER_COMMISSION', 'BINARY_PAIR_COMMISSION', 'BINARY_INITIAL_BONUS']:
+            from django.db.models import Sum
+
+            tds_from_desc = _parse_tds_from_description(obj.description or '')
+            if tds_from_desc is not None and tds_from_desc >= 0:
+                return str(tds_from_desc)
+
+            # BINARY_PAIR_COMMISSION: look up related TDS_DEDUCTION or derive from BinaryPair
+            if obj.transaction_type == 'BINARY_PAIR_COMMISSION' and obj.reference_id and obj.reference_type == 'binary_pair':
+                related_tds = WalletTransaction.objects.filter(
+                    user=obj.user,
+                    transaction_type='TDS_DEDUCTION',
+                    reference_id=obj.reference_id,
+                    reference_type='binary_pair'
+                ).aggregate(total=Sum('amount'))
+                total = related_tds.get('total')
+                if total is not None and total != 0:
+                    return str(abs(total))
+                # Derive TDS from BinaryPair: pair_amount - earning_amount - extra_deduction_applied
+                try:
+                    from core.binary.models import BinaryPair
+                    pair = BinaryPair.objects.filter(id=obj.reference_id).first()
+                    if pair and pair.pair_amount is not None and pair.earning_amount is not None:
+                        extra = getattr(pair, 'extra_deduction_applied', None) or Decimal('0')
+                        tds = Decimal(str(pair.pair_amount)) - Decimal(str(pair.earning_amount)) - Decimal(str(extra))
+                        if tds > 0:
+                            return str(tds)
+                except Exception:
+                    pass
+                return "0.00"
+
+            # DIRECT_USER_COMMISSION: look up related TDS_DEDUCTION (reference_type='user', reference_id=referred user id)
+            if obj.transaction_type == 'DIRECT_USER_COMMISSION' and obj.reference_id is not None and obj.reference_type == 'user':
+                related_tds = WalletTransaction.objects.filter(
+                    user=obj.user,
+                    transaction_type='TDS_DEDUCTION',
+                    reference_id=obj.reference_id,
+                    reference_type='user'
+                ).aggregate(total=Sum('amount'))
+                total = related_tds.get('total')
+                if total is not None and total != 0:
+                    return str(abs(total))
+                return "0.00"
+
+            # BINARY_INITIAL_BONUS: only description parsing (no reference-based TDS_DEDUCTION in codebase)
+            if obj.transaction_type == 'BINARY_INITIAL_BONUS':
+                return "0.00"
+
         return "0.00"
 
 

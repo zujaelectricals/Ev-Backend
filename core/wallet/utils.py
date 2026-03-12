@@ -1,8 +1,37 @@
 from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Sum
 from .models import Wallet, WalletTransaction
 from core.users.models import User
+
+
+COMMISSION_TYPES_COUNTED_FOR_NON_ACTIVE_CAP = [
+    'DIRECT_USER_COMMISSION',
+    'BINARY_PAIR_COMMISSION',
+    'BINARY_INITIAL_BONUS',
+]
+
+
+def get_non_active_commission_cap_remaining(user):
+    """
+    For a non-Active Buyer, return how much commission can still be credited
+    before hitting max_commission_before_active_buyer_amount.
+    Returns None if user is Active Buyer (no cap). Otherwise returns Decimal
+    (remaining amount >= 0).
+    """
+    if user.is_active_buyer:
+        return None
+    from core.settings.models import PlatformSettings
+    platform_settings = PlatformSettings.get_settings()
+    cap = Decimal(str(platform_settings.max_commission_before_active_buyer_amount))
+    total = WalletTransaction.objects.filter(
+        user=user,
+        transaction_type__in=COMMISSION_TYPES_COUNTED_FOR_NON_ACTIVE_CAP,
+        credited_while_non_active_buyer=True,
+    ).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    remaining = cap - total
+    return max(Decimal('0'), remaining)
 
 
 def get_or_create_wallet(user):
@@ -28,34 +57,6 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
                 logger = logging.getLogger(__name__)
                 logger.warning(
                     f"Attempted to credit {transaction_type} to non-distributor user {user.username}. "
-                    f"Amount: {amount}. Transaction blocked."
-                )
-                return wallet  # Return wallet without crediting
-        
-        # Business Rule: Non-Active Buyer distributors can only earn commission for first N binary pairs (configurable)
-        # This check only applies to BINARY_PAIR_COMMISSION (not DIRECT_USER_COMMISSION)
-        # 
-        # WARNING: This check has an off-by-one bug - it counts pairs with status 'matched' OR 'processed',
-        # which includes the current pair being processed, causing the Nth pair to be incorrectly blocked.
-        # 
-        # FIXED: The pair_matched Celery task now bypasses this function and uses pair_number_after_activation
-        # directly. This function should NOT be called directly for BINARY_PAIR_COMMISSION without first
-        # checking pair_number_after_activation.
-        if transaction_type == 'BINARY_PAIR_COMMISSION' and user.is_distributor and not user.is_active_buyer:
-            from core.binary.utils import get_binary_pairs_after_activation_count
-            from core.settings.models import PlatformSettings
-            paid_pairs_count = get_binary_pairs_after_activation_count(user)
-            platform_settings = PlatformSettings.get_settings()
-            max_earnings_before_active_buyer = platform_settings.max_earnings_before_active_buyer
-            
-            # If (max_earnings_before_active_buyer+1)th+ pair and not Active Buyer, block the commission
-            # NOTE: This check is buggy - see warning above. Use pair_number_after_activation instead.
-            if paid_pairs_count >= max_earnings_before_active_buyer:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(
-                    f"Binary pair commission blocked for non-Active Buyer distributor {user.username}. "
-                    f"Already earned {paid_pairs_count} pairs. Commission will resume when user becomes Active Buyer. "
                     f"Amount: {amount}. Transaction blocked."
                 )
                 return wallet  # Return wallet without crediting
@@ -123,8 +124,21 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
                         # Active Buyer gets full amount
                         final_amount = Decimal(str(amount))
             elif transaction_type in ['BINARY_PAIR_COMMISSION', 'DIRECT_USER_COMMISSION', 'BINARY_INITIAL_BONUS']:
-                # New commission types: credit full amount (TDS already handled if applicable)
-                final_amount = Decimal(str(amount))
+                # New commission types: apply non-Active Buyer amount cap (₹10,000 total)
+                requested = Decimal(str(amount))
+                if not user.is_active_buyer:
+                    remaining = get_non_active_commission_cap_remaining(user)
+                    if remaining is not None and remaining <= 0:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.info(
+                            f"Commission cap reached for non-Active Buyer {user.username}. "
+                            f"{transaction_type} amount {requested} not credited."
+                        )
+                        return wallet
+                    final_amount = min(requested, remaining)
+                else:
+                    final_amount = requested
             else:
                 # For other transaction types, credit full amount
                 final_amount = Decimal(str(amount))
@@ -141,6 +155,13 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
         wallet.save()
         balance_after = wallet.balance
         
+        # Mark commission as credited while non-active for cap tracking
+        credited_while_non_active = (
+            transaction_type in COMMISSION_TYPES_COUNTED_FOR_NON_ACTIVE_CAP
+            and not user.is_active_buyer
+            and final_amount > 0
+        )
+        
         # Create transaction record
         WalletTransaction.objects.create(
             user=user,
@@ -151,7 +172,8 @@ def add_wallet_balance(user, amount, transaction_type, description='', reference
             balance_after=balance_after,
             description=description,
             reference_id=reference_id,
-            reference_type=reference_type
+            reference_type=reference_type,
+            credited_while_non_active_buyer=credited_while_non_active,
         )
         
         return wallet

@@ -12,7 +12,7 @@ import json
 import logging
 from .models import Payout, PayoutTransaction, PayoutWebhookLog
 from .serializers import PayoutSerializer, PayoutTransactionSerializer
-from .utils import process_payout, complete_payout, auto_fill_emi_from_payout
+from .utils import process_payout, process_payout_manual, complete_payout, auto_fill_emi_from_payout
 from .utils.signature import verify_payout_webhook_signature
 from .tasks import process_payout_success, process_payout_failure
 from core.wallet.utils import get_or_create_wallet
@@ -375,21 +375,77 @@ class PayoutViewSet(viewsets.ModelViewSet):
                 {'error': f'Failed to process payout: {str(e)}'}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-    
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def approve_manual(self, request, pk=None):
+        """
+        Approve payout for manual/offline transfer (admin only). No Razorpay/gateway call.
+
+        Use when admin will transfer the amount to the user's account offline (e.g. NEFT/IMPS)
+        and then mark the payout completed via POST /api/payout/{id}/complete/ with optional
+        transaction_id (e.g. UTR/reference) and notes.
+
+        This endpoint:
+        1. Validates payout is in 'pending' status
+        2. Calculates TDS and net amount (if not already)
+        3. Handles EMI auto-fill if enabled
+        4. Deducts requested_amount from user's wallet
+        5. Sets status to 'processing' and records processed_at timestamp
+
+        After this, admin performs the bank transfer offline, then calls complete with
+        optional transaction_id (e.g. UTR) and notes.
+        """
+        if not (request.user.is_superuser or request.user.role == 'admin'):
+            return Response(
+                {'error': 'Permission denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        payout = self.get_object()
+
+        if payout.status != 'pending':
+            return Response(
+                {'error': f'Payout cannot be approved for manual transfer. Current status: {payout.status}. Expected: pending'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            process_payout_manual(payout)
+
+            notes = request.data.get('notes', '')
+            if notes:
+                payout.notes = notes
+                payout.save(update_fields=['notes'])
+
+            serializer = self.get_serializer(payout)
+            return Response({
+                'message': 'Payout approved for manual transfer. Amount deducted from wallet. Complete the payout via POST /api/payout/{id}/complete/ after transferring offline (optional: transaction_id, notes).',
+                'payout': serializer.data
+            }, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to approve manual payout: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def complete(self, request, pk=None):
         """
-        Mark payout as completed (admin only)
-        
-        This endpoint should be called:
-        - Manually by admin after verifying bank transfer was successful
-        - Automatically by payment gateway webhook when transfer succeeds (future)
-        - After synchronous payment gateway API returns success (future)
-        
+        Mark payout as completed (admin only).
+
+        Call after transfer is done (RazorpayX or manual/offline). For manual payouts:
+        use after approve_manual and offline transfer, with optional transaction_id
+        (e.g. UTR/NEFT reference) and notes.
+
         Request Body:
         {
-            "transaction_id": "TXN123456789",  // Optional: Transaction ID from payment gateway
-            "notes": "Payment confirmed via bank statement"  // Optional: Additional notes
+            "transaction_id": "TXN123456789",  // Optional: Gateway ID or UTR/reference for offline
+            "notes": "Payment confirmed via bank statement"  // Optional
         }
         """
         if not (request.user.is_superuser or request.user.role == 'admin'):

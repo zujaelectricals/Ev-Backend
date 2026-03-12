@@ -2,54 +2,56 @@
 
 ## Overview
 
-The system implements a two-phase commission structure:
-1. **Direct User Commission (Referral Bonus)**: ₹1000 per user before activation
-2. **Binary Pair Commission**: ₹2000 per pair after activation
+The system implements commission structure with two ongoing components:
+1. **Direct User Commission (Referral Bonus)**: ₹1000 per direct referral (paid to code owner); continues even after binary activation
+2. **Binary Pair Commission**: ₹2000 per pair after activation (first pair no commission, second onwards credited)
+
+After binary activates, **both** direct referral bonus and binary pair commission are credited when applicable.
 
 ---
 
-## Phase 1: Direct User Commission (Before Activation)
+## Phase 1: Direct User Commission (Referral Bonus)
 
 ### When It Triggers
-- When a new user is added to the binary tree
-- **Only if** the new user has completed at least one successful payment
-- **Only for ancestors** who have **less than 3 total descendants**
+- When a new user is added to the binary tree and has activation payment
+- Paid to the **code owner** (user whose referral code the new user used)
+- New user must be in the code owner's tree
+- **Does not stop** when binary commission activates; continues for every direct referral
 
 ### Commission Details
 - **Amount**: ₹1000 (configurable via `direct_user_commission_amount`)
 - **TDS**: 20% (₹200) calculated and reduces net amount, but **NOT deducted from booking balance**
 - **Net Amount**: ₹800 credited to wallet
-- **Recipients**: ALL ancestors in the referral chain (not just direct parent)
+- **Recipients**: Code owner (user whose referral code was used), once per direct referral
 
 ### Flow Diagram
 
 ```
-New User Added → Has Payment? → YES → Process Commission for All Ancestors
+New User Added → Has Payment? → YES → Resolve Code Owner (referral code used)
                                       ↓
-                    For Each Ancestor:
-                    ├─ Binary Commission Activated? → YES → Skip (No Commission)
-                    ├─ Total Descendants >= 3? → YES → Skip (No Commission)
-                    └─ Total Descendants < 3? → YES → Pay Commission
+                    Code owner in tree? → YES → Already paid for this user? → NO
+                                                      ↓
+                                                      Pay Commission
                                                       ├─ Calculate TDS (20%)
                                                       └─ Credit ₹800 to Wallet (TDS not deducted from booking)
+                                      ↓
+                    If active direct referrals >= activation_count → Activate Binary (if not already)
 ```
 
 ### Example Scenario
 
 **User A's Tree:**
-- User B added (left) → A gets ₹800
-- User C added (right) → A gets ₹800
-- User D added (left child of B) → A gets ₹800
-  - **Total descendants = 3** → **Binary Commission Activates** ✅
-  - `binary_commission_activated = True`
-  - `activation_timestamp = D.created_at`
+- User B added (left, used A's code) → A gets ₹800 direct commission
+- User C added (right, used A's code) → A gets ₹800 direct commission → **Binary activates** ✅
+- User D added (used A's code) → A gets ₹800 direct commission (continues), and D counts for pairing
+- Further direct referrals → A continues to get ₹800 per direct referral; binary pair commission also credited when pairs form
 
 ### Key Rules
-1. ✅ Commission paid to **all ancestors** (entire referral chain)
-2. ✅ Commission **stops immediately** when ancestor reaches 3 descendants
+1. ✅ Commission paid to **code owner** (one per direct referral with activation payment)
+2. ✅ Direct referral commission **continues** after binary activation; does not stop
 3. ✅ Uses **row locking** (`select_for_update()`) to prevent race conditions
-4. ✅ Multiple safety checks to prevent duplicate payments
-5. ✅ Commission only paid if user has successful payment
+4. ✅ Duplicate payment prevented per reference_id (one commission per referred user)
+5. ✅ Commission only paid if new user has activation payment
 
 ---
 
@@ -66,21 +68,14 @@ New User Added → Has Payment? → YES → Process Commission for All Ancestors
 #### Strict Pairing Logic
 - **Pair = 1 left-leg member + 1 right-leg member**
 - **Two members on same leg (LL or RR) → NOT a pair**
-- **Pre-activation members excluded**: Eligibility depends on activation_count (even/odd logic)
+- **Pair calculation begins when binary commission activates.** All tree descendants with activation payment are eligible for pairing, **including** the first N direct referrals used for binary activation.
 
 #### Member Eligibility
 
-The eligibility depends on whether `binary_commission_activation_count` is **even** or **odd**:
-
-**Even Activation Count (2, 4, 6...):**
-- ❌ **Excluded**: Member that triggered activation (created at activation timestamp)
-- ✅ **Included**: All members created strictly after activation
-- ❌ **Excluded**: Members created before activation
-
-**Odd Activation Count (3, 5, 7...):**
-- ✅ **Included**: Member that triggered activation (created at activation timestamp)
-- ✅ **Included**: All members created after activation
-- ❌ **Excluded**: Members created before activation
+- ✅ **Included**: All tree descendants (left/right) with activation payment, not yet matched in a pair
+- ✅ **Included**: The first N direct referrals used for binary activation (they participate in pair matching)
+- **First pair after activation**: Pair is created but **no commission** is credited
+- **Second pair onwards**: Commission is credited (subject to TDS, extra deduction, active buyer rules, daily limit)
 
 ### Commission Calculation
 
@@ -156,23 +151,22 @@ Pair 6+ (Non-Active Buyer):
 ```
 Manual Pair Check API → User is Distributor? → YES → Binary Activated? → YES
                                                       ↓
-                    Get Unmatched Users (Post-Activation Only)
-                    ├─ Left Side: [D, F, H...] (excludes B)
-                    └─ Right Side: [E, G, I...] (excludes C)
+                    Get Unmatched Users (includes activation members)
+                    ├─ Left Side: [B, D, F, H...] (all eligible, not matched)
+                    └─ Right Side: [C, E, G, I...] (all eligible, not matched)
                                                       ↓
                     Both Sides Have Unmatched? → YES → Create Pair
                                                       ↓
                     Calculate Commission:
                     ├─ Pair Number (1st, 2nd, 3rd...)
-                    ├─ TDS (20% = ₹400)
-                    ├─ Extra Deduction (20% = ₹400 for 6th+)
-                    ├─ Active Buyer Check (6th+ pairs)
+                    ├─ First pair: Commission BLOCKED (pair created, no payout)
+                    ├─ Second pair onwards: TDS (20% = ₹400), Extra Deduction (6th+), Active Buyer Check
                     └─ Daily Limit Check (max 10 pairs/day)
                                                       ↓
                     Create BinaryPair Record:
                     ├─ Status: 'matched'
-                    ├─ Earning Amount: Net (after deductions)
-                    └─ Commission Blocked: True/False
+                    ├─ Earning Amount: Net (after deductions), or 0 for pair #1
+                    └─ Commission Blocked: True for pair #1, else per rules
                                                       ↓
                     Deduct TDS & Extra from Booking Balance
                                                       ↓
@@ -183,21 +177,19 @@ Manual Pair Check API → User is Distributor? → YES → Binary Activated? →
 
 ### Example Scenario
 
-**User A's Tree After Activation:**
+**User A's Tree After Activation (activation_count = 2):**
 ```
 A (Distributor, Activated)
-├─ B (left, T1) - EXCLUDED from pairing
-├─ C (right, T2) - EXCLUDED from pairing
+├─ B (left, T1) - INCLUDED in pairing ✅
+├─ C (right, T2) - INCLUDED in pairing ✅
 ├─ D (left child of B, T3) - INCLUDED ✅
 └─ E (right, T4) - INCLUDED ✅
 
 Pair Check:
-├─ Left post-activation: [D]
-├─ Right post-activation: [E]
-├─ Pair Created: D + E
-├─ Gross: ₹2000
-├─ TDS: ₹400 (deducted from booking)
-├─ Net: ₹1600 (credited to wallet)
+├─ Left eligible: [B, D] (all with activation payment, not matched)
+├─ Right eligible: [C, E]
+├─ Pair 1: B + C → Commission BLOCKED (first pair after activation)
+├─ Pair 2: D + E → Gross: ₹2000, TDS: ₹400, Net: ₹1600 (credited to wallet)
 └─ Status: Processed ✅
 ```
 
