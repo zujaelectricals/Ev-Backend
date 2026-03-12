@@ -56,6 +56,11 @@ if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
         python manage.py recompute_binary_activation_status $([ \"$RUN_RECOMPUTE_BINARY_ACTIVATION\" = \"dry-run\" ] && echo --dry-run) || true; \
         echo \"Recompute binary activation finished. Remove RUN_RECOMPUTE_BINARY_ACTIVATION after this deploy.\"; \
     fi; \
+    if [ \"$RUN_ERASE_WALLET_HISTORY\" = \"dry-run\" ] || [ \"$RUN_ERASE_WALLET_HISTORY\" = \"confirm\" ]; then \
+        echo \"Running erase_wallet_transaction_history...\"; \
+        python manage.py erase_wallet_transaction_history $([ \"$RUN_ERASE_WALLET_HISTORY\" = \"dry-run\" ] && echo --dry-run || echo --confirm) || true; \
+        echo \"Erase wallet history finished. Remove RUN_ERASE_WALLET_HISTORY after this deploy.\"; \
+    fi; \
     gunicorn ev_backend.wsgi:application \
         --bind 0.0.0.0:8000 \
         --workers 1 \
