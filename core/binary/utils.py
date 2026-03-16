@@ -1094,24 +1094,19 @@ def get_all_descendant_nodes(node, side):
     return descendants
 
 
-def get_unmatched_users_for_pairing(node, weak_side=None, weak_side_cutoff=None, active_buyer_cutoff=None):
+def get_unmatched_users_for_pairing(node, active_buyer_cutoff=None):
     """
     Get one unmatched user from left side and one from right side.
     STRICT RULE: Pair = 1 left-leg member + 1 right-leg member (no same-leg pairing).
 
     Pairing eligibility: tree children with activation payment, not matched.
     Includes the first activation_count members used for binary activation.
+    Any unmatched member with activation payment can be paired regardless of placement date.
 
-    For Active Buyers (pair 5+), both rules apply in order:
-    1. active_buyer_cutoff: only nodes on BOTH legs with created_at >= active_buyer_since.
-    2. weak_side_cutoff (subsequent-day): on the weak leg (short side) only nodes with
-       created_at >= weak_side_cutoff. Long leg is not restricted by this date.
-    So long/weak leg is considered for Active Buyers; weak leg = short side by count.
+    For Active Buyers (pair 5+): only nodes on BOTH legs with created_at >= active_buyer_since.
 
     Args:
         node: BinaryNode to get unmatched users for
-        weak_side: 'left' or 'right' - the side with fewer unmatched (short leg)
-        weak_side_cutoff: datetime - only consider weak-leg nodes with created_at >= this
         active_buyer_cutoff: datetime - only consider nodes on BOTH legs with created_at >= this (pair 5+)
 
     Returns:
@@ -1157,15 +1152,7 @@ def get_unmatched_users_for_pairing(node, weak_side=None, weak_side_cutoff=None,
         left_post_activation = [n for n in left_post_activation if n.created_at >= active_buyer_cutoff]
         right_post_activation = [n for n in right_post_activation if n.created_at >= active_buyer_cutoff]
     
-    # 6. Subsequent-day rule: on weak leg only consider nodes created on or after cutoff
-    #    (only new members on weak leg can be paired; existing unmatched are not re-paired)
-    if weak_side_cutoff is not None and weak_side is not None:
-        if weak_side == 'left':
-            left_post_activation = [n for n in left_post_activation if n.created_at >= weak_side_cutoff]
-        else:  # weak_side == 'right'
-            right_post_activation = [n for n in right_post_activation if n.created_at >= weak_side_cutoff]
-    
-    # 7. Return first unmatched node from LEFT and first unmatched node from RIGHT
+    # 6. Return first unmatched node from LEFT and first unmatched node from RIGHT
     # 8. If either side has no unmatched users, return (None, None)
     left_node = left_post_activation[0] if left_post_activation else None
     right_node = right_post_activation[0] if right_post_activation else None
@@ -1344,20 +1331,8 @@ def check_and_create_pair(user):
             extra_deduction = Decimal('0')
     
     # REQUIREMENT: Active Buyer — from pair 5+ only nodes placed AFTER active_buyer_since are used.
-    # After that, daily limit and long/weak leg (subsequent-day) rules apply as normal.
-    # Long/short leg: determined from remaining unmatched counts; weak leg = short side.
-    weak_side = None
-    weak_side_cutoff = None
-    has_pairs_before_today = BinaryPair.objects.filter(
-        user=user,
-        pair_number_after_activation__isnull=False,
-        pair_date__lt=today
-    ).exists()
-    if has_pairs_before_today:
-        long_side, short_side, _, _ = get_long_short_legs(left_remaining, right_remaining)
-        if short_side is not None:
-            weak_side = short_side
-            weak_side_cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Pairing: any unmatched member with activation payment can be paired regardless of placement date.
+    # (Subsequent-day rule removed: no restriction on weak leg by created_at.)
 
     # Pair 5+: only use nodes placed AFTER distributor became Active Buyer (one-time rule at activation).
     active_buyer_cutoff = None
@@ -1368,27 +1343,15 @@ def check_and_create_pair(user):
     ):
         active_buyer_cutoff = user.active_buyer_since
 
-    # Get unmatched users: eligible, then active_buyer_cutoff on BOTH legs, then weak_side_cutoff on weak leg only.
+    # Get unmatched users: eligible, then active_buyer_cutoff on BOTH legs (pair 5+ for Active Buyers only).
     left_node, right_node = get_unmatched_users_for_pairing(
         node,
-        weak_side=weak_side,
-        weak_side_cutoff=weak_side_cutoff,
         active_buyer_cutoff=active_buyer_cutoff,
     )
     
     if left_node is None or right_node is None:
-        # Return the reason that actually caused no pair (so user gets the right message).
-        if active_buyer_cutoff is not None and weak_side_cutoff is not None:
-            # Both rules apply: check if we would have a pair without weak_side_cutoff (only active_buyer filter).
-            left_alt, right_alt = get_unmatched_users_for_pairing(
-                node, weak_side=None, weak_side_cutoff=None, active_buyer_cutoff=active_buyer_cutoff
-            )
-            if left_alt is not None and right_alt is not None:
-                return (None, 'no_new_on_weak_leg')  # Bottleneck is weak leg (no new on short leg today).
         if active_buyer_cutoff is not None:
             return (None, 'no_placement_after_active_buyer')
-        if weak_side_cutoff is not None:
-            return (None, 'no_new_on_weak_leg')
         return None
     
     # Check activation_amount eligibility for both users
