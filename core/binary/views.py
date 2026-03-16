@@ -1514,10 +1514,6 @@ class BinaryPairViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'message': "You have reached today's pair limit. Try again tomorrow."
             }, status=status.HTTP_200_OK)
-        if reason == 'no_new_on_weak_leg':
-            return Response({
-                'message': "No more pairs available today. Add more members on the short leg to create more pairs."
-            }, status=status.HTTP_200_OK)
         if reason == 'no_placement_after_active_buyer':
             return Response({
                 'message': "Only members placed after you became an Active Buyer can be paired. Add new members on both sides to create more pairs."
