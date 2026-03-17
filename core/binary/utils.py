@@ -310,6 +310,92 @@ def has_activation_payment(user, booking=None):
         return actual_payments_total >= activation_amount
 
 
+def get_activation_payment_date(user):
+    """
+    Return the datetime when a user's cumulative completed payments first reached
+    the activation_amount threshold. This is the date the member 'became active'.
+
+    Uses completed_at (when the payment was confirmed) with fallback to payment_date
+    (when the record was created) if completed_at is not set.
+
+    Walks payments ordered by effective date ascending, accumulating the total until
+    the threshold is crossed, then returns that payment's effective date.
+
+    Returns:
+        datetime or None – the effective date of the payment that crossed the threshold,
+        or None if the user has not reached the activation_amount.
+    """
+    from core.booking.models import Payment
+    from core.settings.models import PlatformSettings
+    from decimal import Decimal
+
+    platform_settings = PlatformSettings.get_settings()
+    activation_amount = Decimal(str(platform_settings.activation_amount))
+
+    payments = Payment.objects.filter(
+        booking__user=user,
+        booking__status__in=['active', 'completed'],
+        status='completed'
+    ).order_by('payment_date').values('amount', 'payment_date', 'completed_at')
+
+    if activation_amount <= 0:
+        # Any payment qualifies – return the effective date of the earliest.
+        first = next(iter(payments), None)
+        if first:
+            return first['completed_at'] or first['payment_date']
+        return None
+
+    running_total = Decimal('0')
+    for payment in payments:
+        running_total += Decimal(str(payment['amount']))
+        if running_total >= activation_amount:
+            # Use completed_at (actual completion) if set, otherwise payment_date (creation).
+            return payment['completed_at'] or payment['payment_date']
+
+    return None
+
+
+def get_activation_payment_dates_bulk(user_ids):
+    """
+    Batch version of get_activation_payment_date for multiple users.
+    Returns a dict: {user_id: effective_activation_datetime or None}.
+
+    Fetches all relevant payments in a single query, then computes per-user
+    activation date in Python. Avoids N+1 queries when filtering a list of nodes.
+    """
+    from core.booking.models import Payment
+    from core.settings.models import PlatformSettings
+    from decimal import Decimal
+
+    if not user_ids:
+        return {}
+
+    platform_settings = PlatformSettings.get_settings()
+    activation_amount = Decimal(str(platform_settings.activation_amount))
+
+    payments = Payment.objects.filter(
+        booking__user_id__in=user_ids,
+        booking__status__in=['active', 'completed'],
+        status='completed'
+    ).order_by('booking__user_id', 'payment_date').values(
+        'booking__user_id', 'amount', 'payment_date', 'completed_at'
+    )
+
+    # Group payments by user and accumulate until threshold is crossed.
+    result = {uid: None for uid in user_ids}
+    running = {}
+
+    for payment in payments:
+        uid = payment['booking__user_id']
+        if result[uid] is not None:
+            continue  # Already found activation date for this user.
+        running[uid] = running.get(uid, Decimal('0')) + Decimal(str(payment['amount']))
+        if activation_amount <= 0 or running[uid] >= activation_amount:
+            result[uid] = payment['completed_at'] or payment['payment_date']
+
+    return result
+
+
 def process_direct_user_commission(new_user):
     """
     Process referral bonus (DIRECT_USER_COMMISSION) when a user has activation payment.
@@ -960,7 +1046,7 @@ def get_remaining_unmatched_counts_for_display(node):
     """
     Remaining unmatched counts for API display (tree_structure / node_children).
     When the most recent day (before today) that had pairs hit the daily limit:
-    - Weak leg: reset each day — show only new members (placed today).
+    - Weak leg: reset each day — show only members who paid activation amount today.
     - Long leg: carry forward — show all pending unmatched (full count).
     Until then, natural counts (both sides full).
     """
@@ -999,6 +1085,10 @@ def get_remaining_unmatched_counts_for_display(node):
             matched_user_ids.add(pair.right_user.id)
     left_descendants = get_all_descendant_nodes(node, 'left')
     right_descendants = get_all_descendant_nodes(node, 'right')
+    long_side, short_side, _, _ = get_long_short_legs(left_remaining, right_remaining)
+    if short_side is None:
+        return (left_remaining, right_remaining)
+    # Only compute activation dates for the short leg (the long leg returns full count).
     left_unmatched = [
         n for n in left_descendants
         if n.user.id not in matched_user_ids and has_activation_payment(n.user)
@@ -1007,15 +1097,22 @@ def get_remaining_unmatched_counts_for_display(node):
         n for n in right_descendants
         if n.user.id not in matched_user_ids and has_activation_payment(n.user)
     ]
-    left_new = sum(1 for n in left_unmatched if n.created_at >= today_start)
-    right_new = sum(1 for n in right_unmatched if n.created_at >= today_start)
-    long_side, short_side, _, _ = get_long_short_legs(left_remaining, right_remaining)
-    if short_side is None:
-        return (left_remaining, right_remaining)
-    # Weak leg: new only (reset each day). Long leg: full count (carry forward).
     if short_side == 'left':
+        user_ids = [n.user.id for n in left_unmatched]
+        activation_dates = get_activation_payment_dates_bulk(user_ids)
+        left_new = sum(
+            1 for n in left_unmatched
+            if (activation_dates.get(n.user.id) or n.created_at) >= today_start
+        )
         return (left_new, right_remaining)
-    return (left_remaining, right_new)
+    else:
+        user_ids = [n.user.id for n in right_unmatched]
+        activation_dates = get_activation_payment_dates_bulk(user_ids)
+        right_new = sum(
+            1 for n in right_unmatched
+            if (activation_dates.get(n.user.id) or n.created_at) >= today_start
+        )
+        return (left_remaining, right_new)
 
 
 def get_long_short_legs(left_remaining, right_remaining):
@@ -1094,20 +1191,26 @@ def get_all_descendant_nodes(node, side):
     return descendants
 
 
-def get_unmatched_users_for_pairing(node, active_buyer_cutoff=None):
+def get_unmatched_users_for_pairing(node, weak_side=None, weak_side_cutoff=None, active_buyer_cutoff=None):
     """
     Get one unmatched user from left side and one from right side.
     STRICT RULE: Pair = 1 left-leg member + 1 right-leg member (no same-leg pairing).
 
     Pairing eligibility: tree children with activation payment, not matched.
     Includes the first activation_count members used for binary activation.
-    Any unmatched member with activation payment can be paired regardless of placement date.
 
-    For Active Buyers (pair 5+): only nodes on BOTH legs with created_at >= active_buyer_since.
+    Subsequent-day rule (short leg only):
+    - When user has pairs from a previous day, the short leg (fewer remaining) is restricted
+      to only members who paid their activation amount today (activation_payment_date >= weak_side_cutoff).
+    - The long leg (more remaining) has no date restriction.
+
+    For Active Buyers (pair 5+): only nodes on BOTH legs whose activation_payment_date >= active_buyer_since.
 
     Args:
         node: BinaryNode to get unmatched users for
-        active_buyer_cutoff: datetime - only consider nodes on BOTH legs with created_at >= this (pair 5+)
+        weak_side: 'left' or 'right' - the short leg (fewer remaining unmatched)
+        weak_side_cutoff: datetime - only consider short-leg nodes with activation_payment_date >= this
+        active_buyer_cutoff: datetime - only consider nodes on BOTH legs with activation_payment_date >= this (pair 5+)
 
     Returns:
         tuple: (left_node, right_node) or (None, None) if no pair possible
@@ -1147,16 +1250,49 @@ def get_unmatched_users_for_pairing(node, active_buyer_cutoff=None):
         and has_activation_payment(n.user)
     ]
     
-    # 5b. Active Buyer rule: for pair 5+, only nodes placed AFTER distributor became Active Buyer
+    # Batch-fetch activation payment dates for all nodes that need date filtering.
+    # Only fetch for legs that will actually be date-filtered (avoids unnecessary queries).
+    needs_date_filter = active_buyer_cutoff is not None or weak_side_cutoff is not None
+    activation_dates = {}
+    if needs_date_filter:
+        # Determine which users need date lookup:
+        # - active_buyer_cutoff: both legs need it.
+        # - weak_side_cutoff: only the short leg needs it.
+        nodes_needing_dates = []
+        if active_buyer_cutoff is not None:
+            nodes_needing_dates.extend(left_post_activation)
+            nodes_needing_dates.extend(right_post_activation)
+        elif weak_side_cutoff is not None:
+            if weak_side == 'left':
+                nodes_needing_dates.extend(left_post_activation)
+            else:
+                nodes_needing_dates.extend(right_post_activation)
+        user_ids = list({n.user.id for n in nodes_needing_dates})
+        activation_dates = get_activation_payment_dates_bulk(user_ids)
+
+    def effective_date(n):
+        """activation_payment_date for n.user; fallback to created_at if not found."""
+        return activation_dates.get(n.user.id) or n.created_at
+
+    # 5b. Active Buyer rule: for pair 5+, only nodes whose activation payment date is AFTER
+    #     the distributor became Active Buyer (paid their activation amount after active_buyer_since).
     if active_buyer_cutoff is not None:
-        left_post_activation = [n for n in left_post_activation if n.created_at >= active_buyer_cutoff]
-        right_post_activation = [n for n in right_post_activation if n.created_at >= active_buyer_cutoff]
-    
-    # 6. Return first unmatched node from LEFT and first unmatched node from RIGHT
+        left_post_activation = [n for n in left_post_activation if effective_date(n) >= active_buyer_cutoff]
+        right_post_activation = [n for n in right_post_activation if effective_date(n) >= active_buyer_cutoff]
+
+    # 6. Subsequent-day rule: SHORT LEG ONLY — only members who became active (paid activation amount)
+    #    today can be paired on the short leg. Long leg has no date restriction.
+    if weak_side_cutoff is not None and weak_side is not None:
+        if weak_side == 'left':
+            left_post_activation = [n for n in left_post_activation if effective_date(n) >= weak_side_cutoff]
+        else:  # weak_side == 'right'
+            right_post_activation = [n for n in right_post_activation if effective_date(n) >= weak_side_cutoff]
+
+    # 7. Return first unmatched node from LEFT and first unmatched node from RIGHT
     # 8. If either side has no unmatched users, return (None, None)
     left_node = left_post_activation[0] if left_post_activation else None
     right_node = right_post_activation[0] if right_post_activation else None
-    
+
     return (left_node, right_node)
 
 
@@ -1331,8 +1467,20 @@ def check_and_create_pair(user):
             extra_deduction = Decimal('0')
     
     # REQUIREMENT: Active Buyer — from pair 5+ only nodes placed AFTER active_buyer_since are used.
-    # Pairing: any unmatched member with activation payment can be paired regardless of placement date.
-    # (Subsequent-day rule removed: no restriction on weak leg by created_at.)
+    # Subsequent-day rule (SHORT LEG ONLY): when user has pairs from before today, the short leg
+    # (fewer remaining members) is restricted to members placed today. Long leg has no date restriction.
+    weak_side = None
+    weak_side_cutoff = None
+    has_pairs_before_today = BinaryPair.objects.filter(
+        user=user,
+        pair_number_after_activation__isnull=False,
+        pair_date__lt=today
+    ).exists()
+    if has_pairs_before_today:
+        long_side, short_side, _, _ = get_long_short_legs(left_remaining, right_remaining)
+        if short_side is not None:
+            weak_side = short_side
+            weak_side_cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Pair 5+: only use nodes placed AFTER distributor became Active Buyer (one-time rule at activation).
     active_buyer_cutoff = None
@@ -1343,15 +1491,30 @@ def check_and_create_pair(user):
     ):
         active_buyer_cutoff = user.active_buyer_since
 
-    # Get unmatched users: eligible, then active_buyer_cutoff on BOTH legs (pair 5+ for Active Buyers only).
+    # Get unmatched users:
+    # - active_buyer_cutoff on BOTH legs (pair 5+ for Active Buyers only)
+    # - weak_side_cutoff on SHORT LEG ONLY (subsequent-day rule)
     left_node, right_node = get_unmatched_users_for_pairing(
         node,
+        weak_side=weak_side,
+        weak_side_cutoff=weak_side_cutoff,
         active_buyer_cutoff=active_buyer_cutoff,
     )
-    
+
     if left_node is None or right_node is None:
+        # Determine the correct reason:
+        # If both active_buyer_cutoff and weak_side_cutoff apply, check which is the bottleneck.
+        if active_buyer_cutoff is not None and weak_side_cutoff is not None:
+            # Check if removing the weak_side_cutoff (keeping only active_buyer filter) would give a pair.
+            left_alt, right_alt = get_unmatched_users_for_pairing(
+                node, weak_side=None, weak_side_cutoff=None, active_buyer_cutoff=active_buyer_cutoff
+            )
+            if left_alt is not None and right_alt is not None:
+                return (None, 'no_new_on_weak_leg')  # Short leg has no new members today.
         if active_buyer_cutoff is not None:
             return (None, 'no_placement_after_active_buyer')
+        if weak_side_cutoff is not None:
+            return (None, 'no_new_on_weak_leg')
         return None
     
     # Check activation_amount eligibility for both users
