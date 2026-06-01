@@ -9,94 +9,122 @@ from core.settings.models import PlatformSettings
 
 def create_binary_node(user, parent=None, side=None):
     """
-    Create binary node for user
-    
-    Note: The UniqueConstraint on (parent, side) prevents duplicate nodes.
-    If a duplicate is attempted, IntegrityError will be raised.
+    Create or relocate a binary node for ``user``.
+
+    Behavior:
+    - Brand-new placement: the new node has no descendants, so every ancestor
+      simply gains +1 on the side the new node descended from. This is done in
+      O(depth) via :py:meth:`BinaryNode.apply_placement_delta` (one CTE plus a
+      pair of batched UPDATEs), instead of recounting every ancestor's entire
+      subtree on every placement (the latter was causing gunicorn worker
+      timeouts on ``/api/binary/nodes/place_user/``).
+    - Existing node being relocated to a different parent/side: the node may
+      carry a subtree, so a simple +1 is wrong. We fall back to a full recount
+      of the old and new parent chains via the (now CTE-backed and therefore
+      cheap) ``update_counts()`` path.
+
+    The UniqueConstraint on (parent, side) still prevents duplicate placements.
     """
-    # Check if node already exists for this user
     existing_node = BinaryNode.objects.filter(user=user).first()
+
     if existing_node:
-        # If node exists but parent/side is different, update it
-        if existing_node.parent != parent or existing_node.side != side:
-            existing_node.parent = parent
-            existing_node.side = side
-            existing_node.level = parent.level + 1 if parent else 0
-            existing_node.save(update_fields=['parent', 'side', 'level'])
-            node = existing_node
-        else:
-            # Node already exists with same parent/side
-            node = existing_node
-    else:
-        # Create new node
+        old_parent = existing_node.parent
+        relocated = (
+            existing_node.parent_id != (parent.id if parent else None)
+            or existing_node.side != side
+        )
+
+        if relocated:
+            with transaction.atomic():
+                existing_node.parent = parent
+                existing_node.side = side
+                existing_node.level = parent.level + 1 if parent else 0
+                existing_node.save(update_fields=['parent', 'side', 'level'])
+
+                if old_parent:
+                    old_parent.update_counts()
+                    old_parent.direct_children_count = BinaryNode.objects.filter(parent=old_parent).count()
+                    old_parent.save(update_fields=['direct_children_count'])
+                    _recompute_ancestor_counts(old_parent)
+                if parent:
+                    parent.update_counts()
+                    parent.direct_children_count = BinaryNode.objects.filter(parent=parent).count()
+                    parent.save(update_fields=['direct_children_count'])
+                    _recompute_ancestor_counts(parent)
+
+        return existing_node
+
+    with transaction.atomic():
         node = BinaryNode.objects.create(
             user=user,
             parent=parent,
             side=side,
             level=parent.level + 1 if parent else 0,
         )
-    
-    if parent:
-        parent.update_counts()
-        # Update direct_children_count for parent (only direct children, not all descendants)
-        parent.direct_children_count = BinaryNode.objects.filter(parent=parent).count()
-        parent.save(update_fields=['direct_children_count'])
-        
-        # Update counts for all ancestors recursively
-        # This ensures ancestor counts are accurate for activation checks
-        # Use efficient query to get all ancestor IDs, then update them in batch
-        from django.db import connection
-        
-        try:
-            with connection.cursor() as cursor:
-                # Get all ancestor IDs using recursive CTE
-                cursor.execute("""
-                    WITH RECURSIVE ancestors AS (
-                        SELECT id, parent_id, 0 as depth
-                        FROM binary_nodes WHERE id = %s
-                        UNION ALL
-                        SELECT bn.id, bn.parent_id, a.depth + 1
-                        FROM binary_nodes bn
-                        INNER JOIN ancestors a ON bn.id = a.parent_id
-                        WHERE a.depth < 100 AND a.parent_id IS NOT NULL
-                    )
-                    SELECT id FROM ancestors WHERE id != %s
-                """, [parent.id, parent.id])
-                
-                ancestor_ids = [row[0] for row in cursor.fetchall()]
-                
-                # Update counts for all ancestors in batch
-                for ancestor_id in ancestor_ids:
-                    try:
-                        ancestor = BinaryNode.objects.get(id=ancestor_id)
-                        ancestor.update_counts()
-                    except BinaryNode.DoesNotExist:
-                        continue
-        except Exception as e:
-            # Fallback to simple traversal with depth limit if CTE fails
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"CTE query failed in create_binary_node ancestor update, using fallback: {str(e)}")
-            
-            current = parent.parent
-            max_depth = 100
-            depth = 0
-            
-            while current and depth < max_depth:
-                try:
-                    current.update_counts()
-                    if current.parent_id:
-                        current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
-                    else:
-                        current = None
-                except BinaryNode.DoesNotExist:
-                    current = None
-                except Exception as e:
-                    logger.error(f"Error updating ancestor counts: {str(e)}")
-                    break
-                depth += 1
-    
+        if parent:
+            BinaryNode.apply_placement_delta(node.id, delta=+1)
+
     return node
+
+
+def _recompute_ancestor_counts(node):
+    """Force a fresh recount on every ancestor of ``node`` up to the root.
+
+    Used only when the delta is not simply +/- 1 (e.g. subtree moves). Each
+    ancestor's ``update_counts()`` now runs two recursive-CTE COUNTs, so the
+    full walk is O(depth) cheap SQL calls instead of the previous
+    O(depth x subtree-size) Python-level COUNT(*) storm.
+    """
+    from django.db import connection
+
+    if not node or not node.parent_id:
+        return
+
+    ancestor_ids = []
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH RECURSIVE ancestors AS (
+                    SELECT id, parent_id, 0 AS depth
+                    FROM binary_nodes WHERE id = %s
+                    UNION ALL
+                    SELECT bn.id, bn.parent_id, a.depth + 1
+                    FROM binary_nodes bn
+                    INNER JOIN ancestors a ON bn.id = a.parent_id
+                    WHERE a.depth < 100 AND a.parent_id IS NOT NULL
+                )
+                SELECT id FROM ancestors WHERE id != %s ORDER BY depth
+                """,
+                [node.parent_id, node.id],
+            )
+            ancestor_ids = [row[0] for row in cursor.fetchall()]
+    except Exception as exc:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"CTE query failed in _recompute_ancestor_counts, using fallback: {exc}"
+        )
+        current = node.parent
+        depth = 0
+        while current and depth < 100:
+            try:
+                current.update_counts()
+                if current.parent_id:
+                    current = BinaryNode.objects.select_related('parent').get(id=current.parent_id)
+                else:
+                    current = None
+            except BinaryNode.DoesNotExist:
+                current = None
+            depth += 1
+        return
+
+    for ancestor_id in ancestor_ids:
+        try:
+            ancestor = BinaryNode.objects.get(id=ancestor_id)
+            ancestor.update_counts()
+        except BinaryNode.DoesNotExist:
+            continue
 
 
 def get_all_ancestors(user_node):
@@ -1931,14 +1959,20 @@ def move_binary_node(node, new_parent, new_side):
         node.level = new_parent.level + 1 if new_parent else 0
         node.save()
         
-        # Update old parent's counts
+        # Update old parent's counts (and the chain above it)
         if old_parent:
             old_parent.update_counts()
-        
-        # Update new parent's counts
+            old_parent.direct_children_count = BinaryNode.objects.filter(parent=old_parent).count()
+            old_parent.save(update_fields=['direct_children_count'])
+            _recompute_ancestor_counts(old_parent)
+
+        # Update new parent's counts (and the chain above it)
         if new_parent:
             new_parent.update_counts()
-        
+            new_parent.direct_children_count = BinaryNode.objects.filter(parent=new_parent).count()
+            new_parent.save(update_fields=['direct_children_count'])
+            _recompute_ancestor_counts(new_parent)
+
         # Update levels of all descendants
         update_descendant_levels(node)
     

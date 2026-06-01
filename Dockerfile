@@ -61,6 +61,11 @@ if [ \"$SERVICE_ROLE\" = \"web\" ]; then \
         python manage.py erase_wallet_transaction_history $([ \"$RUN_ERASE_WALLET_HISTORY\" = \"dry-run\" ] && echo --dry-run || echo --confirm) || true; \
         echo \"Erase wallet history finished. Remove RUN_ERASE_WALLET_HISTORY after this deploy.\"; \
     fi; \
+    if [ \"$RUN_FIX_ACTIVATION_AND_COMMISSIONS\" = \"dry-run\" ] || [ \"$RUN_FIX_ACTIVATION_AND_COMMISSIONS\" = \"run\" ]; then \
+        echo \"Running fix_activation_and_commissions ($RUN_FIX_ACTIVATION_AND_COMMISSIONS)...\"; \
+        python manage.py fix_activation_and_commissions $([ \"$RUN_FIX_ACTIVATION_AND_COMMISSIONS\" = \"dry-run\" ] && echo --dry-run) || true; \
+        echo \"fix_activation_and_commissions finished. Remove RUN_FIX_ACTIVATION_AND_COMMISSIONS after this deploy.\"; \
+    fi; \
     gunicorn ev_backend.wsgi:application \
         --bind 0.0.0.0:8000 \
         --workers 1 \
