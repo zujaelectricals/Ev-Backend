@@ -31,6 +31,65 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             return BinaryNode.objects.all()
         return BinaryNode.objects.filter(user=user)
     
+    def _get_tree_user_ids(self, owner_user):
+        """Return the set of user_ids belonging to ``owner_user``'s binary tree.
+
+        Uses a single recursive CTE rooted at the owner's BinaryNode, so this is
+        one DB round-trip regardless of tree size. Returns an empty set if the
+        owner has no BinaryNode yet (mirroring the original ``_is_tree_owner``
+        early-return). Used by ``tree_structure`` to evaluate
+        "is candidate user inside my tree?" for many candidates without doing a
+        per-candidate query.
+        """
+        try:
+            owner_node = BinaryNode.objects.only('id').get(user=owner_user)
+        except BinaryNode.DoesNotExist:
+            return set()
+
+        from django.db import connection
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    WITH RECURSIVE tree AS (
+                        SELECT id, user_id, parent_id, 0 AS depth
+                        FROM binary_nodes WHERE id = %s
+                        UNION ALL
+                        SELECT bn.id, bn.user_id, bn.parent_id, t.depth + 1
+                        FROM binary_nodes bn
+                        INNER JOIN tree t ON bn.parent_id = t.id
+                        WHERE t.depth < 100
+                    )
+                    SELECT user_id FROM tree
+                    """,
+                    [owner_node.id],
+                )
+                return {row[0] for row in cursor.fetchall() if row[0] is not None}
+        except Exception as exc:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"CTE query failed in _get_tree_user_ids, using fallback: {exc}"
+            )
+            tree_user_ids = {owner_node.id and getattr(owner_user, 'id', None)}
+            frontier = [owner_node.id]
+            depth = 0
+            while frontier and depth < 100:
+                children = list(
+                    BinaryNode.objects.filter(parent_id__in=frontier)
+                    .values_list('id', 'user_id')
+                )
+                if not children:
+                    break
+                frontier = [cid for cid, _uid in children]
+                for _cid, uid in children:
+                    if uid is not None:
+                        tree_user_ids.add(uid)
+                depth += 1
+            tree_user_ids.discard(None)
+            return tree_user_ids
+
     def _is_tree_owner(self, user, node):
         """Check if user owns the tree containing this node"""
         try:
@@ -445,41 +504,48 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
             bookings__referred_by=referrer
         )
         
-        # Combine both sets
-        all_referred_users = (referred_users | booking_users).distinct()
-        
+        # Materialize once: we use this list both for pending_users and (optionally)
+        # for the direct_referrals_only filter below. Avoids re-evaluating the
+        # UNION queryset twice.
+        all_referred_users = list((referred_users | booking_users).distinct())
+
+        # ------------------------------------------------------------------
+        # Build pending_users WITHOUT per-user DB queries (was the N+1 hotspot).
+        #
+        # Old behaviour (per user):
+        #   - SELECT BinaryNode WHERE user=user                    (1 query)
+        #   - _is_tree_owner: SELECT owner BinaryNode + recursive CTE walk
+        #                                                          (2 queries)
+        # For users with hundreds of referrals this turned into >1000 queries
+        # per request. We now do it in three fixed queries regardless of N.
+        # ------------------------------------------------------------------
+        # Step 1: filter out the referrer themselves and the referrer's own parent
+        # entirely in Python; these can never be placed under the referrer.
+        candidate_users = [
+            u for u in all_referred_users
+            if u.id != referrer.id
+            and (not referrer.referred_by_id or referrer.referred_by_id != u.id)
+        ]
+        candidate_user_ids = [u.id for u in candidate_users]
+
+        # Step 2: one batched lookup of all candidate binary nodes
+        candidate_nodes_by_user_id = {}
+        if candidate_user_ids:
+            candidate_nodes_by_user_id = {
+                bn.user_id: bn
+                for bn in BinaryNode.objects.filter(
+                    user_id__in=candidate_user_ids
+                ).only('id', 'user_id', 'parent_id', 'side')
+            }
+
+        # Step 3: one recursive CTE that returns every user_id inside the
+        # referrer's binary tree (or empty set if the referrer has no node yet).
+        tree_user_ids = self._get_tree_user_ids(referrer)
+
         pending_users = []
-        for user in all_referred_users:
-            # Skip if user is the referrer themselves
-            if user.id == referrer.id:
-                continue
-            
-            # Check if user is the referrer's parent (via User.referred_by)
-            # This check works regardless of whether BinaryNodes exist
-            # A parent cannot be placed as a child of their own child
-            if referrer.referred_by and referrer.referred_by.id == user.id:
-                continue
-            
-            try:
-                # Use select_related to prefetch parent relationship
-                # This helps with the fallback case in _is_tree_owner
-                user_node = BinaryNode.objects.select_related('parent').get(user=user)
-                # Check if user is in referrer's tree
-                is_in_tree = self._is_tree_owner(referrer, user_node)
-                if not is_in_tree:
-                    pending_users.append({
-                        'user_id': user.id,
-                        'user_email': user.email,
-                        'user_username': user.username,
-                        'user_full_name': user.get_full_name(),
-                        'has_node': True,
-                        'node_id': user_node.id,
-                        'in_tree': False
-                    })
-                # If in tree, don't include (already placed)
-            except BinaryNode.DoesNotExist:
-                # User doesn't have a node yet
-                # Parent check already done above, so safe to add to pending
+        for user in candidate_users:
+            user_node = candidate_nodes_by_user_id.get(user.id)
+            if user_node is None:
                 pending_users.append({
                     'user_id': user.id,
                     'user_email': user.email,
@@ -489,16 +555,27 @@ class BinaryNodeViewSet(viewsets.ReadOnlyModelViewSet):
                     'node_id': None,
                     'in_tree': False
                 })
-        
+            elif user.id not in tree_user_ids:
+                pending_users.append({
+                    'user_id': user.id,
+                    'user_email': user.email,
+                    'user_username': user.username,
+                    'user_full_name': user.get_full_name(),
+                    'has_node': True,
+                    'node_id': user_node.id,
+                    'in_tree': False
+                })
+            # else: user is already inside the referrer's tree -> not pending
+
         # Check for search parameter
         search_query = request.query_params.get('search', '').strip()
-        
+
         # Direct referrals only filter: when enabled, tree shows only direct referrals as children
         direct_referrals_only_param = request.query_params.get('direct_referrals_only', '').strip().lower()
         direct_referrals_only = direct_referrals_only_param in ('true', '1', 'yes')
         direct_referral_user_ids = set()
         if direct_referrals_only:
-            direct_referral_user_ids = set(all_referred_users.values_list('id', flat=True))
+            direct_referral_user_ids = {u.id for u in all_referred_users}
         
         # Build serializer context (request + optional direct-referrals filter)
         serializer_context = {'request': request}
