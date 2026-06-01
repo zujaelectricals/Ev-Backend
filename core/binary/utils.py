@@ -1028,45 +1028,44 @@ def get_remaining_unmatched_counts(node, pairs_today):
     Returns:
         tuple: (left_remaining, right_remaining)
     """
-    # Check if binary commission is activated
     if not node.binary_commission_activated:
         return (0, 0)
-    
+
     if not node.activation_timestamp:
         return (0, 0)
-    
-    # Get all pairs for this user (not just today, to get all matched users)
-    pairs = BinaryPair.objects.filter(user=node.user)
-    
-    # Extract all left_user and right_user IDs that have been matched
+
+    # All pair partner ids in one query (no per-row Python ORM materialization).
     matched_user_ids = set()
-    for pair in pairs:
-        if pair.left_user:
-            matched_user_ids.add(pair.left_user.id)
-        if pair.right_user:
-            matched_user_ids.add(pair.right_user.id)
-    
-    # Get all descendant nodes on each side (all tree children)
+    for left_uid, right_uid in BinaryPair.objects.filter(user=node.user).values_list(
+        'left_user_id', 'right_user_id'
+    ):
+        if left_uid:
+            matched_user_ids.add(left_uid)
+        if right_uid:
+            matched_user_ids.add(right_uid)
+
+    # All descendants on each side via recursive CTE (two queries each, not N).
     left_descendants = get_all_descendant_nodes(node, 'left')
     right_descendants = get_all_descendant_nodes(node, 'right')
 
-    # Eligible for binary pairing: tree children with activation payment, not matched.
-    # Activation members (first N direct referrals) are included in the pair pool.
-    left_post_activation = [
-        n for n in left_descendants
-        if n.user.id not in matched_user_ids
-        and has_activation_payment(n.user)
+    # Activation status for every unmatched descendant in ONE batched query
+    # (was previously one query per descendant via has_activation_payment()).
+    candidate_user_ids = [
+        n.user_id for n in left_descendants + right_descendants
+        if n.user_id and n.user_id not in matched_user_ids
     ]
-    right_post_activation = [
-        n for n in right_descendants
-        if n.user.id not in matched_user_ids
-        and has_activation_payment(n.user)
-    ]
+    activation_map = has_activation_payment_bulk(candidate_user_ids)
 
-    # Count remaining unmatched eligible members on each side
-    left_unmatched_count = len(left_post_activation)
-    right_unmatched_count = len(right_post_activation)
-    
+    left_unmatched_count = sum(
+        1 for n in left_descendants
+        if n.user_id and n.user_id not in matched_user_ids
+        and activation_map.get(n.user_id, False)
+    )
+    right_unmatched_count = sum(
+        1 for n in right_descendants
+        if n.user_id and n.user_id not in matched_user_ids
+        and activation_map.get(n.user_id, False)
+    )
     return left_unmatched_count, right_unmatched_count
 
 
@@ -1103,27 +1102,40 @@ def get_remaining_unmatched_counts_for_display(node):
     ).count()
     if count_on_last_day < daily_limit:
         return (left_remaining, right_remaining)
-    # Weak leg = new only; long leg = full carry-forward
-    pairs = BinaryPair.objects.filter(user=node.user)
+    # Weak leg = new only; long leg = full carry-forward.
+    # Batched pair-partner lookup (one query for ids, no per-row Python ORM hydration).
     matched_user_ids = set()
-    for pair in pairs:
-        if pair.left_user:
-            matched_user_ids.add(pair.left_user.id)
-        if pair.right_user:
-            matched_user_ids.add(pair.right_user.id)
-    left_descendants = get_all_descendant_nodes(node, 'left')
-    right_descendants = get_all_descendant_nodes(node, 'right')
+    for left_uid, right_uid in BinaryPair.objects.filter(user=node.user).values_list(
+        'left_user_id', 'right_user_id'
+    ):
+        if left_uid:
+            matched_user_ids.add(left_uid)
+        if right_uid:
+            matched_user_ids.add(right_uid)
+
     long_side, short_side, _, _ = get_long_short_legs(left_remaining, right_remaining)
     if short_side is None:
         return (left_remaining, right_remaining)
-    # Only compute activation dates for the short leg (the long leg returns full count).
+
+    # Descendants per side via CTE (two queries each, not N), plus a single
+    # batched activation-payment check covering both sides at once.
+    left_descendants = get_all_descendant_nodes(node, 'left')
+    right_descendants = get_all_descendant_nodes(node, 'right')
+    candidate_user_ids = [
+        n.user_id for n in left_descendants + right_descendants
+        if n.user_id and n.user_id not in matched_user_ids
+    ]
+    activation_map = has_activation_payment_bulk(candidate_user_ids)
+
     left_unmatched = [
         n for n in left_descendants
-        if n.user.id not in matched_user_ids and has_activation_payment(n.user)
+        if n.user_id and n.user_id not in matched_user_ids
+        and activation_map.get(n.user_id, False)
     ]
     right_unmatched = [
         n for n in right_descendants
-        if n.user.id not in matched_user_ids and has_activation_payment(n.user)
+        if n.user_id and n.user_id not in matched_user_ids
+        and activation_map.get(n.user_id, False)
     ]
     if short_side == 'left':
         user_ids = [n.user.id for n in left_unmatched]
@@ -1196,27 +1208,103 @@ def get_active_carry_forward(user, short_side, date=None):
 
 
 def get_all_descendant_nodes(node, side):
+    """Get every descendant BinaryNode on the given side of ``node``.
+
+    Same return shape as before (list of BinaryNode with ``user`` and related
+    relations prefetched) but implemented with one recursive CTE plus one batched
+    ORM fetch, so it is a constant number of DB round-trips regardless of
+    subtree size. The previous implementation issued one COUNT/SELECT per node
+    visited, which produced thousands of queries inside endpoints like
+    ``tree_structure`` for users with large downlines.
     """
-    Get all descendant BinaryNode objects on a specific side recursively
-    
-    Args:
-        node: BinaryNode to start from
-        side: 'left' or 'right'
-    
-    Returns:
-        list: List of all descendant BinaryNode objects on the specified side
+    if side not in ('left', 'right'):
+        return []
+
+    from django.db import connection
+
+    descendant_ids = []
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH RECURSIVE subtree AS (
+                    SELECT id
+                    FROM binary_nodes
+                    WHERE parent_id = %s AND side = %s
+                    UNION ALL
+                    SELECT bn.id
+                    FROM binary_nodes bn
+                    INNER JOIN subtree s ON bn.parent_id = s.id
+                )
+                SELECT id FROM subtree
+                """,
+                [node.id, side],
+            )
+            descendant_ids = [row[0] for row in cursor.fetchall()]
+    except Exception as exc:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"CTE query failed in get_all_descendant_nodes, using bounded BFS fallback: {exc}"
+        )
+        frontier = list(
+            BinaryNode.objects.filter(parent_id=node.id, side=side).values_list('id', flat=True)
+        )
+        descendant_ids.extend(frontier)
+        depth = 0
+        while frontier and depth < 100:
+            next_frontier = list(
+                BinaryNode.objects.filter(parent_id__in=frontier).values_list('id', flat=True)
+            )
+            if not next_frontier:
+                break
+            descendant_ids.extend(next_frontier)
+            frontier = next_frontier
+            depth += 1
+
+    if not descendant_ids:
+        return []
+
+    return list(
+        BinaryNode.objects
+        .filter(id__in=descendant_ids)
+        .select_related('user', 'user__wallet', 'user__referred_by', 'parent', 'parent__user')
+    )
+
+
+def has_activation_payment_bulk(user_ids):
+    """Return ``{user_id: bool}`` indicating activation-payment status for many users in ONE query.
+
+    Equivalent to calling ``has_activation_payment(user)`` for every user, but
+    aggregated server-side so the total cost is one ``SUM ... GROUP BY user``
+    query plus the PlatformSettings lookup, instead of one query per user.
     """
-    descendants = []
-    # Get direct children on this side
-    direct_children = BinaryNode.objects.filter(parent=node, side=side).select_related('user')
-    descendants.extend(direct_children)
-    
-    # Recursively get descendants of each direct child
-    for child in direct_children:
-        descendants.extend(get_all_descendant_nodes(child, 'left'))
-        descendants.extend(get_all_descendant_nodes(child, 'right'))
-    
-    return descendants
+    if not user_ids:
+        return {}
+
+    from core.booking.models import Payment
+    from django.db.models import Sum
+    from decimal import Decimal
+
+    platform_settings = PlatformSettings.get_settings()
+    activation_amount = platform_settings.activation_amount
+
+    rows = (
+        Payment.objects
+        .filter(
+            booking__user_id__in=list(user_ids),
+            booking__status__in=['active', 'completed'],
+            status='completed',
+        )
+        .values('booking__user_id')
+        .annotate(total=Sum('amount'))
+    )
+    totals = {row['booking__user_id']: (row['total'] or Decimal('0')) for row in rows}
+
+    if activation_amount == 0:
+        return {uid: (totals.get(uid, Decimal('0')) > 0) for uid in user_ids}
+
+    return {uid: (totals.get(uid, Decimal('0')) >= activation_amount) for uid in user_ids}
 
 
 def get_unmatched_users_for_pairing(node, weak_side=None, weak_side_cutoff=None, active_buyer_cutoff=None):
