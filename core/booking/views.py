@@ -9,6 +9,7 @@ from django.utils import timezone
 from django.db.models import Q
 from django.db import transaction
 from decimal import Decimal
+from datetime import timedelta
 import logging
 from core.users.models import User
 from core.settings.models import PlatformSettings
@@ -221,6 +222,23 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {'error': 'Amount exceeds remaining amount'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
+        
+        # Online/Razorpay: reuse a fresh pending row so retries don't stack orphan pendings.
+        # Gateway confirmation still creates/completes via _process_booking_payment.
+        if payment_method == 'online':
+            reuse_cutoff = timezone.now() - timedelta(minutes=30)
+            existing_payment = Payment.objects.filter(
+                booking=booking,
+                user=request.user,
+                payment_method='online',
+                status='pending',
+                transaction_id__isnull=True,
+                amount=amount,
+                payment_date__gte=reuse_cutoff,
+            ).order_by('-payment_date').first()
+            if existing_payment:
+                serializer = PaymentSerializer(existing_payment)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
         
         # Create payment record with status='pending' (not automatically completed)
         payment = Payment.objects.create(

@@ -96,6 +96,31 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
                 del data[field]
         
         return data
+
+    def _get_tree_display_batch_data(self, obj):
+        """Batch aggregate data for the visible tree nodes in tree_structure.
+
+        The tree_structure view intentionally renders only the root node and its
+        direct left/right children. The aggregate serializer fields below
+        (bookings, pairs, referrals, wallet totals, etc.) used to run separate
+        queries per visible node. Cache one batched aggregate payload in the
+        shared serializer context and reuse it from nested child serializers.
+        """
+        cache_key = '_tree_display_batch_data'
+        if cache_key in self.context:
+            return self.context[cache_key]
+
+        nodes = [obj]
+        if hasattr(obj, 'left_children_list'):
+            nodes.extend(obj.left_children_list)
+        if hasattr(obj, 'right_children_list'):
+            nodes.extend(obj.right_children_list)
+
+        user_ids = [node.user_id for node in nodes if node.user_id]
+        node_ids = [node.id for node in nodes if node.id]
+        batch_data = self._batch_query_user_data(user_ids, node_ids)
+        self.context[cache_key] = batch_data
+        return batch_data
     
     def get_user_full_name(self, obj):
         """Get user's full name"""
@@ -215,6 +240,10 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_wallet_balance(self, obj):
         """Get user's wallet balance excluding referral bonuses and TDS/extra deductions (these are deducted from booking, not wallet)"""
+        if obj.user_id:
+            batch_data = self._get_tree_display_batch_data(obj)
+            return batch_data['wallet_balances'].get(obj.user_id, "0.00")
+
         if obj.user and hasattr(obj.user, 'wallet'):
             from core.wallet.models import WalletTransaction
             from decimal import Decimal
@@ -236,6 +265,10 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_total_bookings(self, obj):
         """Get total number of bookings for user"""
+        if obj.user_id:
+            batch_data = self._get_tree_display_batch_data(obj)
+            return batch_data['bookings_count'].get(obj.user_id, 0)
+
         if obj.user:
             from core.booking.models import Booking
             return Booking.objects.filter(user=obj.user).count()
@@ -243,6 +276,10 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_total_binary_pairs(self, obj):
         """Get total number of binary pairs for user"""
+        if obj.user_id:
+            batch_data = self._get_tree_display_batch_data(obj)
+            return batch_data['binary_pairs_count'].get(obj.user_id, 0)
+
         if obj.user:
             from .models import BinaryPair
             return BinaryPair.objects.filter(user=obj.user).count()
@@ -256,6 +293,10 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_total_referrals(self, obj):
         """Get total number of referrals (users who used this user's referral code)"""
+        if obj.user_id:
+            batch_data = self._get_tree_display_batch_data(obj)
+            return batch_data['referrals_count'].get(obj.user_id, 0)
+
         if obj.user:
             # Count users who have referred_by = this user
             # Also count users who have bookings with this user as referrer
@@ -281,6 +322,10 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_total_amount(self, obj):
         """Get total amount (gross) from all binary earnings and direct user commissions"""
+        if obj.user_id:
+            batch_data = self._get_tree_display_batch_data(obj)
+            return batch_data['total_amount'].get(obj.user_id, "0.00")
+
         if obj.user:
             from core.wallet.models import WalletTransaction
             from decimal import Decimal
@@ -318,6 +363,10 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_tds_current(self, obj):
         """Get total TDS deducted from wallet transactions (for both binary pairs and direct user commissions)"""
+        if obj.user_id:
+            batch_data = self._get_tree_display_batch_data(obj)
+            return batch_data['tds_current'].get(obj.user_id, "0.00")
+
         if obj.user:
             from core.wallet.models import WalletTransaction
             # TDS_DEDUCTION transactions have negative amounts, so we sum absolute values
@@ -335,6 +384,10 @@ class BinaryTreeNodeSerializer(serializers.ModelSerializer):
     
     def get_net_amount_total(self, obj):
         """Get total net amount from all binary earnings and direct user commissions"""
+        if obj.user_id:
+            batch_data = self._get_tree_display_batch_data(obj)
+            return batch_data['net_amount_total'].get(obj.user_id, "0.00")
+
         if obj.user:
             # Use the helper method which includes BINARY_INITIAL_BONUS
             return self._get_net_amount_total(obj.user)

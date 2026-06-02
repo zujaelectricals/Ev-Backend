@@ -370,38 +370,78 @@ def _process_booking_payment(razorpay_payment):
             notes_parts.append(f'Payment ID: {razorpay_payment.payment_id}')
         notes = ' | '.join(notes_parts)
         
-        # CRITICAL: Use get_or_create with transaction_id AND booking as lookup
-        # This is atomic at the database level and prevents race conditions
-        # The transaction_id (order_id) is always available and consistent
-        # Including booking in the lookup ensures we're checking the right booking's payment
+        # Resolve BookingPayment: idempotent by order_id, promote pending kickoff row, or create.
+        booking_payment = None
+        created = False
         try:
-            booking_payment, created = BookingPayment.objects.get_or_create(
+            booking_payment = BookingPayment.objects.select_for_update().filter(
                 transaction_id=transaction_id,
-                booking=booking,  # Also check by booking to ensure we're checking the right booking
-                defaults={
-                    'user': booking.user,
-                    'amount': amount_rupees,
-                    'payment_method': 'online',
-                    'status': 'completed',
-                    'notes': notes,
-                }
-            )
-            
-            # If payment already exists (created=False), it means another process already processed it
-            if not created:
+                booking=booking,
+            ).first()
+
+            if booking_payment:
+                created = False
                 logger.info(
                     f"Booking payment already exists for Razorpay payment {razorpay_payment.order_id} "
                     f"(BookingPayment ID: {booking_payment.id}, transaction_id: {booking_payment.transaction_id}). "
                     f"Skipping duplicate payment processing, but will check for receipt and email."
                 )
-                # Don't return early - continue to check for receipt generation and email sending
-                # This ensures receipt and email are sent even if payment was already created
-                
-            # Payment was just created (created=True), proceed to update booking
-            logger.info(
-                f"Created new BookingPayment {booking_payment.id} for order {razorpay_payment.order_id} "
-                f"with transaction_id {transaction_id}"
-            )
+            else:
+                pending_candidate = (
+                    BookingPayment.objects.select_for_update()
+                    .filter(
+                        booking=booking,
+                        user=booking.user,
+                        payment_method='online',
+                        status='pending',
+                        transaction_id__isnull=True,
+                        amount=amount_rupees,
+                    )
+                    .order_by('-payment_date')
+                    .first()
+                )
+                if pending_candidate:
+                    pending_candidate.transaction_id = transaction_id
+                    pending_candidate.status = 'completed'
+                    pending_candidate.notes = notes
+                    pending_candidate.completed_at = timezone.now()
+                    pending_candidate.save(
+                        update_fields=[
+                            'transaction_id',
+                            'status',
+                            'notes',
+                            'completed_at',
+                        ]
+                    )
+                    booking_payment = pending_candidate
+                    created = True
+                    logger.info(
+                        f"Promoted pending BookingPayment {booking_payment.id} to completed "
+                        f"for order {razorpay_payment.order_id} (transaction_id: {transaction_id})"
+                    )
+                else:
+                    booking_payment, created = BookingPayment.objects.get_or_create(
+                        transaction_id=transaction_id,
+                        booking=booking,
+                        defaults={
+                            'user': booking.user,
+                            'amount': amount_rupees,
+                            'payment_method': 'online',
+                            'status': 'completed',
+                            'notes': notes,
+                        },
+                    )
+                    if not created:
+                        logger.info(
+                            f"Booking payment already exists for Razorpay payment {razorpay_payment.order_id} "
+                            f"(BookingPayment ID: {booking_payment.id}, transaction_id: {booking_payment.transaction_id}). "
+                            f"Skipping duplicate payment processing, but will check for receipt and email."
+                        )
+                    else:
+                        logger.info(
+                            f"Created new BookingPayment {booking_payment.id} for order {razorpay_payment.order_id} "
+                            f"with transaction_id {transaction_id}"
+                        )
         except IntegrityError as e:
             # Handle race condition where another process created the payment between our check and create
             # This should be rare since get_or_create is atomic, but can happen in extreme concurrency
